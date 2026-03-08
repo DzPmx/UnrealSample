@@ -1,0 +1,21 @@
+# Unreal 自动生成的目录
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+# Visual Studio / Rider 等工程文件
+.vs/
+.vscode/
+.idea/
+# 备份 / 崩溃
+*.suo
+*.user
+*.userprefs
+*.opensdf
+*.sdf
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+# 系统、编辑器缓存
+.DS_Store
+Thumbs.db
