@@ -1,14 +1,5 @@
-#include "ArtResourceToolsBPLibrary.h"
-
-// GENERATED_UCLASS_BODY() declares this constructor; it must be defined in ALL
-// build configurations (the generated reflection code references it even when
-// WITH_EDITOR is 0), otherwise packaged/game builds fail to link.
-UArtResourceToolsBPLibrary::UArtResourceToolsBPLibrary(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
-{
-}
-
 #if WITH_EDITOR
+#include "ArtResourceToolsBPLibrary.h"
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
@@ -26,9 +17,14 @@ UArtResourceToolsBPLibrary::UArtResourceToolsBPLibrary(const FObjectInitializer&
 DEFINE_LOG_CATEGORY_STATIC(ArResourceProcessor, Log, All);
 using namespace UE::Geometry;
 
+UArtResourceToolsBPLibrary::UArtResourceToolsBPLibrary(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+{
+}
+
 static TArray<FVector3d> BuildIcosphereDirections(int32 Subdivisions)
 {
-	// Golden-ratio icosahedron base vertices
+	
 	const double T = (1.0 + FMath::Sqrt(5.0)) / 2.0;
 
 	TArray<FVector3d> Verts =
@@ -58,7 +54,6 @@ static TArray<FVector3d> BuildIcosphereDirections(int32 Subdivisions)
 
 		auto GetMid = [&](int32 A, int32 B) -> int32
 		{
-			// Pack edge key (order-independent)
 			uint64 Key = (A < B) ? ((uint64)A << 32 | (uint32)B)
 			                     : ((uint64)B << 32 | (uint32)A);
 			if (int32* Cached = EdgeMidCache.Find(Key))
@@ -85,7 +80,7 @@ static TArray<FVector3d> BuildIcosphereDirections(int32 Subdivisions)
 		Faces = MoveTemp(NewFaces);
 	}
 
-	return Verts; // Each vertex is a unit-length direction
+	return Verts; 
 }
 
 
@@ -126,59 +121,43 @@ static FDynamicMesh3 BuildWrapMesh(const FDynamicMesh3& OrigMesh,
                                     int32 SmoothIterations,
                                     int32 VoxelCount)
 {
-	// Make a mutable copy because FDynamicMeshAABBTree3 wants a non-const ptr.
 	FDynamicMesh3 SourceCopy(OrigMesh);
-
-	// Voxel grid bounds = source bounds expanded by WrapOffset on every side
-	// so the produced envelope can extend beyond the original silhouette.
+	
 	FAxisAlignedBox3d Bounds = SourceCopy.GetBounds(true);
 	const double Pad = FMath::Max((double)WrapOffset * 2.0, 1.0);
 	Bounds.Expand(Pad);
 
 	const int32  SafeVoxels = FMath::Max(VoxelCount, 8);
 	const double CellSize   = Bounds.MaxDim() / (double)SafeVoxels;
-
-	// Band width = how far from any triangle a voxel is still "inside".
-	// This is the dilation distance (≈ Blender's Extrude(0.5) + voxel size).
-	// We make sure it spans at least ~1.5 voxel cells so neighbouring cards
-	// fuse into one connected envelope after marching cubes.
+	
 	const double Band = FMath::Max((double)WrapOffset, CellSize * 1.5);
-
-	// Spatial tree on the original cards
+	
 	FDynamicMeshAABBTree3 SourceTree(&SourceCopy, /*bAutoBuild=*/true);
 
 	IMeshSpatial::FQueryOptions QOpts;
 	QOpts.MaxDistance = Band * 2.0; // early-out for cells far outside the band
-
-	// ------------------ Marching cubes -------------------------------------
+	
 	FMarchingCubes MC;
 	MC.Bounds   = Bounds;
 	MC.CubeSize = CellSize;
 	MC.IsoValue = 0.0;
 	MC.RootMode = ERootfindingModes::LerpSteps;
 	MC.RootModeSteps = 3;
-
-	// Implicit scalar field: signed distance to the band surface.
-	//   < 0  →  inside the dilated mesh (within `Band` of any triangle)
-	//   > 0  →  outside
-	// Marching cubes extracts the iso-surface at f == 0, i.e. the outer
-	// surface of the dilated mesh.  This is the "wrap mesh".
+	
 	MC.Implicit = [&SourceTree, &QOpts, Band](const FVector3d& P) -> double
 	{
 		double NearDistSq = TNumericLimits<double>::Max();
 		const int32 TID = SourceTree.FindNearestTriangle(P, NearDistSq, QOpts);
 		if (TID == IndexConstants::InvalidID)
 		{
-			// No triangle within MaxDistance → definitely outside the band
 			return Band;
 		}
 		return FMath::Sqrt(NearDistSq) - Band;
 	};
 
 	MC.Generate();
-	MC.Implicit = nullptr; // release the lambda capture before SourceTree dies
-
-	// ------------------ Build FDynamicMesh3 from MC output -----------------
+	MC.Implicit = nullptr; 
+	
 	FDynamicMesh3 Wrap;
 	Wrap.EnableTriangleGroups();
 	for (const FVector3d& V : MC.Vertices)
@@ -200,9 +179,7 @@ static FDynamicMesh3 BuildWrapMesh(const FDynamicMesh3& OrigMesh,
 		return SourceCopy;
 	}
 
-	// Final smoothing (Blender SMOOTH modifier, default 25 iterations)
 	LaplacianSmooth(Wrap, SmoothIterations);
-
 	return Wrap;
 }
 
@@ -240,13 +217,10 @@ static double RaycastAllDirections(const TMeshAABBTree3<FDynamicMesh3>& Tree,
 
 		FVector3d HitPos = Ray.PointAt(Intr.RayParameter);
 		double Dist      = (HitPos - Origin).Length();
-
-		// Sign: dot(ray_dir, face_normal) < 0  =>  front-face hit => positive (outside)
-		//       dot > 0                         =>  back-face hit  => negative (inside)
+		
 		FVector3d FaceNormal = VectorUtil::NormalDirection(V0, V1, V2);
 		double    DotVal     = Dir.Dot(FaceNormal);
-		double    SignedDist = FMath::Sign(DotVal) * Dist; // positive outside, negative inside
-		// Negate to match Blender convention: copysign(dist, -dot(dir, normal))
+		double    SignedDist = FMath::Sign(DotVal) * Dist; 
 		SignedDist = -SignedDist;
 
 		if (!bOutHit || FMath::Abs(SignedDist) < FMath::Abs(BestSignDist))
@@ -319,9 +293,7 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 		SignDists.SetNumZeroed(MaxVID);
 		TArray<bool> VertHit;
 		VertHit.Init(false, MaxVID);
-
-		// Per-vertex raycasting is the expensive part; run it in parallel.
-		// The AABB tree is read-only once built, so concurrent queries are safe.
+		
 		ParallelFor(MaxVID, [&](int32 VID)
 		{
 			if (!OrigDynMesh.IsVertex(VID))
@@ -359,7 +331,6 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 			continue;
 		}
 		
-		// Neutral AO value for vertices that no ray ever hit (treat as unoccluded).
 		const double NeutralAO = bInvertAO ? 1.0 : 0.0;
 		const double SafePower = FMath::Max((double)AOPower, 0.01);
 		for (int32 VID = 0; VID < MaxVID; ++VID)
@@ -472,18 +443,9 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 			Converter.Convert(MeshDesc, OrigDynMesh);
 		}
 		const int32 MaxVID = OrigDynMesh.MaxVertexID();
-
-		// Build the smoothed wrap envelope (Mesh->Volume->Mesh + Smooth).
+		
 		FDynamicMesh3 WrapDynMesh = BuildWrapMesh(OrigDynMesh, WrapOffset, SmoothIterations, VoxelCount);
-
-		// IMPORTANT: Marching-cubes triangle winding is table-driven and can come
-		// out inward-facing, which would flip every transferred normal. Use the
-		// signed volume as a deterministic orientation reference: a positive
-		// volume means the winding (and therefore FMeshNormals) points outward.
-		// If it's negative we reverse the mesh so normals face outward.
-		// NOTE: no coordinate-space conversion is needed here — UE static meshes
-		// and FDynamicMesh3 share the same local space (left-handed, Z-up); the
-		// only thing that matters is consistent outward orientation.
+		
 		const double SignedVolume = TMeshQueries<FDynamicMesh3>::GetVolumeNonWatertight(WrapDynMesh, 1.0);
 		if (SignedVolume < 0.0)
 		{
@@ -499,9 +461,7 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 		const TArray<FVector3d>& WrapNormalArr = WrapNormals.GetNormals();
 
 		TMeshAABBTree3<FDynamicMesh3> AABBTree(&WrapDynMesh, /*bBuild=*/true);
-
-		// For every original vertex, find the nearest point on the wrap mesh and
-		// barycentrically interpolate the wrap's soft normal there.
+		
 		TArray<FVector3f> TransferredNormals;
 		TransferredNormals.Init(FVector3f::ZeroVector, MaxVID);
 		TArray<bool> VertHit;
@@ -571,7 +531,6 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 				}
 			}
 		}
-
 		// Keep our custom normals: don't let the build recompute them, but do
 		// recompute tangents so the tangent basis stays consistent.
 		FStaticMeshSourceModel& SrcModel = StaticMesh->GetSourceModel(LODIndex);
