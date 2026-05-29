@@ -20,6 +20,8 @@ UArtResourceToolsBPLibrary::UArtResourceToolsBPLibrary(const FObjectInitializer&
 #include "Intersection/IntrRay3Triangle3.h"
 #include "Generators/MarchingCubes.h"
 #include "Async/ParallelFor.h"
+#include "Distance/DistPoint3Triangle3.h"
+#include "MeshQueries.h"
 
 DEFINE_LOG_CATEGORY_STATIC(ArResourceProcessor, Log, All);
 using namespace UE::Geometry;
@@ -423,6 +425,177 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 
 	UE_LOG(ArResourceProcessor, Log,
 		TEXT("BakeSDFAOToVertexColorAlpha: Done. Wrote AO to vertex color Alpha on '%s' (%d/%d LODs)."),
+		*StaticMesh->GetName(), SuccessLODCount, NumLODs);
+}
+
+void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh, float WrapOffset,
+	int32 SmoothIterations, int32 VoxelCount)
+{
+	if (!IsValid(StaticMesh))
+	{
+		UE_LOG(ArResourceProcessor, Warning, TEXT("TransferWrapMeshNormals: StaticMesh is null."));
+		return;
+	}
+
+	const int32 NumLODs = StaticMesh->GetNumSourceModels();
+	if (NumLODs <= 0)
+	{
+		UE_LOG(ArResourceProcessor, Warning,
+			TEXT("TransferWrapMeshNormals: '%s' has no source models."), *StaticMesh->GetName());
+		return;
+	}
+
+	UE_LOG(ArResourceProcessor, Log,
+		TEXT("TransferWrapMeshNormals: Starting on '%s' (NumLODs=%d, WrapOffset=%.3f, SmoothIter=%d, VoxelCount=%d)"),
+		*StaticMesh->GetName(), NumLODs, WrapOffset, SmoothIterations, VoxelCount);
+
+	StaticMesh->Modify();
+
+	int32 SuccessLODCount = 0;
+
+	for (int32 LODIndex = 0; LODIndex < NumLODs; ++LODIndex)
+	{
+		FMeshDescription* MeshDesc = StaticMesh->GetMeshDescription(LODIndex);
+		if (!MeshDesc)
+		{
+			UE_LOG(ArResourceProcessor, Warning,
+				TEXT("  -> Skipping LOD%d on '%s': no MeshDescription."),
+				LODIndex, *StaticMesh->GetName());
+			continue;
+		}
+
+		UE_LOG(ArResourceProcessor, Log, TEXT("  -> Processing LOD%d ..."), LODIndex);
+
+		FDynamicMesh3 OrigDynMesh;
+		{
+			FMeshDescriptionToDynamicMesh Converter;
+			Converter.Convert(MeshDesc, OrigDynMesh);
+		}
+		const int32 MaxVID = OrigDynMesh.MaxVertexID();
+
+		// Build the smoothed wrap envelope (Mesh->Volume->Mesh + Smooth).
+		FDynamicMesh3 WrapDynMesh = BuildWrapMesh(OrigDynMesh, WrapOffset, SmoothIterations, VoxelCount);
+
+		// IMPORTANT: Marching-cubes triangle winding is table-driven and can come
+		// out inward-facing, which would flip every transferred normal. Use the
+		// signed volume as a deterministic orientation reference: a positive
+		// volume means the winding (and therefore FMeshNormals) points outward.
+		// If it's negative we reverse the mesh so normals face outward.
+		// NOTE: no coordinate-space conversion is needed here — UE static meshes
+		// and FDynamicMesh3 share the same local space (left-handed, Z-up); the
+		// only thing that matters is consistent outward orientation.
+		const double SignedVolume = TMeshQueries<FDynamicMesh3>::GetVolumeNonWatertight(WrapDynMesh, 1.0);
+		if (SignedVolume < 0.0)
+		{
+			WrapDynMesh.ReverseOrientation();
+			UE_LOG(ArResourceProcessor, Log,
+				TEXT("  -> LOD%d wrap winding was inward (vol=%.3f) – reversed to face outward."),
+				LODIndex, SignedVolume);
+		}
+
+		// Soft per-vertex normals on the (now outward-oriented) wrap surface.
+		FMeshNormals WrapNormals(&WrapDynMesh);
+		WrapNormals.ComputeVertexNormals();
+		const TArray<FVector3d>& WrapNormalArr = WrapNormals.GetNormals();
+
+		TMeshAABBTree3<FDynamicMesh3> AABBTree(&WrapDynMesh, /*bBuild=*/true);
+
+		// For every original vertex, find the nearest point on the wrap mesh and
+		// barycentrically interpolate the wrap's soft normal there.
+		TArray<FVector3f> TransferredNormals;
+		TransferredNormals.Init(FVector3f::ZeroVector, MaxVID);
+		TArray<bool> VertHit;
+		VertHit.Init(false, MaxVID);
+
+		ParallelFor(MaxVID, [&](int32 VID)
+		{
+			if (!OrigDynMesh.IsVertex(VID))
+			{
+				return;
+			}
+
+			const FVector3d VPos = OrigDynMesh.GetVertex(VID);
+
+			double NearDistSq = TNumericLimits<double>::Max();
+			const int32 TID = AABBTree.FindNearestTriangle(VPos, NearDistSq);
+			if (TID == IndexConstants::InvalidID)
+			{
+				return;
+			}
+
+			const FIndex3i Tri = WrapDynMesh.GetTriangle(TID);
+			const FVector3d V0 = WrapDynMesh.GetVertex(Tri.A);
+			const FVector3d V1 = WrapDynMesh.GetVertex(Tri.B);
+			const FVector3d V2 = WrapDynMesh.GetVertex(Tri.C);
+
+			// Barycentric coords of the closest point on the triangle.
+			FDistPoint3Triangle3d DistQuery(VPos, FTriangle3d(V0, V1, V2));
+			DistQuery.Get();
+			const FVector3d Bary = DistQuery.TriangleBaryCoords;
+
+			FVector3d N = Bary.X * WrapNormalArr[Tri.A]
+			            + Bary.Y * WrapNormalArr[Tri.B]
+			            + Bary.Z * WrapNormalArr[Tri.C];
+			if (!N.Normalize())
+			{
+				// Degenerate interpolation – fall back to the face normal.
+				N = VectorUtil::NormalDirection(V0, V1, V2);
+			}
+
+			TransferredNormals[VID] = (FVector3f)N;
+			VertHit[VID]            = true;
+		});
+
+		{
+			FStaticMeshAttributes Attributes(*MeshDesc);
+			Attributes.Register(/*bKeepExistingAttribute*/ true);
+
+			TVertexInstanceAttributesRef<FVector3f> Normals =
+				Attributes.GetVertexInstanceNormals();
+
+			if (!Normals.IsValid())
+			{
+				UE_LOG(ArResourceProcessor, Warning,
+					TEXT("  -> LOD%d: could not get vertex instance normal attribute – skipping."),
+					LODIndex);
+				continue;
+			}
+
+			for (const FVertexInstanceID& VIID : MeshDesc->VertexInstances().GetElementIDs())
+			{
+				const FVertexID VertID = MeshDesc->GetVertexInstanceVertex(VIID);
+				const int32     VID    = VertID.GetValue();
+				if (VID < MaxVID && VertHit[VID])
+				{
+					Normals[VIID] = TransferredNormals[VID];
+				}
+			}
+		}
+
+		// Keep our custom normals: don't let the build recompute them, but do
+		// recompute tangents so the tangent basis stays consistent.
+		FStaticMeshSourceModel& SrcModel = StaticMesh->GetSourceModel(LODIndex);
+		SrcModel.BuildSettings.bRecomputeNormals  = false;
+		SrcModel.BuildSettings.bRecomputeTangents = true;
+
+		StaticMesh->CommitMeshDescription(LODIndex);
+		++SuccessLODCount;
+
+		UE_LOG(ArResourceProcessor, Log, TEXT("  <- LOD%d done."), LODIndex);
+	}
+
+	if (SuccessLODCount == 0)
+	{
+		UE_LOG(ArResourceProcessor, Warning,
+			TEXT("TransferWrapMeshNormals: no LOD was processed on '%s'."),
+			*StaticMesh->GetName());
+		return;
+	}
+
+	StaticMesh->PostEditChange();
+
+	UE_LOG(ArResourceProcessor, Log,
+		TEXT("TransferWrapMeshNormals: Done. Transferred wrap normals on '%s' (%d/%d LODs)."),
 		*StaticMesh->GetName(), SuccessLODCount, NumLODs);
 }
 
