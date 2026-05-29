@@ -19,3 +19,5 @@ Saved/
 # 系统、编辑器缓存
 .DS_Store
 Thumbs.db
+/Content/Fab/Tree/realistic_tree/StaticMeshes/NewMaterial.uasset
+/Content/Fab/Tree/realistic_tree/StaticMeshes/realistic_tree.uasset

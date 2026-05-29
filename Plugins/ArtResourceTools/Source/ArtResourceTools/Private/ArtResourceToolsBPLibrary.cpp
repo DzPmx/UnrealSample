@@ -1,10 +1,14 @@
-#if WITH_EDITOR
 #include "ArtResourceToolsBPLibrary.h"
+
+// GENERATED_UCLASS_BODY() declares this constructor; it must be defined in ALL
+// build configurations (the generated reflection code references it even when
+// WITH_EDITOR is 0), otherwise packaged/game builds fail to link.
 UArtResourceToolsBPLibrary::UArtResourceToolsBPLibrary(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 }
 
+#if WITH_EDITOR
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
@@ -17,7 +21,7 @@ UArtResourceToolsBPLibrary::UArtResourceToolsBPLibrary(const FObjectInitializer&
 #include "Generators/MarchingCubes.h"
 #include "Async/ParallelFor.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogSDFAOBaker, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(ArResourceProcessor, Log, All);
 using namespace UE::Geometry;
 
 static TArray<FVector3d> BuildIcosphereDirections(int32 Subdivisions)
@@ -186,7 +190,7 @@ static FDynamicMesh3 BuildWrapMesh(const FDynamicMesh3& OrigMesh,
 
 	if (Wrap.TriangleCount() == 0)
 	{
-		UE_LOG(LogSDFAOBaker, Warning,
+		UE_LOG(ArResourceProcessor, Warning,
 			TEXT("BuildWrapMesh: marching cubes produced an empty mesh "
 			     "(VoxelCount=%d, Band=%.3f, BoundsDiag=%.3f). "
 			     "Falling back to the original mesh."),
@@ -258,25 +262,25 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 {
 		if (!IsValid(StaticMesh))
 	{
-		UE_LOG(LogSDFAOBaker, Warning, TEXT("BakeSDFAOToVertexColorAlpha: StaticMesh is null."));
+		UE_LOG(ArResourceProcessor, Warning, TEXT("BakeSDFAOToVertexColorAlpha: StaticMesh is null."));
 		return;
 	}
 
 	const int32 NumLODs = StaticMesh->GetNumSourceModels();
 	if (NumLODs <= 0)
 	{
-		UE_LOG(LogSDFAOBaker, Warning,
+		UE_LOG(ArResourceProcessor, Warning,
 			TEXT("BakeSDFAOToVertexColorAlpha: '%s' has no source models."),
 			*StaticMesh->GetName());
 		return;
 	}
 
-	UE_LOG(LogSDFAOBaker, Log,
+	UE_LOG(ArResourceProcessor, Log,
 		TEXT("BakeSDFAOToVertexColorAlpha: Starting bake on '%s' (NumLODs=%d, WrapOffset=%.3f, SmoothIter=%d, IcoSub=%d, VoxelCount=%d)"),
 		*StaticMesh->GetName(), NumLODs, WrapOffset, SmoothIterations, IcoSubdivisions, VoxelCount);
 
 	const TArray<FVector3d> RayDirs = BuildIcosphereDirections(IcoSubdivisions);
-	UE_LOG(LogSDFAOBaker, Log, TEXT("  Ray directions count: %d"), RayDirs.Num());
+	UE_LOG(ArResourceProcessor, Log, TEXT("  Ray directions count: %d"), RayDirs.Num());
 
 	StaticMesh->Modify();
 
@@ -287,13 +291,13 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 		FMeshDescription* MeshDesc = StaticMesh->GetMeshDescription(LODIndex);
 		if (!MeshDesc)
 		{
-			UE_LOG(LogSDFAOBaker, Warning,
+			UE_LOG(ArResourceProcessor, Warning,
 				TEXT("  -> Skipping LOD%d on '%s': no MeshDescription."),
 				LODIndex, *StaticMesh->GetName());
 			continue;
 		}
 
-		UE_LOG(LogSDFAOBaker, Log, TEXT("  -> Baking LOD%d ..."), LODIndex);
+		UE_LOG(ArResourceProcessor, Log, TEXT("  -> Baking LOD%d ..."), LODIndex);
 
 		FDynamicMesh3 OrigDynMesh;
 		{
@@ -348,7 +352,7 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 		const double Range = (MaxDist - MinDist);
 		if (FMath::IsNearlyZero(Range))
 		{
-			UE_LOG(LogSDFAOBaker, Warning,
+			UE_LOG(ArResourceProcessor, Warning,
 				TEXT("  -> LOD%d SDF range is near zero – skipping."), LODIndex);
 			continue;
 		}
@@ -382,7 +386,7 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 
 			if (!Colors.IsValid())
 			{
-				UE_LOG(LogSDFAOBaker, Warning,
+				UE_LOG(ArResourceProcessor, Warning,
 					TEXT("  -> LOD%d: could not get vertex instance color attribute – skipping."),
 					LODIndex);
 				continue;
@@ -404,12 +408,12 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 		StaticMesh->CommitMeshDescription(LODIndex);
 		++SuccessLODCount;
 
-		UE_LOG(LogSDFAOBaker, Log, TEXT("  <- LOD%d done."), LODIndex);
+		UE_LOG(ArResourceProcessor, Log, TEXT("  <- LOD%d done."), LODIndex);
 	}
 
 	if (SuccessLODCount == 0)
 	{
-		UE_LOG(LogSDFAOBaker, Warning,
+		UE_LOG(ArResourceProcessor, Warning,
 			TEXT("BakeSDFAOToVertexColorAlpha: no LOD was baked on '%s'."),
 			*StaticMesh->GetName());
 		return;
@@ -417,7 +421,7 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 	
 	StaticMesh->PostEditChange();
 
-	UE_LOG(LogSDFAOBaker, Log,
+	UE_LOG(ArResourceProcessor, Log,
 		TEXT("BakeSDFAOToVertexColorAlpha: Done. Wrote AO to vertex color Alpha on '%s' (%d/%d LODs)."),
 		*StaticMesh->GetName(), SuccessLODCount, NumLODs);
 }
