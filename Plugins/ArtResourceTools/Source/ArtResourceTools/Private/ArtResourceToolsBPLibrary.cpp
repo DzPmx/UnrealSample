@@ -1,7 +1,13 @@
 #if WITH_EDITOR
 #include "ArtResourceToolsBPLibrary.h"
+#include "AssetRegistry/AssetData.h"
+#include "ContentBrowserModule.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
+#include "IContentBrowserSingleton.h"
 #include "MeshDescription.h"
+#include "Modules/ModuleManager.h"
+#include "ScopedTransaction.h"
 #include "StaticMeshAttributes.h"
 #include "MeshDescriptionToDynamicMesh.h"
 #include "DynamicMesh/DynamicMesh3.h"
@@ -113,6 +119,116 @@ static void LaplacianSmooth(FDynamicMesh3& Mesh, int32 Iterations)
 			Mesh.SetVertex(VID, NewPos[VID]);
 		}
 	}
+}
+
+static bool FlipTextureSourceMipV(UTexture2D* Texture, int32 BlockIndex, int32 LayerIndex, int32 MipIndex)
+{
+	FTextureSource& Source = Texture->Source;
+	FTextureSourceBlock Block;
+	Source.GetBlock(BlockIndex, Block);
+
+	const int32 MipSizeX = FMath::Max(Block.SizeX >> MipIndex, 1);
+	const int32 MipSizeY = FMath::Max(Block.SizeY >> MipIndex, 1);
+	const int32 MipSlices = Source.GetMippedNumSlices(Block.NumSlices, MipIndex);
+
+	if (MipSizeY <= 1 || MipSlices <= 0)
+	{
+		return false;
+	}
+
+	const int64 BytesPerPixel = Source.GetBytesPerPixel(LayerIndex);
+	const int64 RowStride64 = (int64)MipSizeX * BytesPerPixel;
+	const int64 SliceStride64 = RowStride64 * MipSizeY;
+	if (BytesPerPixel <= 0 || RowStride64 <= 0 || RowStride64 > MAX_int32)
+	{
+		UE_LOG(ArResourceProcessor, Warning,
+			TEXT("FlipSelectedTexturesV: unsupported source format on '%s' (Layer=%d, Mip=%d)."),
+			*Texture->GetName(), LayerIndex, MipIndex);
+		return false;
+	}
+
+	uint8* MipData = Source.LockMip(BlockIndex, LayerIndex, MipIndex);
+	if (!MipData)
+	{
+		UE_LOG(ArResourceProcessor, Warning,
+			TEXT("FlipSelectedTexturesV: could not lock source mip on '%s' (Block=%d, Layer=%d, Mip=%d)."),
+			*Texture->GetName(), BlockIndex, LayerIndex, MipIndex);
+		return false;
+	}
+
+	TArray<uint8> TempRow;
+	const int32 RowStride = (int32)RowStride64;
+	TempRow.SetNumUninitialized(RowStride);
+
+	for (int32 SliceIndex = 0; SliceIndex < MipSlices; ++SliceIndex)
+	{
+		uint8* SliceData = MipData + (SliceStride64 * SliceIndex);
+		for (int32 Y = 0; Y < MipSizeY / 2; ++Y)
+		{
+			uint8* TopRow = SliceData + ((int64)Y * RowStride);
+			uint8* BottomRow = SliceData + ((int64)(MipSizeY - 1 - Y) * RowStride);
+			FMemory::Memcpy(TempRow.GetData(), TopRow, RowStride);
+			FMemory::Memcpy(TopRow, BottomRow, RowStride);
+			FMemory::Memcpy(BottomRow, TempRow.GetData(), RowStride);
+		}
+	}
+
+	Source.UnlockMip(BlockIndex, LayerIndex, MipIndex);
+	return true;
+}
+
+static bool FlipTextureSourceV(UTexture2D* Texture)
+{
+	if (!IsValid(Texture))
+	{
+		return false;
+	}
+
+	FTextureSource& Source = Texture->Source;
+	if (!Source.IsValid())
+	{
+		UE_LOG(ArResourceProcessor, Warning,
+			TEXT("FlipSelectedTexturesV: '%s' has no valid source data."), *Texture->GetName());
+		return false;
+	}
+
+	Texture->Modify();
+	Texture->PreEditChange(nullptr);
+
+	bool bModified = false;
+	const int32 NumBlocks = Source.GetNumBlocks();
+	const int32 NumLayers = Source.GetNumLayers();
+	for (int32 BlockIndex = 0; BlockIndex < NumBlocks; ++BlockIndex)
+	{
+		FTextureSourceBlock Block;
+		Source.GetBlock(BlockIndex, Block);
+
+		for (int32 LayerIndex = 0; LayerIndex < NumLayers; ++LayerIndex)
+		{
+			for (int32 MipIndex = 0; MipIndex < Block.NumMips; ++MipIndex)
+			{
+				bModified |= FlipTextureSourceMipV(Texture, BlockIndex, LayerIndex, MipIndex);
+			}
+		}
+	}
+
+	if (bModified)
+	{
+		Texture->MarkPackageDirty();
+	}
+
+	Texture->PostEditChange();
+
+	if (bModified)
+	{
+		const UTexture::EUpdateResourceFlags RebuildFlags =
+			(UTexture::EUpdateResourceFlags)((uint32)UTexture::EUpdateResourceFlags::ForceRebuild
+				| (uint32)UTexture::EUpdateResourceFlags::Synchronous);
+		Texture->UpdateResourceWithParams(RebuildFlags);
+		Texture->BlockOnAnyAsyncBuild();
+	}
+
+	return bModified;
 }
 
 
@@ -558,6 +674,80 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 		*StaticMesh->GetName(), SuccessLODCount, NumLODs);
 }
 
+int32 UArtResourceToolsBPLibrary::FlipSelectedTexturesV()
+{
+	TArray<FAssetData> SelectedAssets;
+	FContentBrowserModule& ContentBrowserModule =
+		FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+	ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
+
+	if (SelectedAssets.Num() == 0)
+	{
+		UE_LOG(ArResourceProcessor, Warning, TEXT("FlipSelectedTexturesV: no assets selected."));
+		return 0;
+	}
+
+	TArray<UTexture2D*> SelectedTextures;
+	for (const FAssetData& AssetData : SelectedAssets)
+	{
+		UTexture2D* Texture = Cast<UTexture2D>(AssetData.GetAsset());
+		if (Texture)
+		{
+			SelectedTextures.Add(Texture);
+		}
+	}
+
+	if (SelectedTextures.Num() == 0)
+	{
+		UE_LOG(ArResourceProcessor, Warning,
+			TEXT("FlipSelectedTexturesV: selected assets do not include Texture2D assets."));
+		return 0;
+	}
+
+	return FlipTexturesV(SelectedTextures);
+}
+
+int32 UArtResourceToolsBPLibrary::FlipTexturesV(const TArray<UTexture2D*>& Textures)
+{
+	if (Textures.Num() == 0)
+	{
+		UE_LOG(ArResourceProcessor, Warning,
+			TEXT("FlipTexturesV: no Texture2D assets supplied."));
+		return 0;
+	}
+
+	int32 ValidTextureCount = 0;
+	int32 ModifiedTextureCount = 0;
+	FScopedTransaction Transaction(
+		TEXT("ArtResourceTools"),
+		NSLOCTEXT("ArtResourceTools", "FlipTexturesV", "Flip Textures V"),
+		nullptr);
+
+	for (UTexture2D* Texture : Textures)
+	{
+		if (!IsValid(Texture))
+		{
+			continue;
+		}
+
+		++ValidTextureCount;
+		if (FlipTextureSourceV(Texture))
+		{
+			++ModifiedTextureCount;
+			UE_LOG(ArResourceProcessor, Log,
+				TEXT("FlipTexturesV: flipped '%s'."), *Texture->GetPathName());
+		}
+	}
+
+	if (ModifiedTextureCount == 0)
+	{
+		Transaction.Cancel();
+	}
+
+	UE_LOG(ArResourceProcessor, Log,
+		TEXT("FlipTexturesV: Done. Modified %d/%d Texture2D assets."),
+		ModifiedTextureCount, ValidTextureCount);
+	return ModifiedTextureCount;
+}
+
 #endif // WITH_EDITOR
-
-

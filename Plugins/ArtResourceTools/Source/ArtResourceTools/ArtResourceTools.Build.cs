@@ -43,6 +43,18 @@ public class ArtResourceTools : ModuleRules
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"AssetRegistry",
+					"ContentBrowser",
+					"UnrealEd",
+				}
+				);
+		}
 		
 		
 		DynamicallyLoadedModuleNames.AddRange(

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "Engine/Texture2D.h"
 #include "ArtResourceToolsBPLibrary.generated.h"
 
 
@@ -33,5 +34,14 @@ class UArtResourceToolsBPLibrary : public UBlueprintFunctionLibrary
 		float WrapOffset = 5.0f,
 		int32 SmoothIterations = 25,
 		int32 VoxelCount = 32);
+
+	UFUNCTION(BlueprintCallable, Category = "ArtResourceProcessing|Texture",
+		meta = (DisplayName = "Flip Selected Textures V"))
+	static int32 FlipSelectedTexturesV();
+
+	UFUNCTION(BlueprintCallable, Category = "ArtResourceProcessing|Texture",
+		meta = (DisplayName = "Flip Textures V"))
+	static int32 FlipTexturesV(const TArray<UTexture2D*>& Textures);
+
 #endif
 };
