@@ -518,6 +518,8 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh, float WrapOffset,
 	int32 SmoothIterations, int32 VoxelCount)
 {
+	constexpr int32 MinTriangleCount = 36;
+
 	if (!IsValid(StaticMesh))
 	{
 		UE_LOG(ArResourceProcessor, Warning, TEXT("TransferWrapMeshNormals: StaticMesh is null."));
@@ -548,6 +550,15 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 			UE_LOG(ArResourceProcessor, Warning,
 				TEXT("  -> Skipping LOD%d on '%s': no MeshDescription."),
 				LODIndex, *StaticMesh->GetName());
+			continue;
+		}
+
+		const int32 TriangleCount = MeshDesc->Triangles().Num();
+		if (TriangleCount < MinTriangleCount)
+		{
+			UE_LOG(ArResourceProcessor, Log,
+				TEXT("  -> Skipping LOD%d on '%s': triangle count %d is below %d."),
+				LODIndex, *StaticMesh->GetName(), TriangleCount, MinTriangleCount);
 			continue;
 		}
 
