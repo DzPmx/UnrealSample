@@ -5,6 +5,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "IContentBrowserSingleton.h"
+#include "Materials/MaterialInstance.h"
 #include "MeshDescription.h"
 #include "Modules/ModuleManager.h"
 #include "ScopedTransaction.h"
@@ -349,10 +350,149 @@ static double RaycastAllDirections(const TMeshAABBTree3<FDynamicMesh3>& Tree,
 	return BestSignDist;
 }
 
-void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* StaticMesh, float WrapOffset,
-	int32 SmoothIterations, int32 IcoSubdivisions, int32 VoxelCount, float AOPower, bool bInvertAO)
+struct FMeshProcessingFilter
 {
-		if (!IsValid(StaticMesh))
+	TSet<FPolygonGroupID> ProcessablePolygonGroups;
+	int32 ProcessableTriangleCount = 0;
+};
+
+static bool FindBlacklistedParentMaterialName(const UMaterialInterface* MaterialInterface,
+	const TArray<FName>& MaterialIDNameBlacklist, FName& OutMatchedName)
+{
+	OutMatchedName = NAME_None;
+
+	const UMaterialInstance* MaterialInstance = Cast<const UMaterialInstance>(MaterialInterface);
+	if (!MaterialInstance || MaterialIDNameBlacklist.Num() == 0)
+	{
+		return false;
+	}
+
+	TSet<const UMaterialInterface*> VisitedParents;
+	const UMaterialInterface* ParentMaterial = ToRawPtr(MaterialInstance->Parent);
+	while (ParentMaterial)
+	{
+		if (VisitedParents.Contains(ParentMaterial))
+		{
+			break;
+		}
+		VisitedParents.Add(ParentMaterial);
+
+		const FName ParentMaterialName = ParentMaterial->GetFName();
+		if (MaterialIDNameBlacklist.Contains(ParentMaterialName))
+		{
+			OutMatchedName = ParentMaterialName;
+			return true;
+		}
+
+		const UMaterialInstance* ParentMaterialInstance = Cast<const UMaterialInstance>(ParentMaterial);
+		ParentMaterial = ParentMaterialInstance ? ToRawPtr(ParentMaterialInstance->Parent) : nullptr;
+	}
+
+	return false;
+}
+
+static bool IsMaterialIDNameBlacklisted(const UStaticMesh& StaticMesh, FName ImportedMaterialSlotName,
+	const TArray<FName>& MaterialIDNameBlacklist, FName& OutMatchedName)
+{
+	OutMatchedName = NAME_None;
+
+	if (MaterialIDNameBlacklist.Num() == 0)
+	{
+		return false;
+	}
+
+	if (MaterialIDNameBlacklist.Contains(ImportedMaterialSlotName))
+	{
+		OutMatchedName = ImportedMaterialSlotName;
+		return true;
+	}
+
+	const int32 MaterialIndex = StaticMesh.GetMaterialIndexFromImportedMaterialSlotName(ImportedMaterialSlotName);
+	const TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
+	if (!StaticMaterials.IsValidIndex(MaterialIndex))
+	{
+		return false;
+	}
+
+	const FStaticMaterial& StaticMaterial = StaticMaterials[MaterialIndex];
+	if (MaterialIDNameBlacklist.Contains(StaticMaterial.MaterialSlotName))
+	{
+		OutMatchedName = StaticMaterial.MaterialSlotName;
+		return true;
+	}
+
+	if (MaterialIDNameBlacklist.Contains(StaticMaterial.ImportedMaterialSlotName))
+	{
+		OutMatchedName = StaticMaterial.ImportedMaterialSlotName;
+		return true;
+	}
+
+	if (FindBlacklistedParentMaterialName(ToRawPtr(StaticMaterial.MaterialInterface),
+		MaterialIDNameBlacklist, OutMatchedName))
+	{
+		return true;
+	}
+
+	return false;
+}
+
+static FMeshProcessingFilter BuildMeshProcessingFilter(const UStaticMesh& StaticMesh,
+	const FMeshDescription& MeshDesc, const TArray<FName>& MaterialIDNameBlacklist,
+	int32 MinTriangleCount, int32 LODIndex)
+{
+	FMeshProcessingFilter Filter;
+
+	const int32 EffectiveMinTriangleCount = FMath::Max(0, MinTriangleCount);
+	const bool bHasMaterialSlotNames =
+		MeshDesc.PolygonGroupAttributes().HasAttribute(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
+	const FStaticMeshConstAttributes Attributes(MeshDesc);
+
+	for (const FPolygonGroupID& PolygonGroupID : MeshDesc.PolygonGroups().GetElementIDs())
+	{
+		const int32 GroupTriangleCount = MeshDesc.GetPolygonGroupTriangles(PolygonGroupID).Num();
+		if (GroupTriangleCount <= 0)
+		{
+			continue;
+		}
+
+		FName ImportedMaterialSlotName = NAME_None;
+		if (bHasMaterialSlotNames)
+		{
+			ImportedMaterialSlotName = Attributes.GetPolygonGroupMaterialSlotNames()[PolygonGroupID];
+		}
+
+		FName MatchedBlacklistName;
+		if (IsMaterialIDNameBlacklisted(StaticMesh, ImportedMaterialSlotName, MaterialIDNameBlacklist,
+			MatchedBlacklistName))
+		{
+			UE_LOG(ArResourceProcessor, Log,
+				TEXT("  -> Skipping LOD%d material '%s' on '%s': matched material blacklist entry '%s'."),
+				LODIndex, *ImportedMaterialSlotName.ToString(), *StaticMesh.GetName(),
+				*MatchedBlacklistName.ToString());
+			continue;
+		}
+
+		if (EffectiveMinTriangleCount > 0 && GroupTriangleCount < EffectiveMinTriangleCount)
+		{
+			UE_LOG(ArResourceProcessor, Log,
+				TEXT("  -> Skipping LOD%d material '%s' on '%s': triangle count %d is below %d."),
+				LODIndex, *ImportedMaterialSlotName.ToString(), *StaticMesh.GetName(), GroupTriangleCount,
+				EffectiveMinTriangleCount);
+			continue;
+		}
+
+		Filter.ProcessablePolygonGroups.Add(PolygonGroupID);
+		Filter.ProcessableTriangleCount += GroupTriangleCount;
+	}
+
+	return Filter;
+}
+
+void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* StaticMesh,
+	const TArray<FName>& MaterialIDNameBlacklist, float WrapOffset, int32 SmoothIterations,
+	int32 IcoSubdivisions, int32 VoxelCount, float AOPower, bool bInvertAO, int32 MinTriangleCount)
+{
+	if (!IsValid(StaticMesh))
 	{
 		UE_LOG(ArResourceProcessor, Warning, TEXT("BakeSDFAOToVertexColorAlpha: StaticMesh is null."));
 		return;
@@ -368,8 +508,9 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 	}
 
 	UE_LOG(ArResourceProcessor, Log,
-		TEXT("BakeSDFAOToVertexColorAlpha: Starting bake on '%s' (NumLODs=%d, WrapOffset=%.3f, SmoothIter=%d, IcoSub=%d, VoxelCount=%d)"),
-		*StaticMesh->GetName(), NumLODs, WrapOffset, SmoothIterations, IcoSubdivisions, VoxelCount);
+		TEXT("BakeSDFAOToVertexColorAlpha: Starting bake on '%s' (NumLODs=%d, WrapOffset=%.3f, SmoothIter=%d, IcoSub=%d, VoxelCount=%d, MinTriangles=%d, Blacklist=%d)"),
+		*StaticMesh->GetName(), NumLODs, WrapOffset, SmoothIterations, IcoSubdivisions, VoxelCount,
+		MinTriangleCount, MaterialIDNameBlacklist.Num());
 
 	const TArray<FVector3d> RayDirs = BuildIcosphereDirections(IcoSubdivisions);
 	UE_LOG(ArResourceProcessor, Log, TEXT("  Ray directions count: %d"), RayDirs.Num());
@@ -389,7 +530,19 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 			continue;
 		}
 
-		UE_LOG(ArResourceProcessor, Log, TEXT("  -> Baking LOD%d ..."), LODIndex);
+		const FMeshProcessingFilter ProcessingFilter = BuildMeshProcessingFilter(
+			*StaticMesh, *MeshDesc, MaterialIDNameBlacklist, MinTriangleCount, LODIndex);
+		if (ProcessingFilter.ProcessableTriangleCount <= 0)
+		{
+			UE_LOG(ArResourceProcessor, Warning,
+				TEXT("  -> Skipping LOD%d on '%s': no material group passed the filters."),
+				LODIndex, *StaticMesh->GetName());
+			continue;
+		}
+
+		UE_LOG(ArResourceProcessor, Log,
+			TEXT("  -> Baking LOD%d (%d filtered triangles) ..."),
+			LODIndex, ProcessingFilter.ProcessableTriangleCount);
 
 		FDynamicMesh3 OrigDynMesh;
 		{
@@ -481,16 +634,34 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 				continue;
 			}
 
-			for (const FVertexInstanceID& VIID : MeshDesc->VertexInstances().GetElementIDs())
+			int32 UpdatedVertexInstanceCount = 0;
+			for (const FTriangleID& TriangleID : MeshDesc->Triangles().GetElementIDs())
 			{
-				const FVertexID VertID = MeshDesc->GetVertexInstanceVertex(VIID);
-				const int32     VID    = VertID.GetValue();
-				if (VID < MaxVID && OrigDynMesh.IsVertex(VID))
+				if (!ProcessingFilter.ProcessablePolygonGroups.Contains(MeshDesc->GetTrianglePolygonGroup(TriangleID)))
 				{
-					FVector4f C = Colors[VIID];
-					C.W = (float)SignDists[VID]; // write to Alpha channel
-					Colors[VIID] = C;
+					continue;
 				}
+
+				for (const FVertexInstanceID& VIID : MeshDesc->GetTriangleVertexInstances(TriangleID))
+				{
+					const FVertexID VertID = MeshDesc->GetVertexInstanceVertex(VIID);
+					const int32     VID    = VertID.GetValue();
+					if (VID < MaxVID && OrigDynMesh.IsVertex(VID))
+					{
+						FVector4f C = Colors[VIID];
+						C.W = (float)SignDists[VID]; // write to Alpha channel
+						Colors[VIID] = C;
+						++UpdatedVertexInstanceCount;
+					}
+				}
+			}
+
+			if (UpdatedVertexInstanceCount == 0)
+			{
+				UE_LOG(ArResourceProcessor, Warning,
+					TEXT("  -> LOD%d: no vertex instances were updated after filtering."),
+					LODIndex);
+				continue;
 			}
 		}
 
@@ -515,11 +686,10 @@ void UArtResourceToolsBPLibrary::BakeSDFAOToVertexColorAlpha(UStaticMesh* Static
 		*StaticMesh->GetName(), SuccessLODCount, NumLODs);
 }
 
-void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh, float WrapOffset,
-	int32 SmoothIterations, int32 VoxelCount)
+void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh,
+	const TArray<FName>& MaterialIDNameBlacklist, float WrapOffset, int32 SmoothIterations, int32 VoxelCount,
+	int32 MinTriangleCount)
 {
-	constexpr int32 MinTriangleCount = 36;
-
 	if (!IsValid(StaticMesh))
 	{
 		UE_LOG(ArResourceProcessor, Warning, TEXT("TransferWrapMeshNormals: StaticMesh is null."));
@@ -535,8 +705,9 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 	}
 
 	UE_LOG(ArResourceProcessor, Log,
-		TEXT("TransferWrapMeshNormals: Starting on '%s' (NumLODs=%d, WrapOffset=%.3f, SmoothIter=%d, VoxelCount=%d)"),
-		*StaticMesh->GetName(), NumLODs, WrapOffset, SmoothIterations, VoxelCount);
+		TEXT("TransferWrapMeshNormals: Starting on '%s' (NumLODs=%d, WrapOffset=%.3f, SmoothIter=%d, VoxelCount=%d, MinTriangles=%d, Blacklist=%d)"),
+		*StaticMesh->GetName(), NumLODs, WrapOffset, SmoothIterations, VoxelCount, MinTriangleCount,
+		MaterialIDNameBlacklist.Num());
 
 	StaticMesh->Modify();
 
@@ -553,16 +724,19 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 			continue;
 		}
 
-		const int32 TriangleCount = MeshDesc->Triangles().Num();
-		if (TriangleCount < MinTriangleCount)
+		const FMeshProcessingFilter ProcessingFilter = BuildMeshProcessingFilter(
+			*StaticMesh, *MeshDesc, MaterialIDNameBlacklist, MinTriangleCount, LODIndex);
+		if (ProcessingFilter.ProcessableTriangleCount <= 0)
 		{
-			UE_LOG(ArResourceProcessor, Log,
-				TEXT("  -> Skipping LOD%d on '%s': triangle count %d is below %d."),
-				LODIndex, *StaticMesh->GetName(), TriangleCount, MinTriangleCount);
+			UE_LOG(ArResourceProcessor, Warning,
+				TEXT("  -> Skipping LOD%d on '%s': no material group passed the filters."),
+				LODIndex, *StaticMesh->GetName());
 			continue;
 		}
 
-		UE_LOG(ArResourceProcessor, Log, TEXT("  -> Processing LOD%d ..."), LODIndex);
+		UE_LOG(ArResourceProcessor, Log,
+			TEXT("  -> Processing LOD%d (%d filtered triangles) ..."),
+			LODIndex, ProcessingFilter.ProcessableTriangleCount);
 
 		FDynamicMesh3 OrigDynMesh;
 		{
@@ -648,14 +822,32 @@ void UArtResourceToolsBPLibrary::TransferWrapMeshNormals(UStaticMesh* StaticMesh
 				continue;
 			}
 
-			for (const FVertexInstanceID& VIID : MeshDesc->VertexInstances().GetElementIDs())
+			int32 UpdatedVertexInstanceCount = 0;
+			for (const FTriangleID& TriangleID : MeshDesc->Triangles().GetElementIDs())
 			{
-				const FVertexID VertID = MeshDesc->GetVertexInstanceVertex(VIID);
-				const int32     VID    = VertID.GetValue();
-				if (VID < MaxVID && VertHit[VID])
+				if (!ProcessingFilter.ProcessablePolygonGroups.Contains(MeshDesc->GetTrianglePolygonGroup(TriangleID)))
 				{
-					Normals[VIID] = TransferredNormals[VID];
+					continue;
 				}
+
+				for (const FVertexInstanceID& VIID : MeshDesc->GetTriangleVertexInstances(TriangleID))
+				{
+					const FVertexID VertID = MeshDesc->GetVertexInstanceVertex(VIID);
+					const int32     VID    = VertID.GetValue();
+					if (VID < MaxVID && VertHit[VID])
+					{
+						Normals[VIID] = TransferredNormals[VID];
+						++UpdatedVertexInstanceCount;
+					}
+				}
+			}
+
+			if (UpdatedVertexInstanceCount == 0)
+			{
+				UE_LOG(ArResourceProcessor, Warning,
+					TEXT("  -> LOD%d: no vertex instances were updated after filtering."),
+					LODIndex);
+				continue;
 			}
 		}
 		// Keep our custom normals: don't let the build recompute them, but do
