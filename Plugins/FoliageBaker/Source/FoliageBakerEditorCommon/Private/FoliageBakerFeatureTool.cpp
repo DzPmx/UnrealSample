@@ -1,0 +1,514 @@
+#include "FoliageBakerFeatureTool.h"
+#include "FoliageBakerToolChrome.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "AssetSelection.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailsViewArgs.h"
+#include "Editor.h"
+#include "Engine/StaticMesh.h"
+#include "IDetailCustomization.h"
+#include "IDetailsView.h"
+#include "Misc/PackageName.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/ScopedSlowTask.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorModule.h"
+#include "ScopedTransaction.h"
+#include "Styling/AppStyle.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+
+#define LOCTEXT_NAMESPACE "FFoliageBakerFeatureTool"
+
+namespace
+{
+	class FFoliageBakerCategoryOrderCustomization final : public IDetailCustomization
+	{
+	public:
+		static TSharedRef<IDetailCustomization> MakeInstance()
+		{
+			return MakeShared<FFoliageBakerCategoryOrderCustomization>();
+		}
+
+		virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override
+		{
+			DetailBuilder.EditCategory(TEXT("Mesh")).SetSortOrder(0);
+			DetailBuilder.EditCategory(TEXT("Feature")).SetSortOrder(1);
+			DetailBuilder.EditCategory(TEXT("Asset")).SetSortOrder(2);
+			DetailBuilder.EditCategory(TEXT("Material")).SetSortOrder(3);
+		}
+	};
+
+	TArray<TStrongObjectPtr<UStaticMesh>> GetSelectedStaticMeshes()
+	{
+		TArray<FAssetData> SelectedAssets;
+		AssetSelectionUtils::GetSelectedAssets(SelectedAssets);
+
+		TArray<TStrongObjectPtr<UStaticMesh>> StaticMeshes;
+		StaticMeshes.Reserve(SelectedAssets.Num());
+		for (const FAssetData& AssetData : SelectedAssets)
+		{
+			const TStrongObjectPtr<UStaticMesh> StaticMesh(
+				Cast<UStaticMesh>(AssetData.GetAsset()));
+			if (StaticMesh)
+			{
+				StaticMeshes.AddUnique(StaticMesh);
+			}
+		}
+		return StaticMeshes;
+	}
+
+	bool AddContentBrowserSelection(
+		UObject& Settings,
+		TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes,
+		const FText& TransactionText)
+	{
+		const TArray<TStrongObjectPtr<UStaticMesh>> SelectedStaticMeshes =
+			GetSelectedStaticMeshes();
+		const bool bHasNewStaticMesh = SelectedStaticMeshes.ContainsByPredicate(
+			[&SourceStaticMeshes](const TStrongObjectPtr<UStaticMesh>& StaticMesh)
+			{
+				return !SourceStaticMeshes.Contains(StaticMesh.Get());
+			});
+		if (!bHasNewStaticMesh)
+		{
+			return false;
+		}
+
+		const FScopedTransaction Transaction(TransactionText);
+		Settings.Modify();
+		for (const TStrongObjectPtr<UStaticMesh>& StaticMesh : SelectedStaticMeshes)
+		{
+			SourceStaticMeshes.AddUnique(StaticMesh.Get());
+		}
+		Settings.PostEditChange();
+		return true;
+	}
+
+	bool ClearSourceStaticMeshes(
+		UObject& Settings,
+		TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes,
+		const FText& TransactionText)
+	{
+		if (SourceStaticMeshes.IsEmpty())
+		{
+			return false;
+		}
+
+		const FScopedTransaction Transaction(TransactionText);
+		Settings.Modify();
+		SourceStaticMeshes.Reset();
+		Settings.PostEditChange();
+		return true;
+	}
+
+	TArray<TStrongObjectPtr<UStaticMesh>> GetUniqueValidStaticMeshes(
+		const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes)
+	{
+		TArray<TStrongObjectPtr<UStaticMesh>> StaticMeshes;
+		StaticMeshes.Reserve(SourceStaticMeshes.Num());
+		for (const TObjectPtr<UStaticMesh>& StaticMesh : SourceStaticMeshes)
+		{
+			if (StaticMesh)
+			{
+				StaticMeshes.AddUnique(TStrongObjectPtr<UStaticMesh>(StaticMesh.Get()));
+			}
+		}
+		return StaticMeshes;
+	}
+
+	FText FormatQueuedStaticMeshCount(
+		const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes)
+	{
+		const int32 Count = GetUniqueValidStaticMeshes(SourceStaticMeshes).Num();
+		if (Count == 0)
+		{
+			return LOCTEXT("QueuedMeshCountEmpty", "None queued");
+		}
+		return FText::Format(
+			LOCTEXT("QueuedMeshCount", "{0} queued"),
+			FText::AsNumber(Count));
+	}
+
+	struct FFoliageBakerFeatureControllerState
+	{
+		TStrongObjectPtr<UObject> SettingsObject;
+		TFunction<TArray<TObjectPtr<UStaticMesh>>&()> GetSourceStaticMeshes;
+		TWeakPtr<IDetailsView> DetailsView;
+		FText AddMeshesTransactionText;
+		FText ClearMeshesTransactionText;
+		FFoliageBakerFeaturePredicateDelegate CanBake;
+		FFoliageBakerFeatureActionDelegate Bake;
+	};
+}
+
+struct FFoliageBakerFeatureController::FImpl
+{
+	TSharedPtr<IDetailsView> DetailsView;
+	TSharedPtr<SWidget> Widget;
+	TSharedPtr<FFoliageBakerFeatureControllerState> State;
+};
+
+TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Create(
+	const FFoliageBakerFeatureControllerArgs& Args)
+{
+	check(Args.SettingsObject);
+	check(Args.GetSourceStaticMeshes);
+
+	TUniquePtr<FImpl> Impl = MakeUnique<FImpl>();
+	Impl->State = MakeShared<FFoliageBakerFeatureControllerState>();
+	Impl->State->SettingsObject = Args.SettingsObject;
+	Impl->State->GetSourceStaticMeshes = Args.GetSourceStaticMeshes;
+	Impl->State->AddMeshesTransactionText = Args.AddMeshesTransactionText;
+	Impl->State->ClearMeshesTransactionText = Args.ClearMeshesTransactionText;
+	Impl->State->CanBake = Args.CanBake;
+	Impl->State->Bake = Args.Bake;
+	FPropertyEditorModule& PropertyEditorModule =
+		FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.bAllowSearch = true;
+	DetailsViewArgs.bHideSelectionTip = true;
+	DetailsViewArgs.bLockable = false;
+	DetailsViewArgs.bShowOptions = Args.bShowDetailsOptions;
+	DetailsViewArgs.bShowPropertyMatrixButton = Args.bShowPropertyMatrixButton;
+	DetailsViewArgs.bUpdatesFromSelection = false;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	Impl->DetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
+	Impl->DetailsView->RegisterInstancedCustomPropertyLayout(
+		Args.SettingsObject->GetClass(),
+		FOnGetDetailCustomizationInstance::CreateStatic(
+			&FFoliageBakerCategoryOrderCustomization::MakeInstance));
+	Impl->DetailsView->SetObject(Args.SettingsObject.Get());
+	Impl->State->DetailsView = Impl->DetailsView;
+
+	const TWeakPtr<FFoliageBakerFeatureControllerState> WeakState = Impl->State;
+
+	Impl->Widget = SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(12.0f, 12.0f, 12.0f, 8.0f)
+		[
+			FoliageBakerToolChrome::MakeCard(
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.VAlign(VAlign_Center)
+					[
+						FoliageBakerToolChrome::MakeTitle(
+							LOCTEXT("SourceMeshesSectionTitle", "Source Meshes"))
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					[
+						FoliageBakerToolChrome::MakeCountBadge(
+							TAttribute<FText>::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								if (!State
+									|| !State->SettingsObject.IsValid()
+									|| !State->GetSourceStaticMeshes)
+								{
+									return FText::GetEmpty();
+								}
+								return FormatQueuedStaticMeshCount(
+									State->GetSourceStaticMeshes());
+							}),
+							TAttribute<bool>::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								return State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
+										State->GetSourceStaticMeshes());
+							}))
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 6.0f, 0.0f, 8.0f)
+				[
+					FoliageBakerToolChrome::MakeMuted(LOCTEXT(
+						"SourceMeshesSectionHint",
+						"Queue one or more Static Mesh assets. Bake runs on every queued mesh."))
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+					[
+						FoliageBakerToolChrome::MakeIconTextButton(
+							FName(TEXT("Icons.Plus")),
+							LOCTEXT("AddSelectedMeshes", "Add Selection"),
+							LOCTEXT(
+								"AddSelectedMeshesTooltip",
+								"Add Static Mesh assets selected in the Content Browser without removing meshes already queued."),
+							FOnClicked::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								if (State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& AddContentBrowserSelection(
+										*State->SettingsObject.Get(),
+										State->GetSourceStaticMeshes(),
+										State->AddMeshesTransactionText))
+								{
+									if (const TSharedPtr<IDetailsView> DetailsView =
+										State->DetailsView.Pin())
+									{
+										DetailsView->ForceRefresh();
+									}
+								}
+								return FReply::Handled();
+							}))
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						FoliageBakerToolChrome::MakeIconTextButton(
+							FName(TEXT("Icons.Delete")),
+							LOCTEXT("ClearMeshes", "Clear"),
+							LOCTEXT(
+								"ClearMeshesTooltip",
+								"Remove all queued Static Mesh assets from this feature."),
+							FOnClicked::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								if (State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& ClearSourceStaticMeshes(
+										*State->SettingsObject.Get(),
+										State->GetSourceStaticMeshes(),
+										State->ClearMeshesTransactionText))
+								{
+									if (const TSharedPtr<IDetailsView> DetailsView =
+										State->DetailsView.Pin())
+									{
+										DetailsView->ForceRefresh();
+									}
+								}
+								return FReply::Handled();
+							}),
+							TAttribute<bool>::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								return State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
+										State->GetSourceStaticMeshes());
+							}))
+					]
+				],
+				FMargin(14.0f, 12.0f))
+		]
+		+ SVerticalBox::Slot()
+		.FillHeight(1.0f)
+		.Padding(12.0f, 0.0f)
+		[
+			FoliageBakerToolChrome::MakeRecessedPanel(Impl->DetailsView.ToSharedRef())
+		]
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(12.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FoliageBakerToolChrome::HeaderBrush())
+			.Padding(FMargin(14.0f, 12.0f))
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 16.0f, 0.0f)
+				[
+					FoliageBakerToolChrome::MakeMuted(Args.RequirementsHint)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.MinDesiredWidth(188.0f)
+					.MinDesiredHeight(32.0f)
+					[
+						SNew(SButton)
+						.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
+						.HAlign(HAlign_Center)
+						.VAlign(VAlign_Center)
+						.ContentPadding(FMargin(16.0f, 6.0f))
+						.Text(Args.BakeButtonText)
+						.ToolTipText(Args.BakeButtonTooltip)
+						.IsEnabled_Lambda([WeakState]()
+						{
+							const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+								WeakState.Pin();
+							return State
+								&& State->CanBake.IsBound()
+								&& State->CanBake.Execute();
+						})
+						.OnClicked_Lambda([WeakState]()
+						{
+							if (const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+								WeakState.Pin())
+							{
+								State->Bake.ExecuteIfBound();
+							}
+							return FReply::Handled();
+						})
+					]
+				]
+			]
+		];
+
+	TSharedRef<FFoliageBakerFeatureController> Controller =
+		MakeShareable(new FFoliageBakerFeatureController(MoveTemp(Impl)));
+	return Controller;
+}
+
+FFoliageBakerFeatureController::FFoliageBakerFeatureController(TUniquePtr<FImpl>&& InImpl)
+	: Impl(MoveTemp(InImpl))
+{
+}
+
+FFoliageBakerFeatureController::~FFoliageBakerFeatureController() = default;
+
+TSharedRef<SWidget> FFoliageBakerFeatureController::GetWidget() const
+{
+	check(Impl && Impl->Widget.IsValid());
+	return Impl->Widget.ToSharedRef();
+}
+
+bool FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
+	const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes)
+{
+	return SourceStaticMeshes.ContainsByPredicate(
+		[](const TObjectPtr<UStaticMesh>& StaticMesh)
+		{
+			return StaticMesh != nullptr;
+		});
+}
+
+bool FFoliageBakerFeatureTool::HasExistingAsset(const FSoftObjectPath& AssetPath)
+{
+	if (!AssetPath.IsValid())
+	{
+		return false;
+	}
+	if (AssetPath.ResolveObject() != nullptr)
+	{
+		return true;
+	}
+	return FPackageName::DoesPackageExist(AssetPath.GetLongPackageName());
+}
+
+bool FFoliageBakerFeatureTool::CanBakeFeature(
+	const bool bHasMaterialTemplate,
+	const bool bHasEnabledOutput,
+	const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes)
+{
+	return bHasMaterialTemplate
+		&& bHasEnabledOutput
+		&& HasAnyValidStaticMesh(SourceStaticMeshes);
+}
+
+FFoliageBakerFeatureBatchResult FFoliageBakerFeatureTool::RunBakeBatch(
+	const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes,
+	const FText& SlowTaskText,
+	const bool bAllowCancel,
+	const FString& ReportSeparator,
+	const FFoliageBakerBakeStaticMeshDelegate& BakeStaticMesh)
+{
+	FFoliageBakerFeatureBatchResult BatchResult;
+	const TArray<TStrongObjectPtr<UStaticMesh>> StaticMeshes =
+		GetUniqueValidStaticMeshes(SourceStaticMeshes);
+	BatchResult.TotalCount = StaticMeshes.Num();
+	if (!BakeStaticMesh.IsBound())
+	{
+		return BatchResult;
+	}
+
+	FScopedSlowTask SlowTask(StaticMeshes.Num(), SlowTaskText);
+	SlowTask.MakeDialog(bAllowCancel);
+	for (const TStrongObjectPtr<UStaticMesh>& StaticMesh : StaticMeshes)
+	{
+		if (!StaticMesh)
+		{
+			continue;
+		}
+		if (bAllowCancel && SlowTask.ShouldCancel())
+		{
+			break;
+		}
+
+		SlowTask.EnterProgressFrame(1.0f, FText::FromString(StaticMesh->GetName()));
+		const FFoliageBakerFeatureBakeItemResult ItemResult = BakeStaticMesh.Execute(*StaticMesh);
+		BatchResult.Report += ItemResult.Report + ReportSeparator;
+		if (ItemResult.bSucceeded)
+		{
+			++BatchResult.SuccessCount;
+			BatchResult.CreatedAssets.Append(ItemResult.CreatedAssets);
+		}
+		if (ItemResult.bCancelled)
+		{
+			break;
+		}
+	}
+	return BatchResult;
+}
+
+void FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(
+	const TArray<TStrongObjectPtr<UObject>>& CreatedAssets)
+{
+	if (!CreatedAssets.IsEmpty() && GEditor)
+	{
+		// Unreal's Content Browser boundary requires a raw-pointer array.
+		TArray<UObject*> BrowserAssets;
+		BrowserAssets.Reserve(CreatedAssets.Num());
+		for (const TStrongObjectPtr<UObject>& Asset : CreatedAssets)
+		{
+			if (Asset)
+			{
+				BrowserAssets.Add(Asset.Get());
+			}
+		}
+		GEditor->SyncBrowserToObjects(BrowserAssets);
+	}
+}
+
+void FFoliageBakerFeatureTool::ShowMessage(const FText& Message)
+{
+	FMessageDialog::Open(EAppMsgType::Ok, Message);
+}
+
+void FFoliageBakerFeatureTool::ShowBatchSummary(
+	const FFoliageBakerFeatureBatchResult& BatchResult,
+	const FText& SummaryFormat)
+{
+	ShowMessage(FText::Format(
+		SummaryFormat,
+		FText::AsNumber(BatchResult.SuccessCount),
+		FText::AsNumber(BatchResult.TotalCount),
+		FText::FromString(BatchResult.Report)));
+}
+
+#undef LOCTEXT_NAMESPACE

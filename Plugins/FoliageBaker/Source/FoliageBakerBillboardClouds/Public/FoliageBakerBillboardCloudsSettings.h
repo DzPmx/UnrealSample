@@ -1,0 +1,179 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "FoliageBakerMaskedMaterialBaker.h"
+#include "FoliageBakerTextureResolution.h"
+#include "UObject/Object.h"
+
+#include "FoliageBakerBillboardCloudsSettings.generated.h"
+
+class UMaterialInstanceConstant;
+class UStaticMesh;
+
+UENUM()
+enum class EBillboardCloudsCrackReductionMode : uint8
+{
+	Off UMETA(DisplayName = "Off"),
+	ScaledEnvelopeClip UMETA(DisplayName = "Scaled Envelope-Clipped Projection")
+};
+
+UENUM()
+enum class EBillboardCloudsDoubleSidedBakeMode : uint8
+{
+	Off UMETA(DisplayName = "Off"),
+	TrunkCardsOnly UMETA(DisplayName = "Trunk Cards Only"),
+	BillboardPlanesOnly UMETA(DisplayName = "Billboard Planes Only"),
+	AllPlanes UMETA(DisplayName = "All Planes")
+};
+
+UENUM()
+enum class EBillboardCloudsTrunkCardAtlasScale : uint8
+{
+	HalfX UMETA(DisplayName = "0.5x"),
+	OneX UMETA(DisplayName = "1.0x"),
+	OnePointFiveX UMETA(DisplayName = "1.5x"),
+	TwoX UMETA(DisplayName = "2.0x")
+};
+
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard Clouds"))
+class FOLIAGEBAKERBILLBOARDCLOUDS_API UFoliageBakerBillboardCloudsSettings : public UObject
+{
+	GENERATED_BODY()
+
+public:
+
+	UPROPERTY(Transient, EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets processed from the selected Source LOD when Bake is clicked. Add assets here directly or use Add Content Browser Selection in the BillboardClouds panel."))
+	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
+
+	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for geometry extraction, plane-cover bounds, material baking, and shared depth encoding. Every queued mesh must contain this LOD."))
+	int32 SourceLODIndex = 0;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Plane Cover", meta = (ClampMin = "0.0", ToolTip = "Relative object-space tolerance used by K-Means proxy footprint padding and minimum extent. The analyzer multiplies this by the selected mesh bounds sphere radius."))
+	double RelativeError = 0.02;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Plane Cover", meta = (ClampMin = "0.0", ToolTip = "Minimum K-Means proxy footprint tolerance in Unreal centimeters."))
+	double MinimumErrorCm = 1.0;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|K-Means", meta = (ClampMin = "1", ClampMax = "512", ToolTip = "Target number of billboard planes for budget-driven K-Means clustering."))
+	int32 KMeansPlaneCount = 64;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|K-Means", meta = (ClampMin = "1", ClampMax = "512", ToolTip = "Maximum assignment/refit iterations for the K-Means solver."))
+	int32 KMeansMaxIterations = 512;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|K-Means", meta = (ToolTip = "Crack reduction for K-Means. Scaled Envelope-Clipped Projection clips cross-plane projection fragments against a scaled neighbor envelope before GPU material baking."))
+	EBillboardCloudsCrackReductionMode KMeansCrackReductionMode = EBillboardCloudsCrackReductionMode::ScaledEnvelopeClip;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|K-Means", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "KMeansCrackReductionMode == EBillboardCloudsCrackReductionMode::ScaledEnvelopeClip", EditConditionHides, ToolTip = "Scale applied to the K-Means crack-reduction envelope before clipping cross-plane projection fragments. 1.0 keeps the full envelope; smaller values reduce overfill on alpha-card foliage."))
+	double KMeansCrackReductionProjectionScale = 0.75;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (ToolTip = "Route matching trunk/branch material triangles into a fixed vertical cross-card pass instead of K-Means clustering."))
+	bool bEnableTrunkCards = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (ClampMin = "2", ClampMax = "8", EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Number of evenly spaced vertical trunk cross-card planes, from 2 to 8."))
+	int32 TrunkCardPlaneCount = 4;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Resolution weight for trunk cross-card atlas tiles during packing. Values below 1 reduce trunk tile resolution; values above 1 increase it while reducing space available to foliage billboard tiles."))
+	EBillboardCloudsTrunkCardAtlasScale TrunkCardAtlasScale = EBillboardCloudsTrunkCardAtlasScale::OneX;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (ToolTip = "Material instance or parent material name keywords used to classify color-atlas alpha as trunk (0.5). When Trunk Cards is enabled, the same matches are routed into fixed vertical trunk cross-card planes. Empty means every visible pixel is classified as leaf (1)."))
+	TArray<FString> TrunkCardMaterialKeywords = { TEXT("Trunk") };
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (DisplayName = "Resolution Mode", ToolTip = "Auto chooses the smallest power-of-two atlas that reaches the requested world-space texel density. Manual preserves the configured atlas resolution behavior."))
+	EFoliageBakerTextureResolutionMode TextureResolutionMode =
+		EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "0.01", UIMin = "10.0", UIMax = "1000.0", Suffix = "texels/m", DisplayName = "Target Texels Per Meter", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Requested atlas texels per source-local meter. Larger values produce higher texture detail and may require a larger atlas. Trunk Card Atlas Scale intentionally modifies this density for trunk cards."))
+	double TargetTexelsPerMeter = 20.0;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Minimum Atlas Resolution", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Smallest power-of-two square atlas Auto mode may select. Non-power-of-two values are rounded up."))
+	int32 MinimumTextureAtlasResolution = 64;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum permitted square atlas resolution. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
+	int32 TextureAtlasResolution = 4096;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (DisplayName = "Enable Alpha Crop", ToolTip = "Crop each billboard tile to its alpha-painted outer bounds before final packing. Auto measures every plane independently at Target Texels Per Meter; Manual measures the packed prepass atlas. Front/back bounds are conservatively merged when present. This removes transparent outer borders but does not fill interior alpha holes."))
+	bool bEnableAlphaAwareTileCrop = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Alpha Crop Guard", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra prepass pixels retained around the detected alpha-painted bounds. Their world-space size follows the active Auto target-density or Manual packed-atlas prepass."))
+	int32 AlphaAwareTileCropGuardPixels = 2;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate coverage mask mips independently inside every BillboardClouds atlas tile. BaseColor Alpha remains exactly background 0 or covered 1. Normal B classification and A depth use their own mip filtering."))
+	bool bPreserveAlphaMaskValues = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "bPreserveAlphaMaskValues", EditConditionHides, DisplayName = "Mip Mask Coverage Threshold", ToolTip = "Minimum fraction of covered Mip 0 samples required to keep a destination mip pixel. Lower values preserve fuller foliage silhouettes; higher values remove more thin coverage."))
+	float MipMaskCoverageThreshold = 0.35f;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))
+	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::AllPlanes;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Base Color / Alpha Mask", ToolTip = "RGB stores BaseColor. A stores the source masked-shader coverage: background 0, visible surface 1."))
+	bool bBakeBaseColorAlphaMask = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Normal / Mask / Depth", ToolTip = "RG stores octahedral object/local-space normal. B stores trunk 0.5 or leaf 1. A stores shared-range linear depth: near 1, far 0, uncovered 0.5."))
+	bool bBakeNormalMaskDepth = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Occlusion / Roughness / Metallic / Emission", ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission; the destination material parameter is configured in Material."))
+	bool bBakeMix = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Texture output folder relative to the parent of the source Static Mesh folder. For a mesh in /Game/Trees/Meshes, the default creates textures in /Game/Trees/Textures."))
+	FString TextureOutputFolderName = TEXT("Textures");
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Material instance output folder relative to the parent of the source Static Mesh folder. For a mesh in /Game/Trees/Meshes, the default creates materials in /Game/Trees/Materials."))
+	FString MaterialOutputFolderName = TEXT("Materials");
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Place Assets Near Replaced LOD Assets", ToolTip = "When enabled and Replace LOD is selected, creates the generated material near the materials used by the target LOD and creates generated textures in the nearest referenced texture folder. Falls back to the configured output folders when no suitable source folder can be resolved."))
+	bool bPlaceGeneratedAssetsNearReplacedLODAssets = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Prefix added before the source Static Mesh name for every generated atlas texture."))
+	FString TextureNamePrefix = TEXT("T_");
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated BaseColor/AlphaMask atlas texture."))
+	FString BaseColorAlphaMaskTextureSuffix = TEXT("_BillboardClouds_DA");
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated octahedral normal, trunk/leaf classification, and shared-depth atlas texture."))
+	FString NormalMaskDepthTextureSuffix = TEXT("_BillboardClouds_NR");
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated packed Mix atlas texture."))
+	FString MixTextureSuffix = TEXT("_BillboardClouds_M");
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Prefix added before the source Static Mesh name for the generated material instance."))
+	FString MaterialInstanceNamePrefix = TEXT("MI_");
+
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Optional suffix added after the source Static Mesh name for the generated material instance."))
+	FString MaterialInstanceNameSuffix = TEXT("_BillboardClouds");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
+	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Override Static Switches During Bake", ToolTip = "Creates one transient child Material Instance per unique selected-LOD material and applies every configured Global static switch override that exists on that material. Missing switches emit warnings and the remaining overrides continue. Source material assets are never modified. World Position Offset is evaluated with animation time fixed at zero; Displacement remains disabled."))
+	bool bOverrideBakeStaticSwitch = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Static Switch Overrides", EditCondition = "bOverrideBakeStaticSwitch", EditConditionHides, ToolTip = "Global static switches and their temporary Bake values. Each switch may appear only once. A missing switch warns and is skipped for that material."))
+	TArray<FFoliageBakerBakeStaticSwitchOverride> BakeStaticSwitchOverrides = {
+		FFoliageBakerBakeStaticSwitchOverride()
+	};
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Alpha Mask Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and AlphaMask in A. The default parent-material parameter name remains ColorOpacity."))
+	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter", ToolTip = "Texture parameter receiving octahedral object/local-space Normal RG, trunk/leaf classification B, and shared linear depth A. The default parent-material parameter name remains NormalMask."))
+	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Depth Bounds Scale Parameter", ToolTip = "Scalar parameter receiving the baked depth half extent in source-local centimeters. Runtime instance scaling is applied in the material."))
+	FName DepthBoundsScaleParameterName = TEXT("DepthBoundsScale");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission atlas when that output is enabled."))
+	FName MixTextureParameterName = TEXT("Mix");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
+	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
+	FName LeafSpecularParameterName = TEXT("LeafSpecular");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Trunk Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
+	FName TrunkRoughnessParameterName = TEXT("TrunkRoughness");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Trunk Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
+	FName TrunkSpecularParameterName = TEXT("TrunkSpecular");
+};

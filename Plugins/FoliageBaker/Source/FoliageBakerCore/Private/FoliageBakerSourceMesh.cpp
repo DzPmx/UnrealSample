@@ -1,0 +1,158 @@
+#include "FoliageBakerSourceMesh.h"
+
+#include "Engine/StaticMesh.h"
+#include "StaticMeshResources.h"
+
+bool FFoliageBakerSourceMeshReader::ValidateSourceLOD(
+	const UStaticMesh& StaticMesh,
+	const int32 SourceLODIndex,
+	FString& OutError)
+{
+	OutError.Reset();
+	if (SourceLODIndex < 0 || SourceLODIndex >= MAX_STATIC_MESH_LODS)
+	{
+		OutError = FString::Printf(
+			TEXT("Source LOD index %d is outside the supported range 0-%d."),
+			SourceLODIndex,
+			MAX_STATIC_MESH_LODS - 1);
+		return false;
+	}
+	if (SourceLODIndex < StaticMesh.GetNumLODs()
+		|| StaticMesh.IsMeshDescriptionValid(SourceLODIndex))
+	{
+		return true;
+	}
+
+	OutError = FString::Printf(
+		TEXT("Static Mesh '%s' does not contain source or render LOD %d (render LOD count: %d, source model count: %d)."),
+		*StaticMesh.GetName(),
+		SourceLODIndex,
+		StaticMesh.GetNumLODs(),
+		StaticMesh.GetNumSourceModels());
+	return false;
+}
+
+bool FFoliageBakerSourceMeshReader::Read(
+	const UStaticMesh& StaticMesh,
+	const int32 SourceLODIndex,
+	const bool bOverrideBakeStaticSwitch,
+	const TConstArrayView<FFoliageBakerBakeStaticSwitchOverride> BakeStaticSwitchOverrides,
+	FFoliageBakerSourceMeshData& OutData,
+	FString& OutError)
+{
+	OutData = FFoliageBakerSourceMeshData();
+	OutData.SourceLODIndex = SourceLODIndex;
+	if (!ValidateSourceLOD(StaticMesh, SourceLODIndex, OutError))
+	{
+		return false;
+	}
+	if (!UE::FoliageBaker::PlaneCover::ExtractTrianglesFromStaticMesh(
+			StaticMesh,
+			SourceLODIndex,
+			OutData.Triangles,
+			OutError))
+	{
+		return false;
+	}
+	if (!ComputeBounds(OutData.Triangles, OutData.SourceLODBounds))
+	{
+		OutError = FString::Printf(
+			TEXT("Source LOD %d has no valid bounds."),
+			SourceLODIndex);
+		return false;
+	}
+
+	TSet<int32> ReferencedMaterialSet;
+	for (const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle :
+		OutData.Triangles)
+	{
+		ReferencedMaterialSet.Add(Triangle.MaterialIndex);
+	}
+	TArray<int32> ReferencedMaterialIndices = ReferencedMaterialSet.Array();
+	ReferencedMaterialIndices.Sort();
+	if (!OutData.BakeMaterialOverrides.Build(
+			StaticMesh,
+			ReferencedMaterialIndices,
+			bOverrideBakeStaticSwitch,
+			BakeStaticSwitchOverrides,
+			OutError))
+	{
+		return false;
+	}
+
+	FFoliageBakerFixedFrameWPOResult FixedFrameWPO;
+	if (!FFoliageBakerMaskedMaterialBaker::EvaluateFixedFrameWorldPositionOffset(
+			StaticMesh,
+			OutData.SourceLODBounds,
+			OutData.Triangles,
+			OutData.BakeMaterialOverrides,
+			FixedFrameWPO,
+			OutError))
+	{
+		return false;
+	}
+	const int32 EvaluatedVertexCount = OutData.Triangles.Num() * 3;
+	const int32 NonFiniteCulledTriangleCount =
+		OutData.Triangles.Num() - FixedFrameWPO.Triangles.Num();
+	check(
+		FixedFrameWPO.Triangles.Num()
+			== FixedFrameWPO.RetainedSourceTriangleIndices.Num());
+	TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>
+		RetainedSourceTriangles;
+	RetainedSourceTriangles.Reserve(
+		FixedFrameWPO.RetainedSourceTriangleIndices.Num());
+	for (const int32 SourceTriangleIndex :
+		FixedFrameWPO.RetainedSourceTriangleIndices)
+	{
+		check(OutData.Triangles.IsValidIndex(SourceTriangleIndex));
+		RetainedSourceTriangles.Add(
+			MoveTemp(OutData.Triangles[SourceTriangleIndex]));
+	}
+	OutData.Triangles = MoveTemp(RetainedSourceTriangles);
+	OutData.FixedFrameWPOTriangles = MoveTemp(FixedFrameWPO.Triangles);
+	OutData.FixedFrameWPOBounds = FixedFrameWPO.Bounds;
+
+	double MaximumDisplacement = 0.0;
+	for (int32 TriangleIndex = 0;
+		TriangleIndex < OutData.FixedFrameWPOTriangles.Num();
+		++TriangleIndex)
+	{
+		for (int32 Corner = 0; Corner < 3; ++Corner)
+		{
+			MaximumDisplacement = FMath::Max(
+				MaximumDisplacement,
+				FVector::Distance(
+					OutData.Triangles[TriangleIndex].Vertices[Corner],
+					OutData.FixedFrameWPOTriangles[TriangleIndex].Vertices[Corner]));
+		}
+	}
+	OutData.WorldPositionOffsetStats.EvaluatedVertexCount =
+		EvaluatedVertexCount;
+	OutData.WorldPositionOffsetStats.NonFiniteCulledTriangleCount =
+		NonFiniteCulledTriangleCount;
+	OutData.WorldPositionOffsetStats.MaximumDisplacement =
+		MaximumDisplacement;
+	return true;
+}
+
+bool FFoliageBakerSourceMeshReader::ComputeBounds(
+	const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
+	FBoxSphereBounds& OutBounds)
+{
+	FBox Bounds(ForceInit);
+	for (const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle : Triangles)
+	{
+		for (const FVector& Vertex : Triangle.Vertices)
+		{
+			Bounds += Vertex;
+		}
+	}
+	if (!Bounds.IsValid)
+	{
+		OutBounds = FBoxSphereBounds(ForceInitToZero);
+		return false;
+	}
+
+	OutBounds = FBoxSphereBounds(Bounds);
+	return true;
+}

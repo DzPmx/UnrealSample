@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Cloud Sea",
+	"Description": "Camera-relative cloud sea proxy support.",
+	"Category": "Rendering",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "CloudSea",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

@@ -1,0 +1,722 @@
+#include "/Engine/Public/Platform.ush"
+
+struct FBvhNode
+{
+	float3 BoundsMin;
+	uint LeftChild;
+	float3 BoundsMax;
+	uint RightChild;
+	uint FirstTriangle;
+	uint TriangleCount;
+	uint Padding0;
+	uint Padding1;
+};
+
+struct FBvhTriangle
+{
+	float3 A;
+	float PaddingA;
+	float3 B;
+	float PaddingB;
+	float3 C;
+	float PaddingC;
+};
+
+uint FlattenCoordinate(uint3 Coordinate, uint3 Dimensions)
+{
+	return Coordinate.x + Dimensions.x * (Coordinate.y + Dimensions.y * Coordinate.z);
+}
+
+uint3 ExpandIndex(uint Index, uint3 Dimensions)
+{
+	const uint PlaneSize = Dimensions.x * Dimensions.y;
+	const uint Z = Index / PlaneSize;
+	const uint Remainder = Index - Z * PlaneSize;
+	const uint Y = Remainder / Dimensions.x;
+	return uint3(Remainder - Y * Dimensions.x, Y, Z);
+}
+
+bool IsInside(int3 Coordinate, uint3 Dimensions)
+{
+	return all(Coordinate >= int3(0, 0, 0))
+		&& all(Coordinate < int3(Dimensions));
+}
+
+bool RayIntersectsTriangle(
+	float3 Origin,
+	float3 Direction,
+	FBvhTriangle Triangle,
+	out float Distance,
+	out float Orientation)
+{
+	const float3 Edge1 = Triangle.B - Triangle.A;
+	const float3 Edge2 = Triangle.C - Triangle.A;
+	const float3 P = cross(Direction, Edge2);
+	const float Determinant = dot(Edge1, P);
+	if (abs(Determinant) <= 1.0e-9f)
+	{
+		Distance = 0.0f;
+		Orientation = 0.0f;
+		return false;
+	}
+	const float InverseDeterminant = rcp(Determinant);
+	const float3 T = Origin - Triangle.A;
+	const float U = dot(T, P) * InverseDeterminant;
+	if (U < 0.0f || U > 1.0f)
+	{
+		Distance = 0.0f;
+		Orientation = 0.0f;
+		return false;
+	}
+	const float3 Q = cross(T, Edge1);
+	const float V = dot(Direction, Q) * InverseDeterminant;
+	if (V < 0.0f || U + V > 1.0f)
+	{
+		Distance = 0.0f;
+		Orientation = 0.0f;
+		return false;
+	}
+	Distance = dot(Edge2, Q) * InverseDeterminant;
+	if (Distance < 0.0f)
+	{
+		Orientation = 0.0f;
+		return false;
+	}
+	Orientation = dot(cross(Edge1, Edge2), Direction);
+	return true;
+}
+
+uint HashVoxel(uint Value)
+{
+	Value ^= Value >> 16;
+	Value *= 0x7feb352du;
+	Value ^= Value >> 15;
+	Value *= 0x846ca68bu;
+	Value ^= Value >> 16;
+	return Value;
+}
+
+RWStructuredBuffer<uint> VoxelStates;
+uint3 Dimensions;
+
+#if FOLIAGE_BAKER_CLASSIFY
+StructuredBuffer<FBvhTriangle> BvhTriangles;
+RWStructuredBuffer<int> IntersectionEvents;
+RWStructuredBuffer<uint> Statistics;
+uint TriangleCount;
+float3 GridOrigin;
+float CellSize;
+static const uint ClassificationAxis = FOLIAGE_BAKER_CLASSIFICATION_AXIS;
+
+void MarkSurfaceVoxel(float3 Position)
+{
+	const int3 Coordinate = int3(round((Position - GridOrigin) / CellSize));
+	if (!IsInside(Coordinate, Dimensions))
+	{
+		return;
+	}
+	uint PreviousState = 0u;
+	InterlockedOr(
+		VoxelStates[FlattenCoordinate(uint3(Coordinate), Dimensions)],
+		512u,
+		PreviousState);
+}
+
+[numthreads(64, 1, 1)]
+void ClassifyVoxelsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint TriangleIndex = DispatchThreadId.x;
+	if (TriangleIndex >= TriangleCount)
+	{
+		return;
+	}
+	const FBvhTriangle Triangle = BvhTriangles[TriangleIndex];
+	const float InverseCellSize = rcp(CellSize);
+	const uint SubdivisionCount = max(
+		1u,
+		uint(ceil(max(
+			length(Triangle.B - Triangle.A),
+			max(length(Triangle.C - Triangle.A), length(Triangle.C - Triangle.B)))
+			* InverseCellSize * 2.0f)));
+	for (uint UIndex = 0u; UIndex <= SubdivisionCount; ++UIndex)
+	{
+		const uint VCount = SubdivisionCount - UIndex;
+		for (uint VIndex = 0u; VIndex <= VCount; ++VIndex)
+		{
+			const float U = float(UIndex) / float(SubdivisionCount);
+			const float V = float(VIndex) / float(SubdivisionCount);
+			MarkSurfaceVoxel(
+				Triangle.A
+				+ (Triangle.B - Triangle.A) * U
+				+ (Triangle.C - Triangle.A) * V);
+		}
+	}
+	const uint FirstTransverseAxis = ClassificationAxis == 0u ? 1u : 0u;
+	const uint SecondTransverseAxis = ClassificationAxis == 2u ? 1u : 2u;
+	const float MinimumFirst = min(
+		Triangle.A[FirstTransverseAxis],
+		min(Triangle.B[FirstTransverseAxis], Triangle.C[FirstTransverseAxis]));
+	const float MaximumFirst = max(
+		Triangle.A[FirstTransverseAxis],
+		max(Triangle.B[FirstTransverseAxis], Triangle.C[FirstTransverseAxis]));
+	const float MinimumSecond = min(
+		Triangle.A[SecondTransverseAxis],
+		min(Triangle.B[SecondTransverseAxis], Triangle.C[SecondTransverseAxis]));
+	const float MaximumSecond = max(
+		Triangle.A[SecondTransverseAxis],
+		max(Triangle.B[SecondTransverseAxis], Triangle.C[SecondTransverseAxis]));
+	const int FirstCoordinate = clamp(
+		int(floor((MinimumFirst - GridOrigin[FirstTransverseAxis]) * InverseCellSize)) - 1,
+		0,
+		int(Dimensions[FirstTransverseAxis]) - 1);
+	const int LastCoordinate = clamp(
+		int(ceil((MaximumFirst - GridOrigin[FirstTransverseAxis]) * InverseCellSize)) + 1,
+		0,
+		int(Dimensions[FirstTransverseAxis]) - 1);
+	const int FirstSecondCoordinate = clamp(
+		int(floor((MinimumSecond - GridOrigin[SecondTransverseAxis]) * InverseCellSize)) - 1,
+		0,
+		int(Dimensions[SecondTransverseAxis]) - 1);
+	const int LastSecondCoordinate = clamp(
+		int(ceil((MaximumSecond - GridOrigin[SecondTransverseAxis]) * InverseCellSize)) + 1,
+		0,
+		int(Dimensions[SecondTransverseAxis]) - 1);
+	for (int SecondCoordinate = FirstSecondCoordinate;
+		SecondCoordinate <= LastSecondCoordinate;
+		++SecondCoordinate)
+	{
+		for (int Coordinate = FirstCoordinate;
+			Coordinate <= LastCoordinate;
+			++Coordinate)
+		{
+			const uint ColumnIndex = uint(Coordinate)
+				+ Dimensions[FirstTransverseAxis]
+					* (uint(SecondCoordinate)
+						+ Dimensions[SecondTransverseAxis] * ClassificationAxis);
+			const uint Hash = HashVoxel(ColumnIndex);
+			float3 RayOrigin = GridOrigin;
+			RayOrigin[FirstTransverseAxis] += float(Coordinate) * CellSize
+				+ (float(Hash & 1023u) / 1023.0f - 0.5f) * CellSize * 1.0e-3f;
+			RayOrigin[SecondTransverseAxis] += float(SecondCoordinate) * CellSize
+				+ (float((Hash >> 10) & 1023u) / 1023.0f - 0.5f) * CellSize * 1.0e-3f;
+			float3 Direction = float3(0.0f, 0.0f, 0.0f);
+			Direction[ClassificationAxis] = 1.0f;
+			float Distance = 0.0f;
+			float Orientation = 0.0f;
+			if (!RayIntersectsTriangle(
+				RayOrigin,
+				Direction,
+				Triangle,
+				Distance,
+				Orientation))
+			{
+				continue;
+			}
+			const int EventCoordinate = int(ceil(Distance * InverseCellSize));
+			if (EventCoordinate < 0
+				|| EventCoordinate >= int(Dimensions[ClassificationAxis]))
+			{
+				continue;
+			}
+			uint3 EventCoordinates = uint3(0u, 0u, 0u);
+			EventCoordinates[ClassificationAxis] = uint(EventCoordinate);
+			EventCoordinates[FirstTransverseAxis] = uint(Coordinate);
+			EventCoordinates[SecondTransverseAxis] = uint(SecondCoordinate);
+			const uint EventIndex = FlattenCoordinate(EventCoordinates, Dimensions);
+			int PreviousEvent = 0;
+			InterlockedAdd(
+				IntersectionEvents[EventIndex],
+				Orientation >= 0.0f ? 1 : -1,
+				PreviousEvent);
+			uint PreviousCount = 0u;
+			InterlockedAdd(Statistics[1], 1u, PreviousCount);
+		}
+	}
+}
+#endif
+
+#if FOLIAGE_BAKER_FILL
+StructuredBuffer<int> IntersectionEvents;
+static const uint ScanAxis = FOLIAGE_BAKER_SCAN_AXIS;
+
+[numthreads(8, 8, 1)]
+void FillVoxelsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint FirstTransverseAxis = ScanAxis == 0u ? 1u : 0u;
+	const uint SecondTransverseAxis = ScanAxis == 2u ? 1u : 2u;
+	if (DispatchThreadId.x >= Dimensions[FirstTransverseAxis]
+		|| DispatchThreadId.y >= Dimensions[SecondTransverseAxis])
+	{
+		return;
+	}
+	int Winding = 0;
+	int SpanStart = -1;
+	for (uint ScanCoordinate = 0u;
+		ScanCoordinate < Dimensions[ScanAxis];
+		++ScanCoordinate)
+	{
+		uint3 Coordinate = uint3(0u, 0u, 0u);
+		Coordinate[ScanAxis] = ScanCoordinate;
+		Coordinate[FirstTransverseAxis] = DispatchThreadId.x;
+		Coordinate[SecondTransverseAxis] = DispatchThreadId.y;
+		const uint VoxelIndex = FlattenCoordinate(Coordinate, Dimensions);
+		const int PreviousWinding = Winding;
+		Winding += IntersectionEvents[VoxelIndex];
+		if (PreviousWinding == 0 && Winding != 0)
+		{
+			SpanStart = int(ScanCoordinate);
+		}
+		if (PreviousWinding == 0 || Winding != 0 || SpanStart < 0)
+		{
+			continue;
+		}
+		for (int FillCoordinate = SpanStart;
+			FillCoordinate < int(ScanCoordinate);
+			++FillCoordinate)
+		{
+			Coordinate[ScanAxis] = uint(FillCoordinate);
+			const uint FillIndex = FlattenCoordinate(Coordinate, Dimensions);
+			uint PreviousState = 0u;
+			InterlockedOr(VoxelStates[FillIndex], 1u << ScanAxis, PreviousState);
+		}
+		SpanStart = -1;
+	}
+}
+#endif
+
+#if FOLIAGE_BAKER_FINALIZE
+RWStructuredBuffer<uint> Statistics;
+float3 GridOrigin;
+float CellSize;
+float3 Pivot;
+float AnchorRadiusSquared;
+
+[numthreads(4, 4, 4)]
+void FinalizeVoxelsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (any(DispatchThreadId >= Dimensions))
+	{
+		return;
+	}
+	const uint VoxelIndex = FlattenCoordinate(DispatchThreadId, Dimensions);
+	const uint ClassifiedState = VoxelStates[VoxelIndex];
+	const bool Occupied = countbits(ClassifiedState & 7u) >= 2u;
+	if (!Occupied)
+	{
+		VoxelStates[VoxelIndex] = 0u;
+		return;
+	}
+	uint State = 3u;
+	const float3 Position = GridOrigin + float3(DispatchThreadId) * CellSize;
+	if (dot(Position - Pivot, Position - Pivot) <= AnchorRadiusSquared)
+	{
+		State |= 8u;
+	}
+	VoxelStates[VoxelIndex] = State;
+	uint PreviousCount = 0u;
+	InterlockedAdd(Statistics[0], 1u, PreviousCount);
+}
+#endif
+
+bool IsOccupied(int3 Coordinate, uint3 InDimensions)
+{
+	return IsInside(Coordinate, InDimensions)
+		&& (VoxelStates[FlattenCoordinate(uint3(Coordinate), InDimensions)] & 2u) != 0u;
+}
+
+bool IsBoundaryVoxel(uint Index, uint3 InDimensions)
+{
+	const int3 Coordinate = int3(ExpandIndex(Index, InDimensions));
+	return !IsOccupied(Coordinate + int3(1, 0, 0), InDimensions)
+		|| !IsOccupied(Coordinate + int3(-1, 0, 0), InDimensions)
+		|| !IsOccupied(Coordinate + int3(0, 1, 0), InDimensions)
+		|| !IsOccupied(Coordinate + int3(0, -1, 0), InDimensions)
+		|| !IsOccupied(Coordinate + int3(0, 0, 1), InDimensions)
+		|| !IsOccupied(Coordinate + int3(0, 0, -1), InDimensions);
+}
+
+#if FOLIAGE_BAKER_DISTANCE_INITIALIZE
+RWStructuredBuffer<uint> OccupiedVoxels;
+RWStructuredBuffer<uint> DistanceCandidates;
+RWStructuredBuffer<uint> DistanceCandidateCount;
+RWStructuredBuffer<uint> DistanceStatistics;
+
+[numthreads(4, 4, 4)]
+void InitializeDistanceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (any(DispatchThreadId >= Dimensions))
+	{
+		return;
+	}
+	const uint Index = FlattenCoordinate(DispatchThreadId, Dimensions);
+	const uint State = VoxelStates[Index];
+	if ((State & 1u) == 0u)
+	{
+		return;
+	}
+	const bool Boundary = IsBoundaryVoxel(Index, Dimensions);
+	VoxelStates[Index] = (State & 0xffu)
+		| ((Boundary ? 0u : 2047u) << 8u)
+		| (Boundary ? 16u : 0u);
+	uint OccupiedDestination = 0u;
+	InterlockedAdd(DistanceStatistics[0], 1u, OccupiedDestination);
+	OccupiedVoxels[OccupiedDestination] = Index;
+	if (Boundary)
+	{
+		uint CandidateDestination = 0u;
+		InterlockedAdd(DistanceCandidateCount[0], 1u, CandidateDestination);
+		DistanceCandidates[CandidateDestination] = Index;
+	}
+}
+#endif
+
+#if FOLIAGE_BAKER_DISTANCE_PROPAGATE
+StructuredBuffer<uint> CurrentDistanceCandidates;
+StructuredBuffer<uint> CurrentDistanceCandidateCount;
+RWStructuredBuffer<uint> NextDistanceCandidates;
+RWStructuredBuffer<uint> NextDistanceCandidateCount;
+uint CurrentDistanceQueueBit;
+uint NextDistanceQueueBit;
+
+bool TryReduceDistance(uint Index, uint CandidateDistance)
+{
+	uint ObservedState = VoxelStates[Index];
+	for (uint Attempt = 0u; Attempt < 16u; ++Attempt)
+	{
+		if ((ObservedState & 2u) == 0u
+			|| CandidateDistance >= (ObservedState >> 8u))
+		{
+			return false;
+		}
+		const uint DesiredState = (ObservedState & 0xffu) | (CandidateDistance << 8u);
+		uint OriginalState = 0u;
+		InterlockedCompareExchange(
+			VoxelStates[Index],
+			ObservedState,
+			DesiredState,
+			OriginalState);
+		if (OriginalState == ObservedState)
+		{
+			return true;
+		}
+		ObservedState = OriginalState;
+	}
+	return false;
+}
+
+[numthreads(256, 1, 1)]
+void PropagateDistanceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint CandidateOffset = DispatchThreadId.x;
+	if (CandidateOffset >= CurrentDistanceCandidateCount[0])
+	{
+		return;
+	}
+	const uint Index = CurrentDistanceCandidates[CandidateOffset];
+	uint PreviousState = 0u;
+	InterlockedAnd(VoxelStates[Index], ~CurrentDistanceQueueBit, PreviousState);
+	const uint CurrentDistance = VoxelStates[Index] >> 8u;
+	const int3 Coordinate = int3(ExpandIndex(Index, Dimensions));
+	for (int OffsetZ = -1; OffsetZ <= 1; ++OffsetZ)
+	{
+		for (int OffsetY = -1; OffsetY <= 1; ++OffsetY)
+		{
+			for (int OffsetX = -1; OffsetX <= 1; ++OffsetX)
+			{
+				const int Manhattan = abs(OffsetX) + abs(OffsetY) + abs(OffsetZ);
+				if (Manhattan == 0)
+				{
+					continue;
+				}
+				const int3 NeighborCoordinate = Coordinate + int3(OffsetX, OffsetY, OffsetZ);
+				if (!IsInside(NeighborCoordinate, Dimensions))
+				{
+					continue;
+				}
+				const uint NeighborIndex = FlattenCoordinate(uint3(NeighborCoordinate), Dimensions);
+				const uint StepDistance = Manhattan == 1 ? 4u : Manhattan == 2 ? 6u : 7u;
+				if (!TryReduceDistance(
+					NeighborIndex,
+					min(CurrentDistance + StepDistance, 2047u)))
+				{
+					continue;
+				}
+				uint PreviousNeighborState = 0u;
+				InterlockedOr(
+					VoxelStates[NeighborIndex],
+					NextDistanceQueueBit,
+					PreviousNeighborState);
+				if ((PreviousNeighborState & NextDistanceQueueBit) == 0u)
+				{
+					uint Destination = 0u;
+					InterlockedAdd(NextDistanceCandidateCount[0], 1u, Destination);
+					NextDistanceCandidates[Destination] = NeighborIndex;
+				}
+			}
+		}
+	}
+}
+#endif
+
+#if FOLIAGE_BAKER_DISTANCE_BUCKET
+StructuredBuffer<uint> BucketOccupiedVoxels;
+RWStructuredBuffer<uint> DistanceHistogram;
+uint BucketOccupiedVoxelCount;
+uint DistanceBucketCount;
+uint DistanceBucketRowWidth;
+
+[numthreads(8, 8, 1)]
+void BucketDistanceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Offset = DispatchThreadId.x
+		+ DispatchThreadId.y * DistanceBucketRowWidth;
+	if (Offset >= BucketOccupiedVoxelCount)
+	{
+		return;
+	}
+	const uint Index = BucketOccupiedVoxels[Offset];
+	const uint Bucket = min(VoxelStates[Index] >> 8u, DistanceBucketCount - 1u);
+	VoxelStates[Index] &= ~48u;
+	uint PreviousBucketCount = 0u;
+	InterlockedAdd(DistanceHistogram[Bucket], 1u, PreviousBucketCount);
+}
+#endif
+
+#if FOLIAGE_BAKER_SCATTER
+StructuredBuffer<uint> UnsortedOccupiedVoxels;
+RWStructuredBuffer<uint> SortedOccupiedVoxels;
+RWStructuredBuffer<uint> DistanceBucketCursors;
+uint OccupiedVoxelCount;
+uint ScatterRowWidth;
+
+[numthreads(8, 8, 1)]
+void ScatterDistanceBucketsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Offset = DispatchThreadId.x
+		+ DispatchThreadId.y * ScatterRowWidth;
+	if (Offset >= OccupiedVoxelCount)
+	{
+		return;
+	}
+	const uint Index = UnsortedOccupiedVoxels[Offset];
+	const uint Bucket = VoxelStates[Index] >> 8u;
+	uint Destination = 0u;
+	InterlockedAdd(DistanceBucketCursors[Bucket], 1u, Destination);
+	SortedOccupiedVoxels[Destination] = Index;
+}
+#endif
+
+uint LocalIndex(int3 Offset)
+{
+	return uint(Offset.x + 1 + 3 * (Offset.y + 1) + 9 * (Offset.z + 1));
+}
+
+uint ExpandMask(uint CurrentMask, bool FaceOnly)
+{
+	uint ExpandedMask = CurrentMask;
+	for (uint Index = 0; Index < 27; ++Index)
+	{
+		if ((CurrentMask & (1u << Index)) == 0u)
+		{
+			continue;
+		}
+		const int Z = int(Index / 9u);
+		const int Remainder = int(Index) - Z * 9;
+		const int Y = Remainder / 3;
+		const int X = Remainder - Y * 3;
+		for (int OffsetZ = -1; OffsetZ <= 1; ++OffsetZ)
+		{
+			for (int OffsetY = -1; OffsetY <= 1; ++OffsetY)
+			{
+				for (int OffsetX = -1; OffsetX <= 1; ++OffsetX)
+				{
+					const int Manhattan = abs(OffsetX) + abs(OffsetY) + abs(OffsetZ);
+					if (Manhattan == 0 || (FaceOnly && Manhattan != 1))
+					{
+						continue;
+					}
+					const int NeighborX = X + OffsetX;
+					const int NeighborY = Y + OffsetY;
+					const int NeighborZ = Z + OffsetZ;
+					if (NeighborX < 0 || NeighborX >= 3
+						|| NeighborY < 0 || NeighborY >= 3
+						|| NeighborZ < 0 || NeighborZ >= 3)
+					{
+						continue;
+					}
+					ExpandedMask |= 1u << uint(NeighborX + 3 * NeighborY + 9 * NeighborZ);
+				}
+			}
+		}
+	}
+	return ExpandedMask;
+}
+
+bool IsConnectedMask(uint Mask, bool FaceOnly)
+{
+	if (Mask == 0u)
+	{
+		return false;
+	}
+	uint FloodMask = 1u << firstbitlow(Mask);
+	for (uint Iteration = 0; Iteration < 27; ++Iteration)
+	{
+		const uint ExpandedMask = ExpandMask(FloodMask, FaceOnly) & Mask;
+		if (ExpandedMask == FloodMask)
+		{
+			break;
+		}
+		FloodMask = ExpandedMask;
+	}
+	return FloodMask == Mask;
+}
+
+bool IsSimpleVoxel(uint Index, uint3 InDimensions)
+{
+	const int3 Coordinate = int3(ExpandIndex(Index, InDimensions));
+	uint ObjectMask = 0u;
+	for (int OffsetZ = -1; OffsetZ <= 1; ++OffsetZ)
+	{
+		for (int OffsetY = -1; OffsetY <= 1; ++OffsetY)
+		{
+			for (int OffsetX = -1; OffsetX <= 1; ++OffsetX)
+			{
+				if (OffsetX == 0 && OffsetY == 0 && OffsetZ == 0)
+				{
+					continue;
+				}
+				const int3 Offset = int3(OffsetX, OffsetY, OffsetZ);
+				if (IsOccupied(Coordinate + Offset, InDimensions))
+				{
+					ObjectMask |= 1u << LocalIndex(Offset);
+				}
+			}
+		}
+	}
+	if (countbits(ObjectMask) <= 1)
+	{
+		return false;
+	}
+	const uint NeighborhoodMask = (1u << 27u) - 1u;
+	const uint BackgroundMask = NeighborhoodMask & ~ObjectMask;
+	return IsConnectedMask(ObjectMask, false)
+		&& IsConnectedMask(BackgroundMask, true);
+}
+
+#if FOLIAGE_BAKER_THIN
+StructuredBuffer<uint> CurrentCandidates;
+StructuredBuffer<uint> CurrentCandidateCount;
+RWStructuredBuffer<uint> NextCandidates;
+RWStructuredBuffer<uint> NextCandidateCount;
+uint VoxelColor;
+uint CurrentQueueBit;
+uint NextQueueBit;
+uint CurrentDistanceLayer;
+uint QueueNextCandidates;
+uint CandidateStartOffset;
+uint CandidateCountOffset;
+
+void QueueThinCandidate(uint Index)
+{
+	if (QueueNextCandidates == 0u)
+	{
+		return;
+	}
+	const uint State = VoxelStates[Index];
+	const uint DistanceLayer = State >> 8u;
+	if ((State & 2u) == 0u
+		|| DistanceLayer > CurrentDistanceLayer)
+	{
+		return;
+	}
+	uint PreviousState = 0u;
+	InterlockedOr(VoxelStates[Index], NextQueueBit, PreviousState);
+	if ((PreviousState & 2u) == 0u || (PreviousState & NextQueueBit) != 0u)
+	{
+		return;
+	}
+	uint Destination = 0u;
+	InterlockedAdd(NextCandidateCount[0], 1u, Destination);
+	NextCandidates[Destination] = Index;
+}
+
+[numthreads(64, 1, 1)]
+void ThinCandidatesCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint CandidateOffset = DispatchThreadId.x;
+	if (CandidateOffset >= CurrentCandidateCount[CandidateCountOffset])
+	{
+		return;
+	}
+	const uint Index = CurrentCandidates[CandidateStartOffset + CandidateOffset];
+	const uint3 Coordinate = ExpandIndex(Index, Dimensions);
+	const uint Color = Coordinate.x % 3u
+		+ 3u * (Coordinate.y % 3u)
+		+ 9u * (Coordinate.z % 3u);
+	if (Color != VoxelColor)
+	{
+		return;
+	}
+	uint PreviousState = 0u;
+	if (CurrentQueueBit != 0u)
+	{
+		InterlockedAnd(VoxelStates[Index], ~CurrentQueueBit, PreviousState);
+	}
+	const uint State = VoxelStates[Index];
+	if ((State & 2u) == 0u
+		|| (State & 8u) != 0u
+		|| !IsBoundaryVoxel(Index, Dimensions))
+	{
+		return;
+	}
+	if (!IsSimpleVoxel(Index, Dimensions))
+	{
+		return;
+	}
+	InterlockedAnd(VoxelStates[Index], ~2u, PreviousState);
+	const int3 SignedCoordinate = int3(Coordinate);
+	for (int OffsetZ = -1; OffsetZ <= 1; ++OffsetZ)
+	{
+		for (int OffsetY = -1; OffsetY <= 1; ++OffsetY)
+		{
+			for (int OffsetX = -1; OffsetX <= 1; ++OffsetX)
+			{
+				if (OffsetX == 0 && OffsetY == 0 && OffsetZ == 0)
+				{
+					continue;
+				}
+				const int3 NeighborCoordinate = SignedCoordinate
+					+ int3(OffsetX, OffsetY, OffsetZ);
+				if (IsInside(NeighborCoordinate, Dimensions))
+				{
+					QueueThinCandidate(FlattenCoordinate(uint3(NeighborCoordinate), Dimensions));
+				}
+			}
+		}
+	}
+}
+#endif
+
+#if FOLIAGE_BAKER_COMPACT
+RWStructuredBuffer<uint> SkeletonVoxels;
+RWStructuredBuffer<uint> SkeletonDistanceBuckets;
+RWStructuredBuffer<uint> Statistics;
+
+[numthreads(4, 4, 4)]
+void CompactSkeletonCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (any(DispatchThreadId >= Dimensions))
+	{
+		return;
+	}
+	const uint Index = FlattenCoordinate(DispatchThreadId, Dimensions);
+	if ((VoxelStates[Index] & 2u) == 0u)
+	{
+		return;
+	}
+	uint Destination = 0u;
+	InterlockedAdd(Statistics[2], 1u, Destination);
+	SkeletonVoxels[Destination] = Index;
+	SkeletonDistanceBuckets[Destination] = VoxelStates[Index] >> 8u;
+}
+#endif

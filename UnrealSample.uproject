@@ -21,6 +21,21 @@
 		{
 			"Name": "PanoramicCapture",
 			"Enabled": true
+		},
+		{
+			"Name": "FoliageBaker",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "CloudSea",
+			"Enabled": true
+		},
+		{
+			"Name": "VibeUE",
+			"Enabled": true
 		}
 	]
 }

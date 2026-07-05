@@ -1,0 +1,150 @@
+#undef SCENE_TEXTURES_DISABLED
+#define SCENE_TEXTURES_DISABLED 1
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Generated/Material.ush"
+#include "/Engine/Generated/VertexFactory.ush"
+
+struct FFoliageBakerDepthCorrectVSToPS
+{
+	FVertexFactoryInterpolantsVSToPS FactoryInterpolants;
+	float4 PixelPosition : TEXCOORD6;
+#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
+	float3 PixelPositionExcludingWPO : TEXCOORD7;
+#endif
+	FStereoVSOutput StereoOutput;
+	INVARIANT_OUTPUT float4 Position : SV_POSITION;
+};
+
+uint WPOBoundsVertexIndexOffset;
+
+struct FFoliageBakerWPOBoundsVSToPS
+{
+	nointerpolation float4 WorldPositionAndOutputIndex : TEXCOORD0;
+	FStereoVSOutput StereoOutput;
+	INVARIANT_OUTPUT float4 Position : SV_POSITION;
+};
+
+void FixedFrameWPOBoundsVS(
+	FVertexFactoryInput Input,
+	out FFoliageBakerWPOBoundsVSToPS Output)
+{
+	StereoSetupVF(Input, Output.StereoOutput);
+	FVertexFactoryIntermediates VFIntermediates =
+		GetVertexFactoryIntermediates(Input);
+	float4 WorldPosition =
+		VertexFactoryGetWorldPosition(Input, VFIntermediates);
+	half3x3 TangentToLocal =
+		VertexFactoryGetTangentToLocal(Input, VFIntermediates);
+	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(
+		Input,
+		VFIntermediates,
+		WorldPosition.xyz,
+		TangentToLocal);
+	WorldPosition.xyz += GetMaterialWorldPositionOffset(VertexParameters);
+
+	const uint OutputIndex =
+		WPOBoundsVertexIndexOffset + Input.VertexId;
+	const uint OutputWidth =
+		max((uint)ResolvedView.ViewSizeAndInvSize.x, 1u);
+	const uint2 OutputPixel =
+		uint2(OutputIndex % OutputWidth, OutputIndex / OutputWidth);
+	const float2 OutputUV =
+		(float2(OutputPixel) + 0.5f)
+			* ResolvedView.ViewSizeAndInvSize.zw;
+	Output.Position = float4(
+		OutputUV.x * 2.0f - 1.0f,
+		1.0f - OutputUV.y * 2.0f,
+		0.0f,
+		1.0f);
+	Output.WorldPositionAndOutputIndex = float4(
+		DFFastSubtractDemote(
+			WorldPosition.xyz,
+			ResolvedView.PreViewTranslation),
+		(float)OutputIndex + 1.0f);
+}
+
+void FixedFrameWPOBoundsPS(
+	nointerpolation float4 WorldPositionAndOutputIndex : TEXCOORD0,
+	in FStereoPSInput StereoInput,
+	out float4 OutColor : SV_Target0)
+{
+	StereoSetupPS(StereoInput);
+	OutColor = WorldPositionAndOutputIndex;
+}
+
+void MainVS(
+	FVertexFactoryInput Input,
+	out FFoliageBakerDepthCorrectVSToPS Output)
+{
+	StereoSetupVF(Input, Output.StereoOutput);
+	FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+	float4 WorldPosition = VertexFactoryGetWorldPosition(Input, VFIntermediates);
+	float4 WorldPositionExcludingWPO = WorldPosition;
+	half3x3 TangentToLocal = VertexFactoryGetTangentToLocal(Input, VFIntermediates);
+	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(
+		Input,
+		VFIntermediates,
+		WorldPosition.xyz,
+		TangentToLocal);
+	WorldPosition.xyz += GetMaterialWorldPositionOffset(VertexParameters);
+	float4 RasterizedWorldPosition = VertexFactoryGetRasterizedWorldPosition(
+		Input,
+		VFIntermediates,
+		WorldPosition);
+	Output.Position = INVARIANT(mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip));
+	Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(
+		Input,
+		VFIntermediates,
+		VertexParameters);
+	Output.PixelPosition = WorldPosition;
+#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
+	Output.PixelPositionExcludingWPO = WorldPositionExcludingWPO.xyz;
+#endif
+}
+
+void MainPS(
+	FVertexFactoryInterpolantsVSToPS Interpolants,
+	float4 PixelPosition : TEXCOORD6,
+#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
+	float3 PixelPositionExcludingWPO : TEXCOORD7,
+#endif
+	in FStereoPSInput StereoInput,
+	in INPUT_POSITION_QUALIFIERS float4 SvPosition : SV_Position
+	OPTIONAL_IsFrontFace
+	OPTIONAL_OutDepthConservative
+	,out float4 OutColor : SV_Target0)
+{
+	StereoSetupPS(StereoInput);
+	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(Interpolants, SvPosition);
+	FPixelMaterialInputs PixelMaterialInputs;
+	// Keep custom early opacity clipping in the same order as the project's
+	// base/depth passes when the engine extension is available.
+#ifdef KG_EARLY_OPACITY_MASK_CLIP
+	KG_EARLY_OPACITY_MASK_CLIP(MaterialParameters);
+#endif
+#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
+	float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);
+	float3 TranslatedWorldPosition = SvPositionToResolvedTranslatedWorld(SvPosition);
+	CalcMaterialParametersEx(
+		MaterialParameters,
+		PixelMaterialInputs,
+		SvPosition,
+		ScreenPosition,
+		bIsFrontFace,
+		TranslatedWorldPosition,
+		PixelPositionExcludingWPO);
+#else
+	CalcMaterialParameters(MaterialParameters, PixelMaterialInputs, SvPosition, bIsFrontFace);
+#endif
+#if OUTPUT_PIXEL_DEPTH_OFFSET
+	// FoliageBaker compiles its material proxies with PDO disabled. Keep the
+	// capture depth geometric even if that compile-time invariant regresses.
+	OutDepth = SvPosition.z;
+#endif
+	GetMaterialCoverageAndClipping(MaterialParameters, PixelMaterialInputs);
+	OutColor = float4(
+		GetMaterialEmissive(PixelMaterialInputs),
+		// Reversed orthographic depth: near 1, far 0, bounds center 0.5.
+		saturate(SvPosition.z));
+}
