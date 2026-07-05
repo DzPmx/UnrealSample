@@ -21,6 +21,13 @@
 		{
 			"Name": "PanoramicCapture",
 			"Enabled": true
+		},
+		{
+			"Name": "BillboardClouds",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
 		}
 	]
 }
