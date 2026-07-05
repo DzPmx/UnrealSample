@@ -38,6 +38,7 @@ namespace UE::BillboardClouds
 	struct FPlaneCoverSettings
 	{
 		double ErrorTolerance = 1.0;
+		double TextureCompactnessWeight = 0.25;
 		int32 NormalThetaSteps = 16;
 		int32 NormalPhiSteps = 9;
 		int32 RhoBinCount = 256;
@@ -103,6 +104,10 @@ namespace UE::BillboardClouds
 	};
 
 	bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError);
+	FVector ProjectPointToPlane(const FVector& Point, const FVector& PlaneNormal, double PlaneRho);
+	bool IsPointWithinPlaneError(const FVector& Point, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
+	bool IsTriangleValidForPlane(const FSourceTriangle& Triangle, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
+	bool DoesTriangleIntersectPlaneValidZone(const FSourceTriangle& Triangle, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
 	FPlaneCoverResult BuildGreedyPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
 	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverResult& Result, const FPlaneCoverSettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
 	FString SummarizePlaneCover(const FString& MeshName, const FPlaneCoverSettings& Settings, const FPlaneCoverResult& Result);

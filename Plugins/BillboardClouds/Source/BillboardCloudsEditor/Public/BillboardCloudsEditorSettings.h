@@ -29,6 +29,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Plane Space", meta = (ClampMin = "0", ClampMax = "16", ToolTip = "Safety cap for the paper's recursive adaptive refinement after picking the densest plane-space bin. Refinement still stops early when the sub-bin center plane is valid for the whole sub-bin validity set."))
 	int32 AdaptiveRefinementDepth = 10;
 
+	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "0.0", ClampMax = "8.0", ToolTip = "Paper Section 6.1 compactness weight. Higher values favor spatially compact validity sets and compact clusters."))
+	double TextureCompactnessWeight = 0.25;
+
 	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "16", ClampMax = "1024", ToolTip = "Maximum interior pixel resolution used for the largest object-space billboard extent. Smaller billboards receive proportionally smaller atlas tiles."))
 	int32 TextureTileResolution = 128;
 

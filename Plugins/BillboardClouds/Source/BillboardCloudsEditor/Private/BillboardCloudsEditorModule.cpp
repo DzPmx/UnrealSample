@@ -55,6 +55,7 @@ namespace
 		Settings.TextureTileResolution = FMath::Clamp(EditorSettings.TextureTileResolution, 16, 1024);
 		Settings.TextureTilePaddingPixels = FMath::Clamp(EditorSettings.TextureTilePaddingPixels, 0, 128);
 		Settings.TextureAtlasMaxResolution = FMath::Clamp(EditorSettings.TextureAtlasMaxResolution, 256, 8192);
+		Settings.TextureCompactnessWeight = FMath::Clamp(EditorSettings.TextureCompactnessWeight, 0.0, 8.0);
 		Settings.ErrorTolerance = FMath::Max(
 			FMath::Max(0.0, EditorSettings.MinimumErrorCm),
 			StaticMesh.GetBounds().SphereRadius * FMath::Max(0.0, EditorSettings.RelativeError));
@@ -830,20 +831,6 @@ namespace
 		}
 	}
 
-	bool IsTriangleValidForTexturePlane(
-		const UE::BillboardClouds::FSourceTriangle& Triangle,
-		const FVector& PlaneNormal,
-		const double PlaneRho,
-		const double ErrorTolerance)
-	{
-		const double Distance0 = FVector::DotProduct(PlaneNormal, Triangle.Vertices[0]) - PlaneRho;
-		const double Distance1 = FVector::DotProduct(PlaneNormal, Triangle.Vertices[1]) - PlaneRho;
-		const double Distance2 = FVector::DotProduct(PlaneNormal, Triangle.Vertices[2]) - PlaneRho;
-		return FMath::Abs(Distance0) <= ErrorTolerance
-			&& FMath::Abs(Distance1) <= ErrorTolerance
-			&& FMath::Abs(Distance2) <= ErrorTolerance;
-	}
-
 	void RasterizeBillboardAtlas(
 		const UStaticMesh& SourceStaticMesh,
 		const TArray<UE::BillboardClouds::FSourceTriangle>& Triangles,
@@ -860,7 +847,7 @@ namespace
 		OutPixels.Init(FColor(0, 0, 0, 0), OutStats.Width * OutStats.Height);
 
 		TArray<double> DepthBuffer;
-		DepthBuffer.Init(TNumericLimits<double>::Max(), OutPixels.Num());
+		DepthBuffer.Init(-TNumericLimits<double>::Max(), OutPixels.Num());
 
 		const TArray<FMaterialBakeData> MaterialBakeData = BuildMaterialBakeData(SourceStaticMesh, Triangles, OutStats);
 
@@ -894,8 +881,7 @@ namespace
 				for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
 				{
 					const FVector& Vertex = Triangle.Vertices[VertexIndex];
-					const double SignedDistance = FVector::DotProduct(PlaneInfo.Normal, Vertex) - PlaneInfo.Rho;
-					const FVector ProjectedVertex = Vertex - PlaneInfo.Normal * SignedDistance;
+					const FVector ProjectedVertex = UE::BillboardClouds::ProjectPointToPlane(Vertex, PlaneInfo.Normal, PlaneInfo.Rho);
 					const double UFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisU) - PlaneInfo.MinU) / (PlaneInfo.MaxU - PlaneInfo.MinU);
 					const double VFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisV) - PlaneInfo.MinV) / (PlaneInfo.MaxV - PlaneInfo.MinV);
 					ProjectedPoints[VertexIndex] = FVector2D(
@@ -922,14 +908,15 @@ namespace
 						}
 
 						const FVector SourcePoint = Triangle.Vertices[0] * W0 + Triangle.Vertices[1] * W1 + Triangle.Vertices[2] * W2;
-						const double PlaneDistance = FMath::Abs(FVector::DotProduct(PlaneInfo.Normal, SourcePoint) - PlaneInfo.Rho);
-						if (PlaneDistance > Settings.ErrorTolerance)
+						const double SignedPlaneDistance = FVector::DotProduct(PlaneInfo.Normal, SourcePoint) - PlaneInfo.Rho;
+						if (!UE::BillboardClouds::IsPointWithinPlaneError(SourcePoint, PlaneInfo.Normal, PlaneInfo.Rho, Settings))
 						{
 							continue;
 						}
 
 						const int32 PixelIndex = Y * OutStats.Width + X;
-						if (!DepthBuffer.IsValidIndex(PixelIndex) || PlaneDistance > DepthBuffer[PixelIndex])
+						const double TextureDepth = SignedPlaneDistance;
+						if (!DepthBuffer.IsValidIndex(PixelIndex) || TextureDepth < DepthBuffer[PixelIndex])
 						{
 							continue;
 						}
@@ -958,7 +945,7 @@ namespace
 						LinearColor.B *= PixelAlpha;
 						OutPixels[PixelIndex] = LinearColor.ToFColorSRGB();
 						OutPixels[PixelIndex].A = static_cast<uint8>(FMath::RoundToInt(PixelAlpha * 255.0f));
-						DepthBuffer[PixelIndex] = PlaneDistance;
+						DepthBuffer[PixelIndex] = TextureDepth;
 					}
 				}
 			};
@@ -980,7 +967,7 @@ namespace
 			for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
 			{
 				if (!QueuedTriangles[TriangleIndex]
-					&& IsTriangleValidForTexturePlane(Triangles[TriangleIndex], PlaneInfo.Normal, PlaneInfo.Rho, Settings.ErrorTolerance))
+					&& UE::BillboardClouds::DoesTriangleIntersectPlaneValidZone(Triangles[TriangleIndex], PlaneInfo.Normal, PlaneInfo.Rho, Settings))
 				{
 					QueuedTriangles[TriangleIndex] = true;
 					TextureTriangleIndices.Add(TriangleIndex);

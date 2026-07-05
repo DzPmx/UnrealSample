@@ -54,6 +54,7 @@ namespace UE::BillboardClouds
 			FCandidatePlane Plane;
 			TArray<int32> ValidTriangleIndices;
 			double ValidContribution = 0.0;
+			double SelectionScore = 0.0;
 			double CoveredArea = 0.0;
 		};
 
@@ -105,13 +106,129 @@ namespace UE::BillboardClouds
 			TArray<int32> TriangleIndices;
 		};
 
-		bool ComputeValidityInterval(const FSourceTriangle& Triangle, const FVector& PlaneNormal, const double ErrorTolerance, double& OutValidMin, double& OutValidMax)
+		FVector NormalFromPlaneSpace(double Theta, double Phi);
+
+		double UnwrapThetaNear(const double Theta, const double ReferenceTheta)
 		{
-			const double Rho0 = FVector::DotProduct(PlaneNormal, Triangle.Vertices[0]);
-			const double Rho1 = FVector::DotProduct(PlaneNormal, Triangle.Vertices[1]);
-			const double Rho2 = FVector::DotProduct(PlaneNormal, Triangle.Vertices[2]);
-			OutValidMin = FMath::Max3(Rho0 - ErrorTolerance, Rho1 - ErrorTolerance, Rho2 - ErrorTolerance);
-			OutValidMax = FMath::Min3(Rho0 + ErrorTolerance, Rho1 + ErrorTolerance, Rho2 + ErrorTolerance);
+			double UnwrappedTheta = Theta;
+			while (UnwrappedTheta < ReferenceTheta - UE_DOUBLE_PI)
+			{
+				UnwrappedTheta += UE_TWO_PI;
+			}
+			while (UnwrappedTheta > ReferenceTheta + UE_DOUBLE_PI)
+			{
+				UnwrappedTheta -= UE_TWO_PI;
+			}
+			return UnwrappedTheta;
+		}
+
+		bool IsThetaInside(const double Theta, const double ThetaMin, const double ThetaMax)
+		{
+			const double CenterTheta = 0.5 * (ThetaMin + ThetaMax);
+			const double UnwrappedTheta = UnwrapThetaNear(Theta, CenterTheta);
+			return UnwrappedTheta >= ThetaMin - 1.0e-8 && UnwrappedTheta <= ThetaMax + 1.0e-8;
+		}
+
+		void AddAngularDotCandidate(
+			const FAngularBinContext& Context,
+			const FVector& Point,
+			const double Theta,
+			const double Phi,
+			double& InOutMinDot,
+			double& InOutMaxDot)
+		{
+			if (Phi < Context.PhiMin - 1.0e-8 || Phi > Context.PhiMax + 1.0e-8 || !IsThetaInside(Theta, Context.ThetaMin, Context.ThetaMax))
+			{
+				return;
+			}
+
+			const double Dot = FVector::DotProduct(Point, NormalFromPlaneSpace(Theta, Phi));
+			InOutMinDot = FMath::Min(InOutMinDot, Dot);
+			InOutMaxDot = FMath::Max(InOutMaxDot, Dot);
+		}
+
+		void ComputeAngularDotRangeForPoint(
+			const FAngularBinContext& Context,
+			const FVector& Point,
+			double& OutMinDot,
+			double& OutMaxDot)
+		{
+			OutMinDot = TNumericLimits<double>::Max();
+			OutMaxDot = -TNumericLimits<double>::Max();
+
+			for (const FVector& CornerNormal : Context.CornerNormals)
+			{
+				const double Dot = FVector::DotProduct(Point, CornerNormal);
+				OutMinDot = FMath::Min(OutMinDot, Dot);
+				OutMaxDot = FMath::Max(OutMaxDot, Dot);
+			}
+
+			if (Point.IsNearlyZero())
+			{
+				return;
+			}
+
+			const FVector PointDirection = Point.GetSafeNormal();
+			const double PointTheta = FMath::Atan2(PointDirection.Y, PointDirection.X);
+			const double PointPhi = FMath::Acos(FMath::Clamp(PointDirection.Z, -1.0, 1.0));
+			const double OppositeTheta = PointTheta + UE_DOUBLE_PI;
+			const double OppositePhi = UE_DOUBLE_PI - PointPhi;
+
+			AddAngularDotCandidate(Context, Point, PointTheta, PointPhi, OutMinDot, OutMaxDot);
+			AddAngularDotCandidate(Context, Point, OppositeTheta, OppositePhi, OutMinDot, OutMaxDot);
+			AddAngularDotCandidate(Context, Point, PointTheta, FMath::Clamp(PointPhi, Context.PhiMin, Context.PhiMax), OutMinDot, OutMaxDot);
+			AddAngularDotCandidate(Context, Point, OppositeTheta, FMath::Clamp(OppositePhi, Context.PhiMin, Context.PhiMax), OutMinDot, OutMaxDot);
+
+			const double BoundaryThetas[2] = { Context.ThetaMin, Context.ThetaMax };
+			for (const double BoundaryTheta : BoundaryThetas)
+			{
+				const double DeltaTheta = BoundaryTheta - PointTheta;
+				const double A = FMath::Sin(PointPhi) * FMath::Cos(DeltaTheta);
+				const double B = FMath::Cos(PointPhi);
+				double PhiExtremum = FMath::Atan2(A, B);
+				if (PhiExtremum < 0.0)
+				{
+					PhiExtremum += UE_DOUBLE_PI;
+				}
+
+				AddAngularDotCandidate(Context, Point, BoundaryTheta, PhiExtremum, OutMinDot, OutMaxDot);
+				AddAngularDotCandidate(Context, Point, BoundaryTheta, PhiExtremum + UE_DOUBLE_PI, OutMinDot, OutMaxDot);
+			}
+
+			const double BoundaryPhis[2] = { Context.PhiMin, Context.PhiMax };
+			for (const double BoundaryPhi : BoundaryPhis)
+			{
+				AddAngularDotCandidate(Context, Point, PointTheta, BoundaryPhi, OutMinDot, OutMaxDot);
+				AddAngularDotCandidate(Context, Point, OppositeTheta, BoundaryPhi, OutMinDot, OutMaxDot);
+			}
+		}
+
+		bool ComputeVertexRhoRangeForNormal(
+			const FSourceTriangle& Triangle,
+			const int32 VertexIndex,
+			const FVector& PlaneNormal,
+			const FPlaneCoverSettings& Settings,
+			double& OutMinRho,
+			double& OutMaxRho)
+		{
+			const double Rho = FVector::DotProduct(PlaneNormal, Triangle.Vertices[VertexIndex]);
+			OutMinRho = Rho - Settings.ErrorTolerance;
+			OutMaxRho = Rho + Settings.ErrorTolerance;
+			return true;
+		}
+
+		bool ComputeValidityInterval(const FSourceTriangle& Triangle, const FVector& PlaneNormal, const FPlaneCoverSettings& Settings, double& OutValidMin, double& OutValidMax)
+		{
+			OutValidMin = -TNumericLimits<double>::Max();
+			OutValidMax = TNumericLimits<double>::Max();
+			for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+			{
+				double VertexMinRho = 0.0;
+				double VertexMaxRho = 0.0;
+				ComputeVertexRhoRangeForNormal(Triangle, VertexIndex, PlaneNormal, Settings, VertexMinRho, VertexMaxRho);
+				OutValidMin = FMath::Max(OutValidMin, VertexMinRho);
+				OutValidMax = FMath::Min(OutValidMax, VertexMaxRho);
+			}
 			return OutValidMax >= OutValidMin;
 		}
 
@@ -119,7 +236,7 @@ namespace UE::BillboardClouds
 		{
 			double ValidMin = 0.0;
 			double ValidMax = 0.0;
-			return ComputeValidityInterval(Triangle, CandidatePlane.Normal, Settings.ErrorTolerance, ValidMin, ValidMax)
+			return ComputeValidityInterval(Triangle, CandidatePlane.Normal, Settings, ValidMin, ValidMax)
 				&& CandidatePlane.Rho >= ValidMin
 				&& CandidatePlane.Rho <= ValidMax;
 		}
@@ -173,7 +290,7 @@ namespace UE::BillboardClouds
 		bool ComputeAngularBinValidityRhoRangeForContext(
 			const FSourceTriangle& Triangle,
 			const FAngularBinContext& Context,
-			const double ErrorTolerance,
+			const FPlaneCoverSettings& Settings,
 			double& OutValidMin,
 			double& OutValidMax)
 		{
@@ -187,15 +304,15 @@ namespace UE::BillboardClouds
 
 			for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
 			{
-				const FVector& Vertex = Triangle.Vertices[VertexIndex];
-				const double Rho0 = FVector::DotProduct(Vertex, Context.CornerNormals[0]);
-				const double Rho1 = FVector::DotProduct(Vertex, Context.CornerNormals[1]);
-				const double Rho2 = FVector::DotProduct(Vertex, Context.CornerNormals[2]);
-				const double Rho3 = FVector::DotProduct(Vertex, Context.CornerNormals[3]);
-				const double VertexProjectionMin = FMath::Min(FMath::Min(Rho0, Rho1), FMath::Min(Rho2, Rho3));
-				const double VertexProjectionMax = FMath::Max(FMath::Max(Rho0, Rho1), FMath::Max(Rho2, Rho3));
-				OutValidMin = FMath::Max(OutValidMin, VertexProjectionMin - ErrorTolerance);
-				OutValidMax = FMath::Min(OutValidMax, VertexProjectionMax + ErrorTolerance);
+				double VertexProjectionMin = TNumericLimits<double>::Max();
+				double VertexProjectionMax = -TNumericLimits<double>::Max();
+
+				ComputeAngularDotRangeForPoint(Context, Triangle.Vertices[VertexIndex], VertexProjectionMin, VertexProjectionMax);
+				VertexProjectionMin -= Settings.ErrorTolerance;
+				VertexProjectionMax += Settings.ErrorTolerance;
+
+				OutValidMin = FMath::Max(OutValidMin, VertexProjectionMin);
+				OutValidMax = FMath::Min(OutValidMax, VertexProjectionMax);
 			}
 
 			return OutValidMax >= OutValidMin;
@@ -207,12 +324,12 @@ namespace UE::BillboardClouds
 			const double ThetaHalfExtent,
 			const double PhiCenter,
 			const double PhiHalfExtent,
-			const double ErrorTolerance,
+			const FPlaneCoverSettings& Settings,
 			double& OutValidMin,
 			double& OutValidMax)
 		{
 			const FAngularBinContext Context = MakeAngularBinContext(ThetaCenter, ThetaHalfExtent, PhiCenter, PhiHalfExtent);
-			return ComputeAngularBinValidityRhoRangeForContext(Triangle, Context, ErrorTolerance, OutValidMin, OutValidMax);
+			return ComputeAngularBinValidityRhoRangeForContext(Triangle, Context, Settings, OutValidMin, OutValidMax);
 		}
 
 		void BuildPlaneFrame(const FVector& Normal, FVector& OutAxisU, FVector& OutAxisV)
@@ -381,8 +498,7 @@ namespace UE::BillboardClouds
 				const FSourceTriangle& Triangle = Triangles[TriangleIndex];
 				for (const FVector& Vertex : Triangle.Vertices)
 				{
-					const double SignedDistance = FVector::DotProduct(PlaneNormal, Vertex) - PlaneRho;
-					const FVector ProjectedVertex = Vertex - PlaneNormal * SignedDistance;
+					const FVector ProjectedVertex = ProjectPointToPlane(Vertex, PlaneNormal, PlaneRho);
 					ProjectedPoints.Emplace(
 						FVector::DotProduct(ProjectedVertex, InOutAxisU),
 						FVector::DotProduct(ProjectedVertex, InOutAxisV));
@@ -817,9 +933,9 @@ namespace UE::BillboardClouds
 					}
 
 					const FSourceTriangle& Triangle = Triangles[TriangleIndex];
-					for (const FVector& Vertex : Triangle.Vertices)
+					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
 					{
-						const double Rho = FVector::DotProduct(Normal, Vertex);
+						const double Rho = FVector::DotProduct(Normal, Triangle.Vertices[VertexIndex]);
 						LocalMin = FMath::Min(LocalMin, Rho);
 						LocalMax = FMath::Max(LocalMax, Rho);
 					}
@@ -858,7 +974,7 @@ namespace UE::BillboardClouds
 			if (!ComputeAngularBinValidityRhoRangeForContext(
 				Triangle,
 				AngularBinContext,
-				Settings.ErrorTolerance,
+				Settings,
 				ValidMin,
 				ValidMax))
 			{
@@ -955,7 +1071,7 @@ namespace UE::BillboardClouds
 
 				double ValidMin = 0.0;
 				double ValidMax = 0.0;
-				if (ComputeAngularBinValidityRhoRangeForContext(Triangles[TriangleIndex], AngularBinContext, Settings.ErrorTolerance, ValidMin, ValidMax)
+				if (ComputeAngularBinValidityRhoRangeForContext(Triangles[TriangleIndex], AngularBinContext, Settings, ValidMin, ValidMax)
 					&& IntervalsTouchOrOverlap(ValidMin, ValidMax, RhoMin, RhoMax))
 				{
 					ValidFlags[TriangleIndex] = 1;
@@ -1006,7 +1122,7 @@ namespace UE::BillboardClouds
 				if (!ComputeAngularBinValidityRhoRangeForContext(
 					Triangle,
 					AngularBinContext,
-					Settings.ErrorTolerance,
+					Settings,
 					SimpleValidMin,
 					SimpleValidMax))
 				{
@@ -1035,7 +1151,7 @@ namespace UE::BillboardClouds
 
 					double CenterValidMin = 0.0;
 					double CenterValidMax = 0.0;
-					if (ComputeValidityInterval(Triangle, Evaluation.Normal, Settings.ErrorTolerance, CenterValidMin, CenterValidMax)
+					if (ComputeValidityInterval(Triangle, Evaluation.Normal, Settings, CenterValidMin, CenterValidMax)
 						&& Evaluation.Rho >= CenterValidMin
 						&& Evaluation.Rho <= CenterValidMax)
 					{
@@ -1092,7 +1208,7 @@ namespace UE::BillboardClouds
 				if (!ComputeAngularBinValidityRhoRangeForContext(
 					Triangle,
 					AngularBinContext,
-					Settings.ErrorTolerance,
+					Settings,
 					SimpleValidMin,
 					SimpleValidMax))
 				{
@@ -1342,6 +1458,174 @@ namespace UE::BillboardClouds
 			return CandidatePlanes;
 		}
 
+		double ComputeIrregularityFromBounds(const FBox2D& Bounds)
+		{
+			if (!Bounds.bIsValid)
+			{
+				return 0.0;
+			}
+
+			const FVector2D Size = Bounds.GetSize();
+			const double Area = FMath::Max(Size.X * Size.Y, 1.0e-6);
+			const double Perimeter = 2.0 * (FMath::Max(Size.X, 0.0) + FMath::Max(Size.Y, 0.0));
+			return (Perimeter * Perimeter) / Area;
+		}
+
+		double CompactnessAdjustedScore(const double Contribution, const FBox2D& Bounds, const FPlaneCoverSettings& Settings)
+		{
+			if (Contribution <= 0.0 || Settings.TextureCompactnessWeight <= 0.0)
+			{
+				return Contribution;
+			}
+
+			const double Irregularity = ComputeIrregularityFromBounds(Bounds);
+			const double NormalizedExcess = FMath::Max(0.0, Irregularity / 16.0 - 1.0);
+			return Contribution / (1.0 + Settings.TextureCompactnessWeight * NormalizedExcess);
+		}
+
+		void ApplyTextureCompactness(
+			const TArray<FSourceTriangle>& Triangles,
+			const FPlaneCoverSettings& Settings,
+			FPreparedCandidate& Candidate)
+		{
+			Candidate.SelectionScore = Candidate.ValidContribution;
+			if (Settings.TextureCompactnessWeight <= 0.0 || Candidate.ValidTriangleIndices.Num() <= 1)
+			{
+				return;
+			}
+
+			FVector AxisU = FVector::RightVector;
+			FVector AxisV = FVector::UpVector;
+			BuildPlaneFrame(Candidate.Plane.Normal, AxisU, AxisV);
+
+			struct FProjectedTriangle
+			{
+				int32 TriangleIndex = INDEX_NONE;
+				FVector2D Centroid = FVector2D::ZeroVector;
+				double Contribution = 0.0;
+				double Area = 0.0;
+			};
+
+			TArray<FProjectedTriangle> ProjectedTriangles;
+			ProjectedTriangles.Reserve(Candidate.ValidTriangleIndices.Num());
+
+			FBox2D FullBounds(ForceInit);
+			for (const int32 TriangleIndex : Candidate.ValidTriangleIndices)
+			{
+				if (!Triangles.IsValidIndex(TriangleIndex))
+				{
+					continue;
+				}
+
+				const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+				const FVector Centroid3D = (Triangle.Vertices[0] + Triangle.Vertices[1] + Triangle.Vertices[2]) / 3.0;
+				FProjectedTriangle& ProjectedTriangle = ProjectedTriangles.AddDefaulted_GetRef();
+				ProjectedTriangle.TriangleIndex = TriangleIndex;
+				ProjectedTriangle.Centroid = FVector2D(
+					FVector::DotProduct(Centroid3D, AxisU),
+					FVector::DotProduct(Centroid3D, AxisV));
+				ProjectedTriangle.Contribution = ComputeContribution(Triangle, Candidate.Plane.Normal);
+				ProjectedTriangle.Area = Triangle.Area;
+				FullBounds += ProjectedTriangle.Centroid;
+			}
+
+			Candidate.SelectionScore = CompactnessAdjustedScore(Candidate.ValidContribution, FullBounds, Settings);
+			if (ProjectedTriangles.Num() <= 1 || !FullBounds.bIsValid)
+			{
+				return;
+			}
+
+			const FVector2D FullSize = FullBounds.GetSize();
+			const double BucketSize = FMath::Max3(
+				FMath::Max(FullSize.X, FullSize.Y) / 16.0,
+				Settings.ErrorTolerance * 2.0,
+				1.0);
+
+			TMap<FIntPoint, TArray<int32>> BucketTriangleIndices;
+			for (int32 ProjectedIndex = 0; ProjectedIndex < ProjectedTriangles.Num(); ++ProjectedIndex)
+			{
+				const FVector2D Relative = ProjectedTriangles[ProjectedIndex].Centroid - FullBounds.Min;
+				const FIntPoint Bucket(
+					FMath::FloorToInt(Relative.X / BucketSize),
+					FMath::FloorToInt(Relative.Y / BucketSize));
+				BucketTriangleIndices.FindOrAdd(Bucket).Add(ProjectedIndex);
+			}
+
+			TSet<FIntPoint> VisitedBuckets;
+			double BestClusterScore = -TNumericLimits<double>::Max();
+			double BestClusterContribution = 0.0;
+			double BestClusterArea = 0.0;
+			TArray<int32> BestClusterTriangleIndices;
+
+			for (const TPair<FIntPoint, TArray<int32>>& BucketPair : BucketTriangleIndices)
+			{
+				if (VisitedBuckets.Contains(BucketPair.Key))
+				{
+					continue;
+				}
+
+				TArray<FIntPoint> Stack;
+				Stack.Add(BucketPair.Key);
+				VisitedBuckets.Add(BucketPair.Key);
+
+				FBox2D ClusterBounds(ForceInit);
+				double ClusterContribution = 0.0;
+				double ClusterArea = 0.0;
+				TArray<int32> ClusterTriangleIndices;
+
+				while (!Stack.IsEmpty())
+				{
+					const FIntPoint Bucket = Stack.Pop(EAllowShrinking::No);
+					if (const TArray<int32>* BucketProjectedIndices = BucketTriangleIndices.Find(Bucket))
+					{
+						for (const int32 ProjectedIndex : *BucketProjectedIndices)
+						{
+							const FProjectedTriangle& ProjectedTriangle = ProjectedTriangles[ProjectedIndex];
+							ClusterBounds += ProjectedTriangle.Centroid;
+							ClusterContribution += ProjectedTriangle.Contribution;
+							ClusterArea += ProjectedTriangle.Area;
+							ClusterTriangleIndices.Add(ProjectedTriangle.TriangleIndex);
+						}
+					}
+
+					for (int32 NeighborY = -1; NeighborY <= 1; ++NeighborY)
+					{
+						for (int32 NeighborX = -1; NeighborX <= 1; ++NeighborX)
+						{
+							if (NeighborX == 0 && NeighborY == 0)
+							{
+								continue;
+							}
+
+							const FIntPoint NeighborBucket(Bucket.X + NeighborX, Bucket.Y + NeighborY);
+							if (!VisitedBuckets.Contains(NeighborBucket) && BucketTriangleIndices.Contains(NeighborBucket))
+							{
+								VisitedBuckets.Add(NeighborBucket);
+								Stack.Add(NeighborBucket);
+							}
+						}
+					}
+				}
+
+				const double ClusterScore = CompactnessAdjustedScore(ClusterContribution, ClusterBounds, Settings);
+				if (ClusterScore > BestClusterScore)
+				{
+					BestClusterScore = ClusterScore;
+					BestClusterContribution = ClusterContribution;
+					BestClusterArea = ClusterArea;
+					BestClusterTriangleIndices = MoveTemp(ClusterTriangleIndices);
+				}
+			}
+
+			if (!BestClusterTriangleIndices.IsEmpty() && BestClusterScore > Candidate.SelectionScore)
+			{
+				Candidate.ValidTriangleIndices = MoveTemp(BestClusterTriangleIndices);
+				Candidate.ValidContribution = BestClusterContribution;
+				Candidate.CoveredArea = BestClusterArea;
+				Candidate.SelectionScore = BestClusterScore;
+			}
+		}
+
 		TArray<FPreparedCandidate> PrepareCandidates(const TArray<FSourceTriangle>& Triangles, const TBitArray<>& CoveredTriangles, const TArray<FCandidatePlane>& CandidatePlanes, const FPlaneCoverSettings& Settings)
 		{
 			TArray<FPreparedCandidate> PreparedCandidates;
@@ -1387,6 +1671,7 @@ namespace UE::BillboardClouds
 
 				if (!PreparedCandidate.ValidTriangleIndices.IsEmpty())
 				{
+					ApplyTextureCompactness(Triangles, Settings, PreparedCandidate);
 					PreparedCandidates.Add(MoveTemp(PreparedCandidate));
 				}
 			}
@@ -1512,6 +1797,44 @@ namespace UE::BillboardClouds
 		return true;
 	}
 
+	FVector ProjectPointToPlane(const FVector& Point, const FVector& PlaneNormal, const double PlaneRho)
+	{
+		const double SignedDistance = FVector::DotProduct(PlaneNormal, Point) - PlaneRho;
+		return Point - PlaneNormal * SignedDistance;
+	}
+
+	bool IsPointWithinPlaneError(const FVector& Point, const FVector& PlaneNormal, const double PlaneRho, const FPlaneCoverSettings& Settings)
+	{
+		return FMath::Abs(FVector::DotProduct(PlaneNormal, Point) - PlaneRho) <= Settings.ErrorTolerance;
+	}
+
+	bool IsTriangleValidForPlane(const FSourceTriangle& Triangle, const FVector& PlaneNormal, const double PlaneRho, const FPlaneCoverSettings& Settings)
+	{
+		double ValidMin = 0.0;
+		double ValidMax = 0.0;
+		return ComputeValidityInterval(Triangle, PlaneNormal, Settings, ValidMin, ValidMax)
+			&& PlaneRho >= ValidMin
+			&& PlaneRho <= ValidMax;
+	}
+
+	bool DoesTriangleIntersectPlaneValidZone(const FSourceTriangle& Triangle, const FVector& PlaneNormal, const double PlaneRho, const FPlaneCoverSettings& Settings)
+	{
+		if (IsTriangleValidForPlane(Triangle, PlaneNormal, PlaneRho, Settings))
+		{
+			return true;
+		}
+
+		double MinDistance = TNumericLimits<double>::Max();
+		double MaxDistance = -TNumericLimits<double>::Max();
+		for (const FVector& Vertex : Triangle.Vertices)
+		{
+			const double SignedDistance = FVector::DotProduct(PlaneNormal, Vertex) - PlaneRho;
+			MinDistance = FMath::Min(MinDistance, SignedDistance);
+			MaxDistance = FMath::Max(MaxDistance, SignedDistance);
+		}
+		return MinDistance <= Settings.ErrorTolerance && MaxDistance >= -Settings.ErrorTolerance;
+	}
+
 	FPlaneCoverResult BuildGreedyPlaneCoverSingle(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings)
 	{
 		const double TotalStartSeconds = FPlatformTime::Seconds();
@@ -1554,7 +1877,7 @@ namespace UE::BillboardClouds
 			for (int32 CandidateIndex = 0; CandidateIndex < PreparedCandidates.Num(); ++CandidateIndex)
 			{
 				const FPreparedCandidate& Candidate = PreparedCandidates[CandidateIndex];
-				const double Score = Candidate.ValidContribution;
+				const double Score = Candidate.SelectionScore;
 				if (Score > BestScore && !Candidate.ValidTriangleIndices.IsEmpty())
 				{
 					BestCandidateIndex = CandidateIndex;
@@ -1838,15 +2161,16 @@ namespace UE::BillboardClouds
 			? 100.0 * Result.CoveredArea / Result.SourceArea
 			: 0.0;
 
+		const FString MetricSummary = FString::Printf(TEXT("object-space, epsilon=%.2f cm"), Settings.ErrorTolerance);
 		const FString PenaltySummary = FString::Printf(TEXT("on, weight=%.2f, directional missed set"), PaperPenaltyWeight);
 		const FString TextureSummary = FString::Printf(
-			TEXT("on, object-space variable tiles up to %d px, padding=%d px, max atlas=%d, valid-zone shooting"),
+			TEXT("on, object-space variable tiles up to %d px, padding=%d px, max atlas=%d, clipped valid-zone shooting"),
 			Settings.TextureTileResolution,
 			Settings.TextureTilePaddingPixels,
 			Settings.TextureAtlasMaxResolution);
 
 		FString Summary = FString::Printf(
-			TEXT("%s\n  algorithm: RR-4485 greedy plane-space cover\n  triangles: %d, picked candidates: max %d/iter, total %d\n  iterations: %d, planes: %d, covered: %d / %d (%.1f%%), area: %.1f%%\n  epsilon: %.2f cm\n  grid: theta bins=%d, phi bins=%d, rho bins=%d\n  density: angular-bin simple validity, rho-overlap weighted projected-area contribution\n  density update: persistent grid, incremental remove collapsed faces, parallel direction slices\n  adaptive refinement: theta/phi/rho 27-neighbor subdivision, parallel score-only sub-bin evaluation, shared candidate sets, winner-only index collection, safety depth %d\n  validity: reference-style corner-normal rho range, per-cell angular context\n  final validity: strict oriented epsilon final set\n  plane placement: refined density plane used directly\n  billboard footprint: projected minimum-area rectangle\n  texture atlas: %s\n  timing: total %.2fs, density init %.2fs, search/refine %.2fs, candidate build/refine %.2fs, prepare %.2fs, density update %.2fs\n  penalty: %s"),
+			TEXT("%s\n  algorithm: RR-4485 greedy plane-space cover\n  triangles: %d, picked candidates: max %d/iter, total %d\n  iterations: %d, planes: %d, covered: %d / %d (%.1f%%), area: %.1f%%\n  metric: %s\n  grid: theta bins=%d, phi bins=%d, rho bins=%d\n  density: angular-bin conservative rho range, rho-overlap weighted contribution, compactness weight %.2f\n  density update: persistent grid, incremental remove collapsed faces, parallel direction slices\n  adaptive refinement: theta/phi/rho 27-neighbor subdivision, parallel score-only sub-bin evaluation, shared candidate sets, winner-only index collection, safety depth %d\n  validity: angular-bin vertex extrema rho range, per-cell angular context\n  final validity: strict oriented final set\n  plane placement: refined density plane used directly\n  billboard footprint: object-space projection minimum-area rectangle\n  texture atlas: %s\n  timing: total %.2fs, density init %.2fs, search/refine %.2fs, candidate build/refine %.2fs, prepare %.2fs, density update %.2fs\n  penalty: %s"),
 			*MeshName,
 			Result.SourceTriangleCount,
 			Result.MaxIterationCandidatePlaneCount,
@@ -1857,10 +2181,11 @@ namespace UE::BillboardClouds
 			Result.SourceTriangleCount,
 			CoveredTrianglePercent,
 			CoveredAreaPercent,
-			Settings.ErrorTolerance,
+			*MetricSummary,
 			Settings.NormalThetaSteps,
 			Settings.NormalPhiSteps,
 			Settings.RhoBinCount,
+			Settings.TextureCompactnessWeight,
 			Settings.AdaptiveRefinementDepth,
 			*TextureSummary,
 			Result.TotalSeconds,
