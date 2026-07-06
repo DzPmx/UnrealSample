@@ -10,9 +10,13 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialExpressionIf.h"
 #include "Materials/MaterialExpressionTextureSample.h"
 #include "Materials/MaterialExpressionTextureSampleParameter.h"
+#include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Materials/MaterialExpressionTwoSidedSign.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstance.h"
 #include "Materials/MaterialParameters.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/PackageName.h"
@@ -48,18 +52,299 @@ namespace
 	UE::BillboardClouds::FPlaneCoverSettings BuildSettingsForMesh(const UStaticMesh& StaticMesh, const UBillboardCloudsEditorSettings& EditorSettings)
 	{
 		UE::BillboardClouds::FPlaneCoverSettings Settings;
+		switch (EditorSettings.Technique)
+		{
+		case EBillboardCloudsTechnique::KMeansClustering:
+			Settings.Technique = UE::BillboardClouds::EPlaneCoverTechnique::KMeansClustering;
+			break;
+		case EBillboardCloudsTechnique::GodOfWarCards:
+			Settings.Technique = UE::BillboardClouds::EPlaneCoverTechnique::GodOfWarCards;
+			break;
+		case EBillboardCloudsTechnique::PlaneSpaceGreedy:
+		default:
+			Settings.Technique = UE::BillboardClouds::EPlaneCoverTechnique::PlaneSpaceGreedy;
+			break;
+		}
 		Settings.NormalThetaSteps = FMath::Max(4, EditorSettings.NormalThetaSteps);
 		Settings.NormalPhiSteps = FMath::Max(3, EditorSettings.NormalPhiSteps);
 		Settings.RhoBinCount = FMath::Max(8, EditorSettings.RhoBinCount);
 		Settings.AdaptiveRefinementDepth = FMath::Clamp(EditorSettings.AdaptiveRefinementDepth, 0, 16);
-		Settings.TextureTileResolution = FMath::Clamp(EditorSettings.TextureTileResolution, 16, 1024);
+		Settings.KMeansPlaneCount = FMath::Clamp(EditorSettings.KMeansPlaneCount, 1, 4096);
+		Settings.KMeansMaxIterations = FMath::Clamp(EditorSettings.KMeansMaxIterations, 1, 512);
+		switch (EditorSettings.KMeansCrackReductionMode)
+		{
+		case EBillboardCloudsCrackReductionMode::PaperExact:
+			Settings.KMeansCrackReductionMode = UE::BillboardClouds::EKMeansCrackReductionMode::PaperExact;
+			break;
+		case EBillboardCloudsCrackReductionMode::BoundaryAware:
+			Settings.KMeansCrackReductionMode = UE::BillboardClouds::EKMeansCrackReductionMode::BoundaryAware;
+			break;
+		case EBillboardCloudsCrackReductionMode::Off:
+		default:
+			Settings.KMeansCrackReductionMode = UE::BillboardClouds::EKMeansCrackReductionMode::Off;
+			break;
+		}
+		Settings.KMeansBoundaryCrackReductionWidth = FMath::Clamp(EditorSettings.KMeansBoundaryCrackReductionWidthCm, 0.0, 200.0);
+		Settings.GodOfWarGeodesicSubdivisions = FMath::Clamp(EditorSettings.GodOfWarGeodesicSubdivisions, 0, 5);
+		Settings.GodOfWarCandidateSpacingMultiplier = FMath::Clamp(EditorSettings.GodOfWarCandidateSpacingMultiplier, 0.1, 8.0);
 		Settings.TextureTilePaddingPixels = FMath::Clamp(EditorSettings.TextureTilePaddingPixels, 0, 128);
-		Settings.TextureAtlasMaxResolution = FMath::Clamp(EditorSettings.TextureAtlasMaxResolution, 256, 8192);
+		Settings.TextureAtlasResolution = FMath::Clamp(EditorSettings.TextureAtlasResolution, 256, 8192);
+		switch (EditorSettings.DoubleSidedBakeMode)
+		{
+		case EBillboardCloudsDoubleSidedBakeMode::TrunkCardsOnly:
+			Settings.DoubleSidedBakeMode = UE::BillboardClouds::EDoubleSidedBakeMode::TrunkCardsOnly;
+			break;
+		case EBillboardCloudsDoubleSidedBakeMode::BillboardPlanesOnly:
+			Settings.DoubleSidedBakeMode = UE::BillboardClouds::EDoubleSidedBakeMode::BillboardPlanesOnly;
+			break;
+		case EBillboardCloudsDoubleSidedBakeMode::AllPlanes:
+			Settings.DoubleSidedBakeMode = UE::BillboardClouds::EDoubleSidedBakeMode::AllPlanes;
+			break;
+		case EBillboardCloudsDoubleSidedBakeMode::Off:
+		default:
+			Settings.DoubleSidedBakeMode = UE::BillboardClouds::EDoubleSidedBakeMode::Off;
+			break;
+		}
 		Settings.TextureCompactnessWeight = FMath::Clamp(EditorSettings.TextureCompactnessWeight, 0.0, 8.0);
 		Settings.ErrorTolerance = FMath::Max(
 			FMath::Max(0.0, EditorSettings.MinimumErrorCm),
 			StaticMesh.GetBounds().SphereRadius * FMath::Max(0.0, EditorSettings.RelativeError));
 		return Settings;
+	}
+
+	struct FTrunkCardTriangleSplit
+	{
+		bool bEnabled = false;
+		int32 MatchedMaterialCount = 0;
+		TArray<UE::BillboardClouds::FSourceTriangle> BillboardTriangles;
+		TArray<int32> BillboardToSourceTriangleIndices;
+		TArray<int32> TrunkTriangleIndices;
+	};
+
+	TArray<FString> BuildNormalizedKeywords(const TArray<FString>& RawKeywords)
+	{
+		TArray<FString> Keywords;
+		for (FString Keyword : RawKeywords)
+		{
+			Keyword.TrimStartAndEndInline();
+			Keyword.ToLowerInline();
+			if (!Keyword.IsEmpty())
+			{
+				Keywords.AddUnique(Keyword);
+			}
+		}
+		return Keywords;
+	}
+
+	bool DoesAnyKeywordMatchName(const TArray<FString>& Keywords, const FString& Name)
+	{
+		const FString LowerName = Name.ToLower();
+		for (const FString& Keyword : Keywords)
+		{
+			if (LowerName.Contains(Keyword))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool DoesMaterialOrParentNameMatchKeywords(const UMaterialInterface* MaterialInterface, const TArray<FString>& Keywords)
+	{
+		if (!MaterialInterface || Keywords.IsEmpty())
+		{
+			return false;
+		}
+
+		if (DoesAnyKeywordMatchName(Keywords, MaterialInterface->GetName()))
+		{
+			return true;
+		}
+
+		const UMaterialInterface* Parent = nullptr;
+		if (const UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(MaterialInterface))
+		{
+			Parent = MaterialInstance->Parent;
+		}
+
+		while (Parent)
+		{
+			if (DoesAnyKeywordMatchName(Keywords, Parent->GetName()))
+			{
+				return true;
+			}
+
+			const UMaterialInstance* ParentInstance = Cast<UMaterialInstance>(Parent);
+			Parent = ParentInstance ? ParentInstance->Parent : nullptr;
+		}
+
+		return false;
+	}
+
+	FTrunkCardTriangleSplit SplitTrianglesForTrunkCards(
+		const UStaticMesh& StaticMesh,
+		TArray<UE::BillboardClouds::FSourceTriangle>& SourceTriangles,
+		const bool bEnableTrunkCards,
+		const TArray<FString>& RawKeywords)
+	{
+		FTrunkCardTriangleSplit Split;
+		const TArray<FString> Keywords = BuildNormalizedKeywords(RawKeywords);
+		Split.bEnabled = bEnableTrunkCards && !Keywords.IsEmpty();
+		Split.BillboardTriangles.Reserve(SourceTriangles.Num());
+		Split.BillboardToSourceTriangleIndices.Reserve(SourceTriangles.Num());
+
+		TArray<uint8> bMaterialUsesTrunkCards;
+		const TArray<FStaticMaterial>& SourceMaterials = StaticMesh.GetStaticMaterials();
+		bMaterialUsesTrunkCards.SetNumZeroed(FMath::Max(1, SourceMaterials.Num()));
+		if (Split.bEnabled)
+		{
+			for (int32 MaterialIndex = 0; MaterialIndex < bMaterialUsesTrunkCards.Num(); ++MaterialIndex)
+			{
+				const UMaterialInterface* MaterialInterface = SourceMaterials.IsValidIndex(MaterialIndex)
+					? SourceMaterials[MaterialIndex].MaterialInterface
+					: nullptr;
+				if (DoesMaterialOrParentNameMatchKeywords(MaterialInterface, Keywords))
+				{
+					bMaterialUsesTrunkCards[MaterialIndex] = 1;
+					++Split.MatchedMaterialCount;
+				}
+			}
+		}
+
+		for (int32 SourceTriangleIndex = 0; SourceTriangleIndex < SourceTriangles.Num(); ++SourceTriangleIndex)
+		{
+			UE::BillboardClouds::FSourceTriangle& Triangle = SourceTriangles[SourceTriangleIndex];
+			const bool bUseTrunkCards = Split.bEnabled
+				&& bMaterialUsesTrunkCards.IsValidIndex(Triangle.MaterialIndex)
+				&& bMaterialUsesTrunkCards[Triangle.MaterialIndex] != 0;
+			Triangle.bTrunkCardOnly = bUseTrunkCards;
+			if (bUseTrunkCards)
+			{
+				Split.TrunkTriangleIndices.Add(SourceTriangleIndex);
+			}
+			else
+			{
+				Split.BillboardToSourceTriangleIndices.Add(SourceTriangleIndex);
+				Split.BillboardTriangles.Add(Triangle);
+			}
+		}
+
+		return Split;
+	}
+
+	UE::BillboardClouds::FPlaneCoverResult RemapPlaneCoverResultToSourceTriangles(
+		const UE::BillboardClouds::FPlaneCoverResult& BillboardResult,
+		const TArray<int32>& BillboardToSourceTriangleIndices,
+		const int32 SourceTriangleCount)
+	{
+		UE::BillboardClouds::FPlaneCoverResult RemappedResult = BillboardResult;
+		RemappedResult.SourceTriangleCount = SourceTriangleCount;
+		for (UE::BillboardClouds::FPlaneCoverPlane& Plane : RemappedResult.Planes)
+		{
+			TArray<int32> RemappedTriangleIndices;
+			RemappedTriangleIndices.Reserve(Plane.TriangleIndices.Num());
+			for (const int32 BillboardTriangleIndex : Plane.TriangleIndices)
+			{
+				if (BillboardToSourceTriangleIndices.IsValidIndex(BillboardTriangleIndex))
+				{
+					RemappedTriangleIndices.Add(BillboardToSourceTriangleIndices[BillboardTriangleIndex]);
+				}
+			}
+			Plane.TriangleIndices = MoveTemp(RemappedTriangleIndices);
+		}
+		return RemappedResult;
+	}
+
+	int32 AppendTrunkCrossCardPlanes(
+		const TArray<UE::BillboardClouds::FSourceTriangle>& SourceTriangles,
+		const TArray<int32>& TrunkTriangleIndices,
+		const int32 RequestedTrunkPlaneCount,
+		UE::BillboardClouds::FPlaneCoverResult& InOutResult)
+	{
+		if (TrunkTriangleIndices.IsEmpty())
+		{
+			return 0;
+		}
+
+		FBox TrunkBounds(ForceInit);
+		double TrunkArea = 0.0;
+		for (const int32 TriangleIndex : TrunkTriangleIndices)
+		{
+			if (!SourceTriangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+
+			const UE::BillboardClouds::FSourceTriangle& Triangle = SourceTriangles[TriangleIndex];
+			TrunkArea += Triangle.Area;
+			for (const FVector& Vertex : Triangle.Vertices)
+			{
+				TrunkBounds += Vertex;
+			}
+		}
+
+		if (!TrunkBounds.IsValid)
+		{
+			return 0;
+		}
+
+		const int32 TrunkPlaneCount = FMath::Clamp(RequestedTrunkPlaneCount, 2, 4);
+		for (int32 PlaneIndex = 0; PlaneIndex < TrunkPlaneCount; ++PlaneIndex)
+		{
+			const double AngleRadians = static_cast<double>(PlaneIndex) * UE_DOUBLE_PI / static_cast<double>(TrunkPlaneCount);
+			const FVector Normal(FMath::Cos(AngleRadians), FMath::Sin(AngleRadians), 0.0);
+			const FVector AxisV = FVector::UpVector;
+			FVector AxisU = FVector::CrossProduct(AxisV, Normal).GetSafeNormal();
+			if (AxisU.IsNearlyZero())
+			{
+				AxisU = FVector::RightVector;
+			}
+
+			UE::BillboardClouds::FPlaneCoverPlane& Plane = InOutResult.Planes.AddDefaulted_GetRef();
+			Plane.Normal = Normal;
+			Plane.Rho = 0.0;
+			Plane.Score = TrunkArea;
+			Plane.CoveredArea = TrunkArea;
+			Plane.TriangleIndices = TrunkTriangleIndices;
+			Plane.bIsTrunkCard = true;
+			Plane.bUseFixedPlaneFrame = true;
+			Plane.FixedAxisU = AxisU;
+			Plane.FixedAxisV = AxisV;
+		}
+
+		InOutResult.CoveredTriangleCount += TrunkTriangleIndices.Num();
+		InOutResult.CoveredArea += TrunkArea;
+		return TrunkPlaneCount;
+	}
+
+	FString BuildTrunkCrossCardSummary(const FTrunkCardTriangleSplit& Split, const int32 TrunkPlaneCount)
+	{
+		if (!Split.bEnabled)
+		{
+			return TEXT("");
+		}
+
+		const TCHAR* LayoutName = TEXT("off");
+		if (TrunkPlaneCount == 2)
+		{
+			LayoutName = TEXT("cross card");
+		}
+		else if (TrunkPlaneCount == 3)
+		{
+			LayoutName = TEXT("three-way star");
+		}
+		else if (TrunkPlaneCount == 4)
+		{
+			LayoutName = TEXT("four-way star");
+		}
+
+		return FString::Printf(
+			TEXT("\n  trunk cards: enabled, matched materials=%d, trunk triangles=%d, billboard input triangles=%d, vertical planes=%d (%s), origin-centered, shooting=horizontal ortho trunk-only"),
+			Split.MatchedMaterialCount,
+			Split.TrunkTriangleIndices.Num(),
+			Split.BillboardTriangles.Num(),
+			TrunkPlaneCount,
+			LayoutName);
 	}
 
 	struct FTexturePixels
@@ -192,9 +477,13 @@ namespace
 		int32 TileResolution = 0;
 		int32 TilePaddingPixels = 0;
 		int32 PaintedPixels = 0;
+		int32 FrontTileCount = 0;
+		int32 BackTileCount = 0;
+		double PackedTileUtilizationPercent = 0.0;
 		int32 SourceTexturedTriangles = 0;
 		int32 FallbackTriangles = 0;
 		int32 RasterizedTriangleReferences = 0;
+		int32 CrackReductionTriangleReferences = 0;
 		int32 ReadableMaterialTextures = 0;
 		int32 TextureAlphaOpacityMaterials = 0;
 		int32 TextureAlphaOpacityReferences = 0;
@@ -657,24 +946,33 @@ namespace
 		TBitArray<> HasColor;
 		HasColor.Init(false, Pixels.Num());
 
+		struct FAtlasTileInfo
+		{
+			FIntPoint PixelMin = FIntPoint::ZeroValue;
+			FIntPoint TileSize = FIntPoint::ZeroValue;
+			int32 Padding = 0;
+		};
+
+		TArray<FAtlasTileInfo> AtlasTiles;
+		AtlasTiles.Reserve(PlaneInfos.Num() * 2);
+
 		TArray<int32> TileDilationIterations;
-		TileDilationIterations.Reserve(PlaneInfos.Num());
+		TileDilationIterations.Reserve(PlaneInfos.Num() * 2);
 
 		int32 MaxDilationIterations = 0;
-		for (const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		auto AddAtlasTileForDilation = [&](const FIntPoint& PixelMin, const FIntPoint& TileSize, const int32 Padding)
 		{
-			const FIntPoint TileSize = PlaneInfo.AtlasTileSize;
-			const int32 MinX = FMath::Clamp(PlaneInfo.AtlasPixelMin.X, 0, Width - 1);
-			const int32 MinY = FMath::Clamp(PlaneInfo.AtlasPixelMin.Y, 0, Height - 1);
-			const int32 MaxX = FMath::Clamp(PlaneInfo.AtlasPixelMin.X + TileSize.X - 1, 0, Width - 1);
-			const int32 MaxY = FMath::Clamp(PlaneInfo.AtlasPixelMin.Y + TileSize.Y - 1, 0, Height - 1);
+			const int32 MinX = FMath::Clamp(PixelMin.X, 0, Width - 1);
+			const int32 MinY = FMath::Clamp(PixelMin.Y, 0, Height - 1);
+			const int32 MaxX = FMath::Clamp(PixelMin.X + TileSize.X - 1, 0, Width - 1);
+			const int32 MaxY = FMath::Clamp(PixelMin.Y + TileSize.Y - 1, 0, Height - 1);
 			if (TileSize.X <= 0 || TileSize.Y <= 0 || MinX > MaxX || MinY > MaxY)
 			{
-				TileDilationIterations.Add(0);
-				continue;
+				return;
 			}
 
-			const int32 DilationIterations = FMath::Clamp(FMath::Max(4, PlaneInfo.AtlasTilePaddingPixels), 1, 32);
+			const int32 DilationIterations = FMath::Clamp(FMath::Max(4, Padding), 1, 32);
+			AtlasTiles.Add({ PixelMin, TileSize, Padding });
 			TileDilationIterations.Add(DilationIterations);
 			MaxDilationIterations = FMath::Max(MaxDilationIterations, DilationIterations);
 
@@ -688,6 +986,15 @@ namespace
 						HasColor[PixelIndex] = true;
 					}
 				}
+			}
+		};
+
+		for (const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			AddAtlasTileForDilation(PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize, PlaneInfo.AtlasTilePaddingPixels);
+			if (PlaneInfo.bHasBackFaceAtlas)
+			{
+				AddAtlasTileForDilation(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize, PlaneInfo.AtlasTilePaddingPixels);
 			}
 		}
 
@@ -710,19 +1017,19 @@ namespace
 			TBitArray<> NextHasColor = HasColor;
 			bool bChanged = false;
 
-			for (int32 TileIndex = 0; TileIndex < PlaneInfos.Num(); ++TileIndex)
+			for (int32 TileIndex = 0; TileIndex < AtlasTiles.Num(); ++TileIndex)
 			{
 				if (!TileDilationIterations.IsValidIndex(TileIndex) || Iteration >= TileDilationIterations[TileIndex])
 				{
 					continue;
 				}
 
-				const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[TileIndex];
-				const FIntPoint TileSize = PlaneInfo.AtlasTileSize;
-				const int32 MinX = FMath::Clamp(PlaneInfo.AtlasPixelMin.X, 0, Width - 1);
-				const int32 MinY = FMath::Clamp(PlaneInfo.AtlasPixelMin.Y, 0, Height - 1);
-				const int32 MaxX = FMath::Clamp(PlaneInfo.AtlasPixelMin.X + TileSize.X - 1, 0, Width - 1);
-				const int32 MaxY = FMath::Clamp(PlaneInfo.AtlasPixelMin.Y + TileSize.Y - 1, 0, Height - 1);
+				const FAtlasTileInfo& AtlasTile = AtlasTiles[TileIndex];
+				const FIntPoint TileSize = AtlasTile.TileSize;
+				const int32 MinX = FMath::Clamp(AtlasTile.PixelMin.X, 0, Width - 1);
+				const int32 MinY = FMath::Clamp(AtlasTile.PixelMin.Y, 0, Height - 1);
+				const int32 MaxX = FMath::Clamp(AtlasTile.PixelMin.X + TileSize.X - 1, 0, Width - 1);
+				const int32 MaxY = FMath::Clamp(AtlasTile.PixelMin.Y + TileSize.Y - 1, 0, Height - 1);
 				if (TileSize.X <= 0 || TileSize.Y <= 0 || MinX > MaxX || MinY > MaxY)
 				{
 					continue;
@@ -794,17 +1101,15 @@ namespace
 		const int32 Height,
 		const TArray<UE::BillboardClouds::FPlaneProxyPlaneInfo>& PlaneInfos)
 	{
-		for (const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		auto CopyTileBorderIntoPadding = [&Pixels, Width, Height](const FIntPoint& PixelMin, const FIntPoint& TileSize, const int32 Padding)
 		{
-			const int32 Padding = PlaneInfo.AtlasTilePaddingPixels;
-			const FIntPoint TileSize = PlaneInfo.AtlasTileSize;
 			if (Padding <= 0 || TileSize.X <= 0 || TileSize.Y <= 0)
 			{
-				continue;
+				return;
 			}
 
-			const int32 InteriorMinX = PlaneInfo.AtlasPixelMin.X;
-			const int32 InteriorMinY = PlaneInfo.AtlasPixelMin.Y;
+			const int32 InteriorMinX = PixelMin.X;
+			const int32 InteriorMinY = PixelMin.Y;
 			const int32 InteriorMaxX = InteriorMinX + TileSize.X - 1;
 			const int32 InteriorMaxY = InteriorMinY + TileSize.Y - 1;
 			const int32 PaddedMinX = FMath::Max(0, InteriorMinX - Padding);
@@ -828,7 +1133,51 @@ namespace
 					Pixels[Y * Width + X] = PaddingColor;
 				}
 			}
+		};
+
+		for (const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			CopyTileBorderIntoPadding(PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize, PlaneInfo.AtlasTilePaddingPixels);
+			if (PlaneInfo.bHasBackFaceAtlas)
+			{
+				CopyTileBorderIntoPadding(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize, PlaneInfo.AtlasTilePaddingPixels);
+			}
 		}
+	}
+
+	bool IsPointInsidePlaneProxyEnvelope(const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo, const FVector& Point, const double Tolerance)
+	{
+		const double U = FVector::DotProduct(Point, PlaneInfo.AxisU);
+		const double V = FVector::DotProduct(Point, PlaneInfo.AxisV);
+		const double SignedDistance = FVector::DotProduct(PlaneInfo.Normal, Point) - PlaneInfo.Rho;
+		return U >= PlaneInfo.EnvelopeMinU - Tolerance
+			&& U <= PlaneInfo.EnvelopeMaxU + Tolerance
+			&& V >= PlaneInfo.EnvelopeMinV - Tolerance
+			&& V <= PlaneInfo.EnvelopeMaxV + Tolerance
+			&& SignedDistance >= PlaneInfo.EnvelopeMinSignedDistance - Tolerance
+			&& SignedDistance <= PlaneInfo.EnvelopeMaxSignedDistance + Tolerance;
+	}
+
+	double ComputePlaneProxyEnvelopeBoundaryDistance(const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo, const FVector& Point)
+	{
+		const double U = FVector::DotProduct(Point, PlaneInfo.AxisU);
+		const double V = FVector::DotProduct(Point, PlaneInfo.AxisV);
+		const double SignedDistance = FVector::DotProduct(PlaneInfo.Normal, Point) - PlaneInfo.Rho;
+		return FMath::Min3(
+			FMath::Min(U - PlaneInfo.EnvelopeMinU, PlaneInfo.EnvelopeMaxU - U),
+			FMath::Min(V - PlaneInfo.EnvelopeMinV, PlaneInfo.EnvelopeMaxV - V),
+			FMath::Min(SignedDistance - PlaneInfo.EnvelopeMinSignedDistance, PlaneInfo.EnvelopeMaxSignedDistance - SignedDistance));
+	}
+
+	bool IsPointNearPlaneProxyEnvelopeBoundary(
+		const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo,
+		const FVector& Point,
+		const double BoundaryWidth,
+		const double Tolerance)
+	{
+		const double BoundaryDistance = ComputePlaneProxyEnvelopeBoundaryDistance(PlaneInfo, Point);
+		return BoundaryDistance >= -Tolerance
+			&& BoundaryDistance <= FMath::Max(BoundaryWidth, Tolerance);
 	}
 
 	void RasterizeBillboardAtlas(
@@ -846,21 +1195,68 @@ namespace
 		OutStats.TilePaddingPixels = ProxyStats.AtlasTilePaddingPixels;
 		OutPixels.Init(FColor(0, 0, 0, 0), OutStats.Width * OutStats.Height);
 
+		int64 PackedPaddedTilePixels = 0;
+		auto AccumulateAtlasTileStats = [&](const FIntPoint& TileSize, const int32 Padding, const bool bBackFace)
+		{
+			if (TileSize.X <= 0 || TileSize.Y <= 0)
+			{
+				return;
+			}
+
+			const int64 PaddedWidth = static_cast<int64>(TileSize.X + Padding * 2);
+			const int64 PaddedHeight = static_cast<int64>(TileSize.Y + Padding * 2);
+			PackedPaddedTilePixels += PaddedWidth * PaddedHeight;
+			if (bBackFace)
+			{
+				++OutStats.BackTileCount;
+			}
+			else
+			{
+				++OutStats.FrontTileCount;
+			}
+		};
+
+		for (const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			AccumulateAtlasTileStats(PlaneInfo.AtlasTileSize, PlaneInfo.AtlasTilePaddingPixels, false);
+			if (PlaneInfo.bHasBackFaceAtlas)
+			{
+				AccumulateAtlasTileStats(PlaneInfo.BackAtlasTileSize, PlaneInfo.AtlasTilePaddingPixels, true);
+			}
+		}
+
+		const int64 AtlasPixelCount = static_cast<int64>(OutStats.Width) * static_cast<int64>(OutStats.Height);
+		OutStats.PackedTileUtilizationPercent = AtlasPixelCount > 0
+			? 100.0 * static_cast<double>(PackedPaddedTilePixels) / static_cast<double>(AtlasPixelCount)
+			: 0.0;
+
 		TArray<double> DepthBuffer;
 		DepthBuffer.Init(-TNumericLimits<double>::Max(), OutPixels.Num());
 
 		const TArray<FMaterialBakeData> MaterialBakeData = BuildMaterialBakeData(SourceStaticMesh, Triangles, OutStats);
 
-		for (const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		for (int32 PlaneInfoIndex = 0; PlaneInfoIndex < PlaneInfos.Num(); ++PlaneInfoIndex)
 		{
+			const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneInfoIndex];
 			const FIntPoint TileSize = PlaneInfo.AtlasTileSize;
 			if (TileSize.X <= 0 || TileSize.Y <= 0 || FMath::IsNearlyEqual(PlaneInfo.MaxU, PlaneInfo.MinU) || FMath::IsNearlyEqual(PlaneInfo.MaxV, PlaneInfo.MinV))
 			{
 				continue;
 			}
 
-			auto RasterizeTriangleToPlane = [&](const int32 TriangleIndex)
+			auto RasterizeTriangleToPlane = [&](
+				const int32 TriangleIndex,
+				const UE::BillboardClouds::FPlaneProxyPlaneInfo* SourceEnvelopeClip,
+				const bool bBoundaryAwareCrackReduction,
+				const FIntPoint& TargetPixelMin,
+				const FIntPoint& TargetTileSize,
+				const bool bBackFace)
 			{
+				if (TargetTileSize.X <= 0 || TargetTileSize.Y <= 0)
+				{
+					return;
+				}
+
 				if (!Triangles.IsValidIndex(TriangleIndex))
 				{
 					return;
@@ -885,14 +1281,14 @@ namespace
 					const double UFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisU) - PlaneInfo.MinU) / (PlaneInfo.MaxU - PlaneInfo.MinU);
 					const double VFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisV) - PlaneInfo.MinV) / (PlaneInfo.MaxV - PlaneInfo.MinV);
 					ProjectedPoints[VertexIndex] = FVector2D(
-						PlaneInfo.AtlasPixelMin.X + UFraction * TileSize.X,
-						PlaneInfo.AtlasPixelMin.Y + VFraction * TileSize.Y);
+						TargetPixelMin.X + UFraction * TargetTileSize.X,
+						TargetPixelMin.Y + VFraction * TargetTileSize.Y);
 				}
 
-				const int32 MinX = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), PlaneInfo.AtlasPixelMin.X, PlaneInfo.AtlasPixelMin.X + TileSize.X - 1);
-				const int32 MaxX = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), PlaneInfo.AtlasPixelMin.X, PlaneInfo.AtlasPixelMin.X + TileSize.X - 1);
-				const int32 MinY = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), PlaneInfo.AtlasPixelMin.Y, PlaneInfo.AtlasPixelMin.Y + TileSize.Y - 1);
-				const int32 MaxY = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), PlaneInfo.AtlasPixelMin.Y, PlaneInfo.AtlasPixelMin.Y + TileSize.Y - 1);
+				const int32 MinX = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), TargetPixelMin.X, TargetPixelMin.X + TargetTileSize.X - 1);
+				const int32 MaxX = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), TargetPixelMin.X, TargetPixelMin.X + TargetTileSize.X - 1);
+				const int32 MinY = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), TargetPixelMin.Y, TargetPixelMin.Y + TargetTileSize.Y - 1);
+				const int32 MaxY = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), TargetPixelMin.Y, TargetPixelMin.Y + TargetTileSize.Y - 1);
 				const FLinearColor FallbackColor = MakeFallbackTriangleColor(BakeData);
 
 				for (int32 Y = MinY; Y <= MaxY; ++Y)
@@ -909,13 +1305,25 @@ namespace
 
 						const FVector SourcePoint = Triangle.Vertices[0] * W0 + Triangle.Vertices[1] * W1 + Triangle.Vertices[2] * W2;
 						const double SignedPlaneDistance = FVector::DotProduct(PlaneInfo.Normal, SourcePoint) - PlaneInfo.Rho;
-						if (!UE::BillboardClouds::IsPointWithinPlaneError(SourcePoint, PlaneInfo.Normal, PlaneInfo.Rho, Settings))
+						if (SourceEnvelopeClip
+							&& (!IsPointInsidePlaneProxyEnvelope(PlaneInfo, SourcePoint, 1.0e-4)
+								|| !IsPointInsidePlaneProxyEnvelope(*SourceEnvelopeClip, SourcePoint, 1.0e-4)
+								|| (bBoundaryAwareCrackReduction
+									&& !IsPointNearPlaneProxyEnvelopeBoundary(PlaneInfo, SourcePoint, Settings.KMeansBoundaryCrackReductionWidth, 1.0e-4)
+									&& !IsPointNearPlaneProxyEnvelopeBoundary(*SourceEnvelopeClip, SourcePoint, Settings.KMeansBoundaryCrackReductionWidth, 1.0e-4))))
+						{
+							continue;
+						}
+						if (!PlaneInfo.bIsTrunkCard
+							&& (Settings.Technique == UE::BillboardClouds::EPlaneCoverTechnique::PlaneSpaceGreedy
+								|| Settings.Technique == UE::BillboardClouds::EPlaneCoverTechnique::GodOfWarCards)
+							&& !UE::BillboardClouds::IsPointWithinPlaneError(SourcePoint, PlaneInfo.Normal, PlaneInfo.Rho, Settings))
 						{
 							continue;
 						}
 
 						const int32 PixelIndex = Y * OutStats.Width + X;
-						const double TextureDepth = SignedPlaneDistance;
+						const double TextureDepth = bBackFace ? -SignedPlaneDistance : SignedPlaneDistance;
 						if (!DepthBuffer.IsValidIndex(PixelIndex) || TextureDepth < DepthBuffer[PixelIndex])
 						{
 							continue;
@@ -964,19 +1372,61 @@ namespace
 				}
 			}
 
-			for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
+			if (!PlaneInfo.bIsTrunkCard
+				&& Settings.Technique == UE::BillboardClouds::EPlaneCoverTechnique::PlaneSpaceGreedy)
 			{
-				if (!QueuedTriangles[TriangleIndex]
-					&& UE::BillboardClouds::DoesTriangleIntersectPlaneValidZone(Triangles[TriangleIndex], PlaneInfo.Normal, PlaneInfo.Rho, Settings))
+				for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
 				{
-					QueuedTriangles[TriangleIndex] = true;
-					TextureTriangleIndices.Add(TriangleIndex);
+					if (!QueuedTriangles[TriangleIndex]
+						&& !Triangles[TriangleIndex].bTrunkCardOnly
+						&& UE::BillboardClouds::DoesTriangleIntersectPlaneValidZone(Triangles[TriangleIndex], PlaneInfo.Normal, PlaneInfo.Rho, Settings))
+					{
+						QueuedTriangles[TriangleIndex] = true;
+						TextureTriangleIndices.Add(TriangleIndex);
+					}
 				}
 			}
 
 			for (const int32 TriangleIndex : TextureTriangleIndices)
 			{
-				RasterizeTriangleToPlane(TriangleIndex);
+				RasterizeTriangleToPlane(TriangleIndex, nullptr, false, PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize, false);
+				if (PlaneInfo.bHasBackFaceAtlas)
+				{
+					RasterizeTriangleToPlane(TriangleIndex, nullptr, false, PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize, true);
+				}
+			}
+
+			if (!PlaneInfo.bIsTrunkCard
+				&& Settings.Technique == UE::BillboardClouds::EPlaneCoverTechnique::KMeansClustering
+				&& !PlaneInfo.CrackReductionProjections.IsEmpty())
+			{
+				TSet<uint64> CrackQueuedProjectionKeys;
+				for (const UE::BillboardClouds::FCrackReductionProjection& Projection : PlaneInfo.CrackReductionProjections)
+				{
+					const int32 TriangleIndex = Projection.TriangleIndex;
+					if (!Triangles.IsValidIndex(TriangleIndex)
+						|| QueuedTriangles[TriangleIndex]
+						|| !PlaneInfos.IsValidIndex(Projection.SourcePlaneInfoIndex)
+						|| Projection.SourcePlaneInfoIndex == PlaneInfoIndex)
+					{
+						continue;
+					}
+
+					const uint64 ProjectionKey = (static_cast<uint64>(static_cast<uint32>(Projection.SourcePlaneInfoIndex)) << 32)
+						| static_cast<uint64>(static_cast<uint32>(TriangleIndex));
+					if (CrackQueuedProjectionKeys.Contains(ProjectionKey))
+					{
+						continue;
+					}
+
+					CrackQueuedProjectionKeys.Add(ProjectionKey);
+					++OutStats.CrackReductionTriangleReferences;
+					RasterizeTriangleToPlane(TriangleIndex, &PlaneInfos[Projection.SourcePlaneInfoIndex], Projection.bBoundaryAware, PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize, false);
+					if (PlaneInfo.bHasBackFaceAtlas)
+					{
+						RasterizeTriangleToPlane(TriangleIndex, &PlaneInfos[Projection.SourcePlaneInfoIndex], Projection.bBoundaryAware, PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize, true);
+					}
+				}
 			}
 		}
 
@@ -1071,16 +1521,55 @@ namespace
 			return nullptr;
 		}
 
-		UMaterialExpressionTextureSample* TextureSample = NewObject<UMaterialExpressionTextureSample>(Material);
-		TextureSample->Texture = AtlasTexture;
-		TextureSample->SamplerType = SAMPLERTYPE_Color;
-		TextureSample->MaterialExpressionEditorX = -300;
-		TextureSample->MaterialExpressionEditorY = 0;
-		Material->GetExpressionCollection().AddExpression(TextureSample);
+		UMaterialExpressionTextureSample* FrontTextureSample = NewObject<UMaterialExpressionTextureSample>(Material);
+		FrontTextureSample->Texture = AtlasTexture;
+		FrontTextureSample->SamplerType = SAMPLERTYPE_Color;
+		FrontTextureSample->MaterialExpressionEditorX = -500;
+		FrontTextureSample->MaterialExpressionEditorY = -120;
+		Material->GetExpressionCollection().AddExpression(FrontTextureSample);
+
+		UMaterialExpressionTextureCoordinate* BackTextureCoordinate = NewObject<UMaterialExpressionTextureCoordinate>(Material);
+		BackTextureCoordinate->CoordinateIndex = 1;
+		BackTextureCoordinate->MaterialExpressionEditorX = -760;
+		BackTextureCoordinate->MaterialExpressionEditorY = 120;
+		Material->GetExpressionCollection().AddExpression(BackTextureCoordinate);
+
+		UMaterialExpressionTextureSample* BackTextureSample = NewObject<UMaterialExpressionTextureSample>(Material);
+		BackTextureSample->Texture = AtlasTexture;
+		BackTextureSample->SamplerType = SAMPLERTYPE_Color;
+		BackTextureSample->Coordinates.Connect(0, BackTextureCoordinate);
+		BackTextureSample->MaterialExpressionEditorX = -500;
+		BackTextureSample->MaterialExpressionEditorY = 120;
+		Material->GetExpressionCollection().AddExpression(BackTextureSample);
+
+		UMaterialExpressionTwoSidedSign* TwoSidedSign = NewObject<UMaterialExpressionTwoSidedSign>(Material);
+		TwoSidedSign->MaterialExpressionEditorX = -500;
+		TwoSidedSign->MaterialExpressionEditorY = 360;
+		Material->GetExpressionCollection().AddExpression(TwoSidedSign);
+
+		UMaterialExpressionIf* BaseColorSelector = NewObject<UMaterialExpressionIf>(Material);
+		BaseColorSelector->A.Connect(0, TwoSidedSign);
+		BaseColorSelector->ConstB = 0.0f;
+		BaseColorSelector->AGreaterThanB.Connect(0, FrontTextureSample);
+		BaseColorSelector->AEqualsB.Connect(0, FrontTextureSample);
+		BaseColorSelector->ALessThanB.Connect(0, BackTextureSample);
+		BaseColorSelector->MaterialExpressionEditorX = -180;
+		BaseColorSelector->MaterialExpressionEditorY = -60;
+		Material->GetExpressionCollection().AddExpression(BaseColorSelector);
+
+		UMaterialExpressionIf* OpacityMaskSelector = NewObject<UMaterialExpressionIf>(Material);
+		OpacityMaskSelector->A.Connect(0, TwoSidedSign);
+		OpacityMaskSelector->ConstB = 0.0f;
+		OpacityMaskSelector->AGreaterThanB.Connect(4, FrontTextureSample);
+		OpacityMaskSelector->AEqualsB.Connect(4, FrontTextureSample);
+		OpacityMaskSelector->ALessThanB.Connect(4, BackTextureSample);
+		OpacityMaskSelector->MaterialExpressionEditorX = -180;
+		OpacityMaskSelector->MaterialExpressionEditorY = 180;
+		Material->GetExpressionCollection().AddExpression(OpacityMaskSelector);
 
 		UMaterialEditorOnlyData* MaterialEditorOnly = Material->GetEditorOnlyData();
-		MaterialEditorOnly->BaseColor.Connect(0, TextureSample);
-		MaterialEditorOnly->OpacityMask.Connect(4, TextureSample);
+		MaterialEditorOnly->BaseColor.Connect(0, BaseColorSelector);
+		MaterialEditorOnly->OpacityMask.Connect(0, OpacityMaskSelector);
 		Material->BlendMode = BLEND_Masked;
 		Material->OpacityMaskClipValue = 0.33333334f;
 		Material->SetShadingModel(MSM_DefaultLit);
@@ -1092,9 +1581,10 @@ namespace
 		return Material;
 	}
 
-	void KeepOnlyUv0(UStaticMesh& StaticMesh)
+	void KeepOnlyUvChannels(UStaticMesh& StaticMesh, const int32 DesiredChannelCount)
 	{
 		StaticMesh.SetLightMapCoordinateIndex(0);
+		const int32 ClampedDesiredChannelCount = FMath::Clamp(DesiredChannelCount, 1, 8);
 
 		if (StaticMesh.GetNumSourceModels() > 0)
 		{
@@ -1108,16 +1598,16 @@ namespace
 		if (FMeshDescription* MeshDescription = StaticMesh.GetMeshDescription(0))
 		{
 			TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = FStaticMeshAttributes(*MeshDescription).GetVertexInstanceUVs();
-			if (VertexInstanceUVs.GetNumChannels() != 1)
+			if (VertexInstanceUVs.GetNumChannels() != ClampedDesiredChannelCount)
 			{
-				VertexInstanceUVs.SetNumChannels(1);
+				VertexInstanceUVs.SetNumChannels(ClampedDesiredChannelCount);
 				StaticMesh.CommitMeshDescription(0);
 			}
 		}
 
-		for (int32 Guard = 0; Guard < 8 && StaticMesh.GetNumUVChannels(0) > 1; ++Guard)
+		for (int32 Guard = 0; Guard < 8 && StaticMesh.GetNumUVChannels(0) > ClampedDesiredChannelCount; ++Guard)
 		{
-			if (!StaticMesh.RemoveUVChannel(0, 1))
+			if (!StaticMesh.RemoveUVChannel(0, ClampedDesiredChannelCount))
 			{
 				break;
 			}
@@ -1188,12 +1678,272 @@ namespace
 			SourceModel.BuildSettings.DistanceFieldResolutionScale = 0.0f;
 		}
 
-		KeepOnlyUv0(*ProxyMesh);
+		KeepOnlyUvChannels(*ProxyMesh, 3);
 		ProxyMesh->PostEditChange();
 		ProxyMesh->MarkPackageDirty();
 
 		FAssetRegistryModule::AssetCreated(ProxyMesh);
 		return ProxyMesh;
+	}
+
+	struct FProxyPlaneCoverBuildData
+	{
+		TArray<UE::BillboardClouds::FSourceTriangle> Triangles;
+		UE::BillboardClouds::FPlaneCoverSettings Settings;
+		FTrunkCardTriangleSplit TrunkSplit;
+		UE::BillboardClouds::FPlaneCoverResult BillboardResult;
+		UE::BillboardClouds::FPlaneCoverResult ProxyResult;
+		bool bHasBillboardResult = false;
+		int32 TrunkPlaneCount = 0;
+	};
+
+	struct FProxyMeshBuildData
+	{
+		FMeshDescription MeshDescription;
+		UE::BillboardClouds::FPlaneProxyMeshStats Stats;
+		TArray<UE::BillboardClouds::FPlaneProxyPlaneInfo> PlaneInfos;
+	};
+
+	struct FProxyTextureBuildData
+	{
+		TArray<FColor> AtlasPixels;
+		FAtlasBakeStats AtlasStats;
+		UTexture2D* AtlasTexture = nullptr;
+		UMaterial* Material = nullptr;
+	};
+
+	struct FProxyAssetBuildResult
+	{
+		bool bSucceeded = false;
+		FString Report;
+		UStaticMesh* ProxyMesh = nullptr;
+		UTexture2D* AtlasTexture = nullptr;
+		UMaterial* Material = nullptr;
+	};
+
+	FProxyAssetBuildResult MakeProxyBuildFailure(const UStaticMesh& StaticMesh, const FString& Error)
+	{
+		FProxyAssetBuildResult Result;
+		const FString MeshName = StaticMesh.GetName();
+		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *MeshName, *Error);
+		UE_LOG(LogBillboardCloudsEditor, Warning, TEXT("%s"), *Result.Report);
+		return Result;
+	}
+
+	FString BuildBillboardCloudsOrTrunkSummary(
+		const UStaticMesh& StaticMesh,
+		const FProxyPlaneCoverBuildData& CoverData)
+	{
+		FString Summary;
+		if (CoverData.bHasBillboardResult)
+		{
+			Summary = UE::BillboardClouds::SummarizePlaneCover(StaticMesh.GetName(), CoverData.Settings, CoverData.BillboardResult);
+		}
+		else
+		{
+			Summary = FString::Printf(
+				TEXT("%s\n  algorithm: Billboard Clouds skipped; all matched triangles are routed to fixed trunk cross-card planes"),
+				*StaticMesh.GetName());
+		}
+
+		Summary += BuildTrunkCrossCardSummary(CoverData.TrunkSplit, CoverData.TrunkPlaneCount);
+		return Summary;
+	}
+
+	const TCHAR* GetTextureShootingMode(const UE::BillboardClouds::FPlaneCoverSettings& Settings)
+	{
+		if (Settings.Technique == UE::BillboardClouds::EPlaneCoverTechnique::KMeansClustering)
+		{
+			return TEXT("cluster projection");
+		}
+		if (Settings.Technique == UE::BillboardClouds::EPlaneCoverTechnique::GodOfWarCards)
+		{
+			return TEXT("card ortho bounds, closeness clipped, reclaimed faces only");
+		}
+		return TEXT("valid-zone clipped");
+	}
+
+	bool BuildProxyPlaneCoverData(
+		const UStaticMesh& StaticMesh,
+		const UBillboardCloudsEditorSettings& EditorSettings,
+		FProxyPlaneCoverBuildData& OutData,
+		FString& OutError)
+	{
+		if (!UE::BillboardClouds::ExtractTrianglesFromStaticMesh(&StaticMesh, 0, OutData.Triangles, OutError))
+		{
+			return false;
+		}
+
+		OutData.Settings = BuildSettingsForMesh(StaticMesh, EditorSettings);
+		const int32 RequestedTrunkPlaneCount = FMath::Clamp(EditorSettings.TrunkCardPlaneCount, 2, 4);
+		OutData.TrunkSplit = SplitTrianglesForTrunkCards(StaticMesh, OutData.Triangles, EditorSettings.bEnableTrunkCards, EditorSettings.TrunkCardMaterialKeywords);
+
+		if (!OutData.TrunkSplit.BillboardTriangles.IsEmpty())
+		{
+			OutData.BillboardResult = UE::BillboardClouds::BuildPlaneCover(OutData.TrunkSplit.BillboardTriangles, OutData.Settings);
+			OutData.ProxyResult = RemapPlaneCoverResultToSourceTriangles(OutData.BillboardResult, OutData.TrunkSplit.BillboardToSourceTriangleIndices, OutData.Triangles.Num());
+			OutData.bHasBillboardResult = true;
+		}
+		else
+		{
+			OutData.ProxyResult.SourceTriangleCount = OutData.Triangles.Num();
+		}
+
+		OutData.TrunkPlaneCount = AppendTrunkCrossCardPlanes(OutData.Triangles, OutData.TrunkSplit.TrunkTriangleIndices, RequestedTrunkPlaneCount, OutData.ProxyResult);
+		if (OutData.ProxyResult.Planes.IsEmpty())
+		{
+			OutError = TEXT("no Billboard Clouds planes or trunk card planes were generated.");
+			return false;
+		}
+
+		return true;
+	}
+
+	bool BuildProxyMeshData(
+		const FProxyPlaneCoverBuildData& CoverData,
+		FProxyMeshBuildData& OutData,
+		FString& OutError)
+	{
+		return UE::BillboardClouds::BuildPlaneProxyMeshDescription(
+			CoverData.Triangles,
+			CoverData.ProxyResult,
+			CoverData.Settings,
+			OutData.MeshDescription,
+			OutData.Stats,
+			OutError,
+			&OutData.PlaneInfos);
+	}
+
+	bool BuildProxyTextureData(
+		const UStaticMesh& StaticMesh,
+		const FProxyPlaneCoverBuildData& CoverData,
+		const FProxyMeshBuildData& MeshData,
+		FProxyTextureBuildData& OutData,
+		FString& OutError)
+	{
+		RasterizeBillboardAtlas(StaticMesh, CoverData.Triangles, MeshData.PlaneInfos, MeshData.Stats, CoverData.Settings, OutData.AtlasPixels, OutData.AtlasStats);
+		OutData.AtlasTexture = CreateAtlasTextureAsset(StaticMesh, OutData.AtlasPixels, OutData.AtlasStats, OutError);
+		if (!OutData.AtlasTexture)
+		{
+			return false;
+		}
+
+		OutData.Material = CreateBillboardMaterialAsset(StaticMesh, OutData.AtlasTexture, OutError);
+		return OutData.Material != nullptr;
+	}
+
+	bool CreateProxyMeshAssetBundle(
+		const UStaticMesh& StaticMesh,
+		const FProxyMeshBuildData& MeshData,
+		const FProxyTextureBuildData& TextureData,
+		FProxyAssetBuildResult& OutResult,
+		FString& OutError)
+	{
+		OutResult.ProxyMesh = CreateStaticMeshAssetFromDescription(StaticMesh, MeshData.MeshDescription, TextureData.Material, OutError);
+		if (!OutResult.ProxyMesh)
+		{
+			return false;
+		}
+
+		OutResult.AtlasTexture = TextureData.AtlasTexture;
+		OutResult.Material = TextureData.Material;
+		return true;
+	}
+
+	FString BuildProxySuccessReport(
+		const UStaticMesh& StaticMesh,
+		const FProxyPlaneCoverBuildData& CoverData,
+		const FProxyMeshBuildData& MeshData,
+		const FProxyTextureBuildData& TextureData,
+		const FProxyAssetBuildResult& AssetResult)
+	{
+		const FString AlphaPolicyDetails = TextureData.AtlasStats.MaterialAlphaPolicyDetails.IsEmpty()
+			? FString()
+			: FString::Printf(TEXT("\n  alpha policy:%s"), *TextureData.AtlasStats.MaterialAlphaPolicyDetails);
+		const FString TechniqueSummary = BuildBillboardCloudsOrTrunkSummary(StaticMesh, CoverData);
+
+		return FString::Printf(
+			TEXT("%s%s\n  proxy asset: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas: %s, %dx%d, largest tile=%d, max padding=%d, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, readable material textures=%d, alpha-mask materials=%d, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, crack-reduction refs=%d, alpha refs texture=%d, forced opaque=%d, shooting=%s\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material: %s (masked atlas, two-sided sign selects UV0/UV1, clip=0.333)\n  normal source triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: BuildFromMeshDescriptions fast path, recompute normals/tangents off, distance fields off\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			*TechniqueSummary,
+			*AlphaPolicyDetails,
+			*AssetResult.ProxyMesh->GetPathName(),
+			MeshData.Stats.PlaneCount,
+			MeshData.Stats.QuadCount,
+			MeshData.Stats.TriangleCount,
+			*TextureData.AtlasTexture->GetPathName(),
+			TextureData.AtlasStats.Width,
+			TextureData.AtlasStats.Height,
+			TextureData.AtlasStats.TileResolution,
+			TextureData.AtlasStats.TilePaddingPixels,
+			TextureData.AtlasStats.PackedTileUtilizationPercent,
+			TextureData.AtlasStats.FrontTileCount,
+			TextureData.AtlasStats.BackTileCount,
+			TextureData.AtlasStats.PaintedPixels,
+			TextureData.AtlasStats.ReadableMaterialTextures,
+			TextureData.AtlasStats.TextureAlphaOpacityMaterials,
+			TextureData.AtlasStats.SourceTexturedTriangles,
+			TextureData.AtlasStats.FallbackTriangles,
+			TextureData.AtlasStats.RasterizedTriangleReferences,
+			TextureData.AtlasStats.CrackReductionTriangleReferences,
+			TextureData.AtlasStats.TextureAlphaOpacityReferences,
+			TextureData.AtlasStats.ForcedOpaqueAlphaReferences,
+			GetTextureShootingMode(CoverData.Settings),
+			*TextureData.Material->GetPathName(),
+			MeshData.Stats.SourceShadingNormalTriangleCount,
+			MeshData.Stats.SourceTriangleCount,
+			MeshData.Stats.AveragePlaneToShadingNormalDot,
+			MeshData.Stats.AveragePlaneToShadingNormalAngleDegrees);
+	}
+
+	FProxyAssetBuildResult BuildBillboardCloudProxyAsset(
+		const UStaticMesh& StaticMesh,
+		const UBillboardCloudsEditorSettings& EditorSettings)
+	{
+		FString Error;
+		FProxyPlaneCoverBuildData CoverData;
+		if (!BuildProxyPlaneCoverData(StaticMesh, EditorSettings, CoverData, Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
+		FProxyMeshBuildData MeshData;
+		if (!BuildProxyMeshData(CoverData, MeshData, Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
+		FProxyTextureBuildData TextureData;
+		if (!BuildProxyTextureData(StaticMesh, CoverData, MeshData, TextureData, Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
+		FProxyAssetBuildResult Result;
+		if (!CreateProxyMeshAssetBundle(StaticMesh, MeshData, TextureData, Result, Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
+		Result.bSucceeded = true;
+		Result.Report = BuildProxySuccessReport(StaticMesh, CoverData, MeshData, TextureData, Result);
+		UE_LOG(LogBillboardCloudsEditor, Display, TEXT("\n%s"), *Result.Report);
+		return Result;
+	}
+
+	void AppendProxyCreatedAssets(const FProxyAssetBuildResult& BuildResult, TArray<UObject*>& OutCreatedAssets)
+	{
+		if (BuildResult.ProxyMesh)
+		{
+			OutCreatedAssets.Add(BuildResult.ProxyMesh);
+		}
+		if (BuildResult.AtlasTexture)
+		{
+			OutCreatedAssets.Add(BuildResult.AtlasTexture);
+		}
+		if (BuildResult.Material)
+		{
+			OutCreatedAssets.Add(BuildResult.Material);
+		}
 	}
 }
 
@@ -1221,13 +1971,6 @@ void FBillboardCloudsEditorModule::RegisterMenus()
 	FToolMenuSection& Section = ToolsMenu->FindOrAddSection("BillboardClouds");
 	Section.Label = LOCTEXT("BillboardCloudsSection", "Billboard Clouds");
 	Section.AddMenuEntry(
-		"BillboardCloudsAnalyzeSelectedStaticMeshes",
-		LOCTEXT("AnalyzeSelectedStaticMeshesLabel", "Analyze Selected Static Meshes"),
-		LOCTEXT("AnalyzeSelectedStaticMeshesTooltip", "Run the Billboard Clouds paper-style plane-space cover on selected Static Mesh assets."),
-		FSlateIcon(),
-		FToolMenuExecuteAction::CreateRaw(this, &FBillboardCloudsEditorModule::ExecuteAnalyzeSelectedStaticMeshes)
-	);
-	Section.AddMenuEntry(
 		"BillboardCloudsCreatePlaneProxyMeshes",
 		LOCTEXT("CreatePlaneProxyMeshesLabel", "Create Plane Proxy Meshes"),
 		LOCTEXT("CreatePlaneProxyMeshesTooltip", "Create Static Mesh assets from the selected Billboard Clouds paper-style plane cover."),
@@ -1236,46 +1979,10 @@ void FBillboardCloudsEditorModule::RegisterMenus()
 	);
 }
 
-void FBillboardCloudsEditorModule::ExecuteAnalyzeSelectedStaticMeshes(const FToolMenuContext& MenuContext) const
-{
-	const TArray<UStaticMesh*> StaticMeshes = GetSelectedStaticMeshes();
-
-	if (StaticMeshes.IsEmpty())
-	{
-		FMessageDialog::Open(
-			EAppMsgType::Ok,
-			LOCTEXT("NoStaticMeshSelection", "Select one or more Static Mesh assets in the Content Browser, then run Tools > Billboard Clouds > Analyze Selected Static Meshes.")
-		);
-		return;
-	}
-
-	const UBillboardCloudsEditorSettings* EditorSettings = GetDefault<UBillboardCloudsEditorSettings>();
-
-	FString Report;
-	for (UStaticMesh* StaticMesh : StaticMeshes)
-	{
-		TArray<UE::BillboardClouds::FSourceTriangle> Triangles;
-		FString Error;
-		if (!UE::BillboardClouds::ExtractTrianglesFromStaticMesh(StaticMesh, 0, Triangles, Error))
-		{
-			const FString Failure = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh->GetName(), *Error);
-			UE_LOG(LogBillboardCloudsEditor, Warning, TEXT("%s"), *Failure);
-			Report += Failure + TEXT("\n\n");
-			continue;
-		}
-
-		const UE::BillboardClouds::FPlaneCoverSettings Settings = BuildSettingsForMesh(*StaticMesh, *EditorSettings);
-		const UE::BillboardClouds::FPlaneCoverResult Result = UE::BillboardClouds::BuildGreedyPlaneCover(Triangles, Settings);
-		const FString Summary = UE::BillboardClouds::SummarizePlaneCover(StaticMesh->GetName(), Settings, Result);
-		UE_LOG(LogBillboardCloudsEditor, Display, TEXT("\n%s"), *Summary);
-		Report += Summary + TEXT("\n\n");
-	}
-
-	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Report));
-}
-
 void FBillboardCloudsEditorModule::ExecuteCreatePlaneProxyMeshes(const FToolMenuContext& MenuContext) const
 {
+	(void)MenuContext;
+
 	const TArray<UStaticMesh*> StaticMeshes = GetSelectedStaticMeshes();
 
 	if (StaticMeshes.IsEmpty())
@@ -1298,104 +2005,12 @@ void FBillboardCloudsEditorModule::ExecuteCreatePlaneProxyMeshes(const FToolMenu
 	{
 		SlowTask.EnterProgressFrame(1.0f, FText::FromString(StaticMesh->GetName()));
 
-		TArray<UE::BillboardClouds::FSourceTriangle> Triangles;
-		FString Error;
-		if (!UE::BillboardClouds::ExtractTrianglesFromStaticMesh(StaticMesh, 0, Triangles, Error))
+		const FProxyAssetBuildResult BuildResult = BuildBillboardCloudProxyAsset(*StaticMesh, *EditorSettings);
+		Report += BuildResult.Report + TEXT("\n\n");
+		if (BuildResult.bSucceeded)
 		{
-			const FString Failure = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh->GetName(), *Error);
-			UE_LOG(LogBillboardCloudsEditor, Warning, TEXT("%s"), *Failure);
-			Report += Failure + TEXT("\n\n");
-			continue;
+			AppendProxyCreatedAssets(BuildResult, CreatedAssets);
 		}
-
-		const UE::BillboardClouds::FPlaneCoverSettings Settings = BuildSettingsForMesh(*StaticMesh, *EditorSettings);
-		const UE::BillboardClouds::FPlaneCoverResult Result = UE::BillboardClouds::BuildGreedyPlaneCover(Triangles, Settings);
-
-		FMeshDescription ProxyMeshDescription;
-		UE::BillboardClouds::FPlaneProxyMeshStats ProxyStats;
-		TArray<UE::BillboardClouds::FPlaneProxyPlaneInfo> PlaneInfos;
-		if (!UE::BillboardClouds::BuildPlaneProxyMeshDescription(Triangles, Result, Settings, ProxyMeshDescription, ProxyStats, Error, &PlaneInfos))
-		{
-			const FString Failure = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh->GetName(), *Error);
-			UE_LOG(LogBillboardCloudsEditor, Warning, TEXT("%s"), *Failure);
-			Report += Failure + TEXT("\n\n");
-			continue;
-		}
-
-		UTexture2D* AtlasTexture = nullptr;
-		UMaterial* BillboardMaterial = nullptr;
-		FAtlasBakeStats AtlasStats;
-		TArray<FColor> AtlasPixels;
-		RasterizeBillboardAtlas(*StaticMesh, Triangles, PlaneInfos, ProxyStats, Settings, AtlasPixels, AtlasStats);
-		AtlasTexture = CreateAtlasTextureAsset(*StaticMesh, AtlasPixels, AtlasStats, Error);
-		if (!AtlasTexture)
-		{
-			const FString Failure = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh->GetName(), *Error);
-			UE_LOG(LogBillboardCloudsEditor, Warning, TEXT("%s"), *Failure);
-			Report += Failure + TEXT("\n\n");
-			continue;
-		}
-
-		BillboardMaterial = CreateBillboardMaterialAsset(*StaticMesh, AtlasTexture, Error);
-		if (!BillboardMaterial)
-		{
-			const FString Failure = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh->GetName(), *Error);
-			UE_LOG(LogBillboardCloudsEditor, Warning, TEXT("%s"), *Failure);
-			Report += Failure + TEXT("\n\n");
-			continue;
-		}
-
-		UStaticMesh* ProxyMesh = CreateStaticMeshAssetFromDescription(*StaticMesh, ProxyMeshDescription, BillboardMaterial, Error);
-		if (!ProxyMesh)
-		{
-			const FString Failure = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh->GetName(), *Error);
-			UE_LOG(LogBillboardCloudsEditor, Warning, TEXT("%s"), *Failure);
-			Report += Failure + TEXT("\n\n");
-			continue;
-		}
-
-		CreatedAssets.Add(ProxyMesh);
-		if (AtlasTexture)
-		{
-			CreatedAssets.Add(AtlasTexture);
-		}
-		if (BillboardMaterial)
-		{
-			CreatedAssets.Add(BillboardMaterial);
-		}
-
-		const FString Summary = UE::BillboardClouds::SummarizePlaneCover(StaticMesh->GetName(), Settings, Result);
-		const FString AlphaPolicyDetails = AtlasStats.MaterialAlphaPolicyDetails.IsEmpty()
-			? FString()
-			: FString::Printf(TEXT("\n  alpha policy:%s"), *AtlasStats.MaterialAlphaPolicyDetails);
-		const FString Success = FString::Printf(
-			TEXT("%s%s\n  proxy asset: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas: %s, %dx%d, max tile=%d, max padding=%d, painted pixels=%d, readable material textures=%d, alpha-mask materials=%d, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, alpha refs texture=%d, forced opaque=%d, shooting=valid-zone clipped\n  material: %s (masked atlas, clip=0.5)\n  normal source triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: BuildFromMeshDescriptions fast path, recompute normals/tangents off, distance fields off\n  proxy winding: reversed UE front-face order, source-facing normals"),
-			*Summary,
-			*AlphaPolicyDetails,
-			*ProxyMesh->GetPathName(),
-			ProxyStats.PlaneCount,
-			ProxyStats.QuadCount,
-			ProxyStats.TriangleCount,
-			*AtlasTexture->GetPathName(),
-			AtlasStats.Width,
-			AtlasStats.Height,
-			AtlasStats.TileResolution,
-			AtlasStats.TilePaddingPixels,
-			AtlasStats.PaintedPixels,
-			AtlasStats.ReadableMaterialTextures,
-			AtlasStats.TextureAlphaOpacityMaterials,
-			AtlasStats.SourceTexturedTriangles,
-			AtlasStats.FallbackTriangles,
-			AtlasStats.RasterizedTriangleReferences,
-			AtlasStats.TextureAlphaOpacityReferences,
-			AtlasStats.ForcedOpaqueAlphaReferences,
-			*BillboardMaterial->GetPathName(),
-			ProxyStats.SourceShadingNormalTriangleCount,
-			ProxyStats.SourceTriangleCount,
-			ProxyStats.AveragePlaneToShadingNormalDot,
-			ProxyStats.AveragePlaneToShadingNormalAngleDegrees);
-		UE_LOG(LogBillboardCloudsEditor, Display, TEXT("\n%s"), *Success);
-		Report += Success + TEXT("\n\n");
 	}
 
 	if (!CreatedAssets.IsEmpty() && GEditor)

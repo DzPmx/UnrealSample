@@ -7,6 +7,28 @@ struct FMeshDescription;
 
 namespace UE::BillboardClouds
 {
+	enum class EPlaneCoverTechnique : uint8
+	{
+		PlaneSpaceGreedy,
+		KMeansClustering,
+		GodOfWarCards
+	};
+
+	enum class EKMeansCrackReductionMode : uint8
+	{
+		Off,
+		PaperExact,
+		BoundaryAware
+	};
+
+	enum class EDoubleSidedBakeMode : uint8
+	{
+		Off,
+		TrunkCardsOnly,
+		BillboardPlanesOnly,
+		AllPlanes
+	};
+
 	struct FSourceTriangle
 	{
 		FVector Vertices[3] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
@@ -17,6 +39,7 @@ namespace UE::BillboardClouds
 		int32 MaterialIndex = INDEX_NONE;
 		bool bHasUVs = false;
 		bool bHasSourceShadingNormal = false;
+		bool bTrunkCardOnly = false;
 	};
 
 	struct FCandidatePlane
@@ -33,19 +56,30 @@ namespace UE::BillboardClouds
 		double Score = 0.0;
 		double CoveredArea = 0.0;
 		TArray<int32> TriangleIndices;
+		bool bIsTrunkCard = false;
+		bool bUseFixedPlaneFrame = false;
+		FVector FixedAxisU = FVector::RightVector;
+		FVector FixedAxisV = FVector::UpVector;
 	};
 
 	struct FPlaneCoverSettings
 	{
+		EPlaneCoverTechnique Technique = EPlaneCoverTechnique::PlaneSpaceGreedy;
 		double ErrorTolerance = 1.0;
 		double TextureCompactnessWeight = 0.25;
+		int32 KMeansPlaneCount = 150;
+		int32 KMeansMaxIterations = 64;
+		EKMeansCrackReductionMode KMeansCrackReductionMode = EKMeansCrackReductionMode::Off;
+		double KMeansBoundaryCrackReductionWidth = 8.0;
+		int32 GodOfWarGeodesicSubdivisions = 2;
+		double GodOfWarCandidateSpacingMultiplier = 1.0;
 		int32 NormalThetaSteps = 16;
 		int32 NormalPhiSteps = 9;
 		int32 RhoBinCount = 256;
 		int32 AdaptiveRefinementDepth = 10;
-		int32 TextureTileResolution = 128;
 		int32 TextureTilePaddingPixels = 2;
-		int32 TextureAtlasMaxResolution = 4096;
+		int32 TextureAtlasResolution = 4096;
+		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;
 	};
 
 	struct FPlaneCoverResult
@@ -56,6 +90,7 @@ namespace UE::BillboardClouds
 		int32 TotalCandidatePlaneCount = 0;
 		int32 GreedyIterationCount = 0;
 		int32 CoveredTriangleCount = 0;
+		int32 FinalReassignedTriangleCount = 0;
 		double SourceArea = 0.0;
 		double CoveredArea = 0.0;
 		double TotalSeconds = 0.0;
@@ -82,9 +117,17 @@ namespace UE::BillboardClouds
 		double AveragePlaneToShadingNormalAngleDegrees = 0.0;
 	};
 
+	struct FCrackReductionProjection
+	{
+		int32 TriangleIndex = INDEX_NONE;
+		int32 SourcePlaneInfoIndex = INDEX_NONE;
+		bool bBoundaryAware = false;
+	};
+
 	struct FPlaneProxyPlaneInfo
 	{
 		int32 SourcePlaneIndex = INDEX_NONE;
+		bool bIsTrunkCard = false;
 		FVector Normal = FVector::UpVector;
 		double Rho = 0.0;
 		FVector AxisU = FVector::RightVector;
@@ -94,13 +137,26 @@ namespace UE::BillboardClouds
 		double MaxU = 0.0;
 		double MinV = 0.0;
 		double MaxV = 0.0;
+		double MinSignedDistance = 0.0;
+		double MaxSignedDistance = 0.0;
+		double EnvelopeMinU = 0.0;
+		double EnvelopeMaxU = 0.0;
+		double EnvelopeMinV = 0.0;
+		double EnvelopeMaxV = 0.0;
+		double EnvelopeMinSignedDistance = 0.0;
+		double EnvelopeMaxSignedDistance = 0.0;
 		FVector Corners[4] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 		FVector2f AtlasUVs[4] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
+		FVector2f BackAtlasUVs[4] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
 		FIntPoint AtlasPixelMin = FIntPoint::ZeroValue;
 		FIntPoint AtlasTileSize = FIntPoint::ZeroValue;
+		FIntPoint BackAtlasPixelMin = FIntPoint::ZeroValue;
+		FIntPoint BackAtlasTileSize = FIntPoint::ZeroValue;
 		int32 AtlasTileResolution = 0;
 		int32 AtlasTilePaddingPixels = 0;
+		bool bHasBackFaceAtlas = false;
 		TArray<int32> TriangleIndices;
+		TArray<FCrackReductionProjection> CrackReductionProjections;
 	};
 
 	bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError);
@@ -109,6 +165,8 @@ namespace UE::BillboardClouds
 	bool IsTriangleValidForPlane(const FSourceTriangle& Triangle, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
 	bool DoesTriangleIntersectPlaneValidZone(const FSourceTriangle& Triangle, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
 	FPlaneCoverResult BuildGreedyPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
+	FPlaneCoverResult BuildKMeansPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
+	FPlaneCoverResult BuildPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
 	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverResult& Result, const FPlaneCoverSettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
 	FString SummarizePlaneCover(const FString& MeshName, const FPlaneCoverSettings& Settings, const FPlaneCoverResult& Result);
 }

@@ -88,6 +88,7 @@ namespace UE::BillboardClouds
 		struct FPreparedProxyPlane
 		{
 			int32 SourcePlaneIndex = INDEX_NONE;
+			bool bIsTrunkCard = false;
 			FVector OrientedNormal = FVector::UpVector;
 			double OrientedRho = 0.0;
 			FVector AxisU = FVector::RightVector;
@@ -97,13 +98,26 @@ namespace UE::BillboardClouds
 			double MaxU = 0.0;
 			double MinV = 0.0;
 			double MaxV = 0.0;
+			double MinSignedDistance = 0.0;
+			double MaxSignedDistance = 0.0;
+			double EnvelopeMinU = 0.0;
+			double EnvelopeMaxU = 0.0;
+			double EnvelopeMinV = 0.0;
+			double EnvelopeMaxV = 0.0;
+			double EnvelopeMinSignedDistance = 0.0;
+			double EnvelopeMaxSignedDistance = 0.0;
 			FVector Corners[4] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 			FVector2f AtlasUVs[4] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
+			FVector2f BackAtlasUVs[4] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
 			FIntPoint AtlasPixelMin = FIntPoint::ZeroValue;
 			FIntPoint AtlasTileSize = FIntPoint::ZeroValue;
+			FIntPoint BackAtlasPixelMin = FIntPoint::ZeroValue;
+			FIntPoint BackAtlasTileSize = FIntPoint::ZeroValue;
 			int32 AtlasTilePaddingPixels = 0;
+			bool bHasBackFaceAtlas = false;
 			double PlaneToShadingNormalDot = 1.0;
 			TArray<int32> TriangleIndices;
+			TArray<FCrackReductionProjection> CrackReductionProjections;
 		};
 
 		FVector NormalFromPlaneSpace(double Theta, double Phi);
@@ -549,6 +563,49 @@ namespace UE::BillboardClouds
 				&& FMath::IsFinite(OutMaxV);
 		}
 
+		bool ComputeFixedFramePlaneRectangle(
+			const TArray<FSourceTriangle>& Triangles,
+			const TArray<int32>& TriangleIndices,
+			const FVector& PlaneNormal,
+			const double PlaneRho,
+			const FVector& AxisU,
+			const FVector& AxisV,
+			double& OutMinU,
+			double& OutMaxU,
+			double& OutMinV,
+			double& OutMaxV)
+		{
+			OutMinU = TNumericLimits<double>::Max();
+			OutMaxU = -TNumericLimits<double>::Max();
+			OutMinV = TNumericLimits<double>::Max();
+			OutMaxV = -TNumericLimits<double>::Max();
+
+			for (const int32 TriangleIndex : TriangleIndices)
+			{
+				if (!Triangles.IsValidIndex(TriangleIndex))
+				{
+					continue;
+				}
+
+				const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+				for (const FVector& Vertex : Triangle.Vertices)
+				{
+					const FVector ProjectedVertex = ProjectPointToPlane(Vertex, PlaneNormal, PlaneRho);
+					const double U = FVector::DotProduct(ProjectedVertex, AxisU);
+					const double V = FVector::DotProduct(ProjectedVertex, AxisV);
+					OutMinU = FMath::Min(OutMinU, U);
+					OutMaxU = FMath::Max(OutMaxU, U);
+					OutMinV = FMath::Min(OutMinV, V);
+					OutMaxV = FMath::Max(OutMaxV, V);
+				}
+			}
+
+			return FMath::IsFinite(OutMinU)
+				&& FMath::IsFinite(OutMaxU)
+				&& FMath::IsFinite(OutMinV)
+				&& FMath::IsFinite(OutMaxV);
+		}
+
 		int32 RoundUpToPowerOfTwoWithinLimit(const int32 Value, const int32 MaxValue)
 		{
 			const int32 ClampedValue = FMath::Max(1, Value);
@@ -580,19 +637,212 @@ namespace UE::BillboardClouds
 			return FMath::Max3(Extent.X, Extent.Y, Extent.Z);
 		}
 
-		void SetPreparedPlaneAtlasUVs(FPreparedProxyPlane& Plane, const int32 AtlasWidth, const int32 AtlasHeight)
+		void SetAtlasUVsFromTile(
+			const FIntPoint& AtlasPixelMin,
+			const FIntPoint& AtlasTileSize,
+			const int32 AtlasWidth,
+			const int32 AtlasHeight,
+			FVector2f OutAtlasUVs[4])
 		{
 			const double SafeAtlasWidth = static_cast<double>(FMath::Max(1, AtlasWidth));
 			const double SafeAtlasHeight = static_cast<double>(FMath::Max(1, AtlasHeight));
-			const double MinU = static_cast<double>(Plane.AtlasPixelMin.X) / SafeAtlasWidth;
-			const double MinV = static_cast<double>(Plane.AtlasPixelMin.Y) / SafeAtlasHeight;
-			const double MaxU = static_cast<double>(Plane.AtlasPixelMin.X + Plane.AtlasTileSize.X) / SafeAtlasWidth;
-			const double MaxV = static_cast<double>(Plane.AtlasPixelMin.Y + Plane.AtlasTileSize.Y) / SafeAtlasHeight;
+			const double MinU = static_cast<double>(AtlasPixelMin.X) / SafeAtlasWidth;
+			const double MinV = static_cast<double>(AtlasPixelMin.Y) / SafeAtlasHeight;
+			const double MaxU = static_cast<double>(AtlasPixelMin.X + AtlasTileSize.X) / SafeAtlasWidth;
+			const double MaxV = static_cast<double>(AtlasPixelMin.Y + AtlasTileSize.Y) / SafeAtlasHeight;
 
-			Plane.AtlasUVs[0] = FVector2f(static_cast<float>(MinU), static_cast<float>(MinV));
-			Plane.AtlasUVs[1] = FVector2f(static_cast<float>(MaxU), static_cast<float>(MinV));
-			Plane.AtlasUVs[2] = FVector2f(static_cast<float>(MaxU), static_cast<float>(MaxV));
-			Plane.AtlasUVs[3] = FVector2f(static_cast<float>(MinU), static_cast<float>(MaxV));
+			OutAtlasUVs[0] = FVector2f(static_cast<float>(MinU), static_cast<float>(MinV));
+			OutAtlasUVs[1] = FVector2f(static_cast<float>(MaxU), static_cast<float>(MinV));
+			OutAtlasUVs[2] = FVector2f(static_cast<float>(MaxU), static_cast<float>(MaxV));
+			OutAtlasUVs[3] = FVector2f(static_cast<float>(MinU), static_cast<float>(MaxV));
+		}
+
+		bool ShouldBakeBackFaceAtlas(const FPreparedProxyPlane& Plane, const FPlaneCoverSettings& Settings)
+		{
+			switch (Settings.DoubleSidedBakeMode)
+			{
+			case EDoubleSidedBakeMode::TrunkCardsOnly:
+				return Plane.bIsTrunkCard;
+			case EDoubleSidedBakeMode::BillboardPlanesOnly:
+				return !Plane.bIsTrunkCard;
+			case EDoubleSidedBakeMode::AllPlanes:
+				return true;
+			case EDoubleSidedBakeMode::Off:
+			default:
+				return false;
+			}
+		}
+
+		struct FAtlasPackRect
+		{
+			int32 PlaneIndex = INDEX_NONE;
+			bool bBackFace = false;
+			FIntPoint PitchSize = FIntPoint::ZeroValue;
+			FIntPoint InteriorSize = FIntPoint::ZeroValue;
+			int32 Padding = 0;
+		};
+
+		struct FAtlasFreeRect
+		{
+			int32 X = 0;
+			int32 Y = 0;
+			int32 W = 0;
+			int32 H = 0;
+		};
+
+		bool DoRectsIntersect(const FAtlasFreeRect& A, const FAtlasFreeRect& B)
+		{
+			return A.X < B.X + B.W
+				&& A.X + A.W > B.X
+				&& A.Y < B.Y + B.H
+				&& A.Y + A.H > B.Y;
+		}
+
+		bool DoesRectContainRect(const FAtlasFreeRect& Outer, const FAtlasFreeRect& Inner)
+		{
+			return Inner.X >= Outer.X
+				&& Inner.Y >= Outer.Y
+				&& Inner.X + Inner.W <= Outer.X + Outer.W
+				&& Inner.Y + Inner.H <= Outer.Y + Outer.H;
+		}
+
+		void PruneContainedFreeRects(TArray<FAtlasFreeRect>& FreeRects)
+		{
+			for (int32 RectIndex = 0; RectIndex < FreeRects.Num(); ++RectIndex)
+			{
+				for (int32 OtherIndex = RectIndex + 1; OtherIndex < FreeRects.Num();)
+				{
+					if (DoesRectContainRect(FreeRects[RectIndex], FreeRects[OtherIndex]))
+					{
+						FreeRects.RemoveAtSwap(OtherIndex, 1, EAllowShrinking::No);
+					}
+					else if (DoesRectContainRect(FreeRects[OtherIndex], FreeRects[RectIndex]))
+					{
+						FreeRects.RemoveAtSwap(RectIndex, 1, EAllowShrinking::No);
+						--RectIndex;
+						break;
+					}
+					else
+					{
+						++OtherIndex;
+					}
+				}
+			}
+		}
+
+		void SplitFreeRects(TArray<FAtlasFreeRect>& FreeRects, const FAtlasFreeRect& UsedRect)
+		{
+			TArray<FAtlasFreeRect> NewFreeRects;
+			for (const FAtlasFreeRect& FreeRect : FreeRects)
+			{
+				if (!DoRectsIntersect(FreeRect, UsedRect))
+				{
+					NewFreeRects.Add(FreeRect);
+					continue;
+				}
+
+				if (UsedRect.X > FreeRect.X)
+				{
+					NewFreeRects.Add({ FreeRect.X, FreeRect.Y, UsedRect.X - FreeRect.X, FreeRect.H });
+				}
+				if (UsedRect.X + UsedRect.W < FreeRect.X + FreeRect.W)
+				{
+					const int32 NewX = UsedRect.X + UsedRect.W;
+					NewFreeRects.Add({ NewX, FreeRect.Y, FreeRect.X + FreeRect.W - NewX, FreeRect.H });
+				}
+				if (UsedRect.Y > FreeRect.Y)
+				{
+					NewFreeRects.Add({ FreeRect.X, FreeRect.Y, FreeRect.W, UsedRect.Y - FreeRect.Y });
+				}
+				if (UsedRect.Y + UsedRect.H < FreeRect.Y + FreeRect.H)
+				{
+					const int32 NewY = UsedRect.Y + UsedRect.H;
+					NewFreeRects.Add({ FreeRect.X, NewY, FreeRect.W, FreeRect.Y + FreeRect.H - NewY });
+				}
+			}
+
+			FreeRects = MoveTemp(NewFreeRects);
+			PruneContainedFreeRects(FreeRects);
+		}
+
+		bool TryPackAtlasRects(
+			TArray<FAtlasPackRect>& PackRects,
+			const int32 AtlasResolution,
+			TArray<FIntPoint>& OutInteriorMins)
+		{
+			OutInteriorMins.SetNum(PackRects.Num());
+			TArray<int32> SortedRectIndices;
+			SortedRectIndices.Reserve(PackRects.Num());
+			for (int32 RectIndex = 0; RectIndex < PackRects.Num(); ++RectIndex)
+			{
+				const FAtlasPackRect& Rect = PackRects[RectIndex];
+				if (Rect.PitchSize.X <= 0 || Rect.PitchSize.Y <= 0 || Rect.PitchSize.X > AtlasResolution || Rect.PitchSize.Y > AtlasResolution)
+				{
+					return false;
+				}
+				SortedRectIndices.Add(RectIndex);
+			}
+
+			SortedRectIndices.Sort([&PackRects](const int32 A, const int32 B)
+			{
+				const int64 AreaA = static_cast<int64>(PackRects[A].PitchSize.X) * static_cast<int64>(PackRects[A].PitchSize.Y);
+				const int64 AreaB = static_cast<int64>(PackRects[B].PitchSize.X) * static_cast<int64>(PackRects[B].PitchSize.Y);
+				if (AreaA != AreaB)
+				{
+					return AreaA > AreaB;
+				}
+				if (PackRects[A].PitchSize.Y != PackRects[B].PitchSize.Y)
+				{
+					return PackRects[A].PitchSize.Y > PackRects[B].PitchSize.Y;
+				}
+				return PackRects[A].PitchSize.X > PackRects[B].PitchSize.X;
+			});
+
+			TArray<FAtlasFreeRect> FreeRects;
+			FreeRects.Add({ 0, 0, AtlasResolution, AtlasResolution });
+
+			for (const int32 RectIndex : SortedRectIndices)
+			{
+				const FAtlasPackRect& Rect = PackRects[RectIndex];
+				int32 BestFreeRectIndex = INDEX_NONE;
+				int64 BestAreaWaste = TNumericLimits<int64>::Max();
+				int32 BestShortSideWaste = TNumericLimits<int32>::Max();
+				for (int32 FreeRectIndex = 0; FreeRectIndex < FreeRects.Num(); ++FreeRectIndex)
+				{
+					const FAtlasFreeRect& FreeRect = FreeRects[FreeRectIndex];
+					if (Rect.PitchSize.X > FreeRect.W || Rect.PitchSize.Y > FreeRect.H)
+					{
+						continue;
+					}
+
+					const int64 AreaWaste = static_cast<int64>(FreeRect.W) * static_cast<int64>(FreeRect.H)
+						- static_cast<int64>(Rect.PitchSize.X) * static_cast<int64>(Rect.PitchSize.Y);
+					const int32 ShortSideWaste = FMath::Min(FreeRect.W - Rect.PitchSize.X, FreeRect.H - Rect.PitchSize.Y);
+					if (AreaWaste < BestAreaWaste || (AreaWaste == BestAreaWaste && ShortSideWaste < BestShortSideWaste))
+					{
+						BestAreaWaste = AreaWaste;
+						BestShortSideWaste = ShortSideWaste;
+						BestFreeRectIndex = FreeRectIndex;
+					}
+				}
+
+				if (BestFreeRectIndex == INDEX_NONE)
+				{
+					return false;
+				}
+
+				const FAtlasFreeRect UsedRect =
+				{
+					FreeRects[BestFreeRectIndex].X,
+					FreeRects[BestFreeRectIndex].Y,
+					Rect.PitchSize.X,
+					Rect.PitchSize.Y
+				};
+				OutInteriorMins[RectIndex] = FIntPoint(UsedRect.X + Rect.Padding, UsedRect.Y + Rect.Padding);
+				SplitFreeRects(FreeRects, UsedRect);
+			}
+
+			return true;
 		}
 
 		bool PackPreparedProxyPlanesIntoAtlas(
@@ -609,123 +859,407 @@ namespace UE::BillboardClouds
 				return false;
 			}
 
+			(void)SourceMaxDimension;
 			const int32 RequestedPadding = FMath::Clamp(Settings.TextureTilePaddingPixels, 0, 128);
-			const int32 RequestedLargestInteriorDimension = FMath::Clamp(Settings.TextureTileResolution, 16, 1024);
-			const int32 MaxAtlasResolution = FMath::Max(256, Settings.TextureAtlasMaxResolution);
-			const double SafeSourceMaxDimension = FMath::Max(SourceMaxDimension, 1.0);
-			const double BasePixelsPerUnit = static_cast<double>(RequestedLargestInteriorDimension) / SafeSourceMaxDimension;
+			const int32 AtlasResolution = FMath::Clamp(Settings.TextureAtlasResolution, 256, 8192);
 
-			for (double Scale = 1.0; Scale >= 1.0 / 64.0; Scale *= 0.5)
+			double MaxPlaneDimension = 1.0;
+			for (const FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
 			{
-				TArray<FIntPoint> PitchSizes;
-				PitchSizes.SetNum(PreparedPlanes.Num());
-				TArray<int32> SortedPlaneIndices;
-				SortedPlaneIndices.Reserve(PreparedPlanes.Num());
-				int32 MaxPitchWidth = 1;
+				MaxPlaneDimension = FMath::Max(MaxPlaneDimension, FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, PreparedPlane.MaxV - PreparedPlane.MinV));
+			}
 
+			auto BuildPackRects = [&](const double PixelsPerUnit, TArray<FAtlasPackRect>& OutPackRects)
+			{
+				OutPackRects.Reset();
 				for (int32 PlaneIndex = 0; PlaneIndex < PreparedPlanes.Num(); ++PlaneIndex)
 				{
 					FPreparedProxyPlane& PreparedPlane = PreparedPlanes[PlaneIndex];
 					const double PlaneWidth = FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, 1.0);
 					const double PlaneHeight = FMath::Max(PreparedPlane.MaxV - PreparedPlane.MinV, 1.0);
-					const int32 InteriorWidth = FMath::Clamp(FMath::CeilToInt(PlaneWidth * BasePixelsPerUnit * Scale), 1, RequestedLargestInteriorDimension);
-					const int32 InteriorHeight = FMath::Clamp(FMath::CeilToInt(PlaneHeight * BasePixelsPerUnit * Scale), 1, RequestedLargestInteriorDimension);
+					const int32 InteriorWidth = FMath::Max(1, FMath::CeilToInt(PlaneWidth * PixelsPerUnit));
+					const int32 InteriorHeight = FMath::Max(1, FMath::CeilToInt(PlaneHeight * PixelsPerUnit));
 					const int32 EffectivePadding = FMath::Clamp(RequestedPadding, 0, FMath::Max(0, (FMath::Min(InteriorWidth, InteriorHeight) - 1) / 2));
-					PreparedPlane.AtlasTileSize = FIntPoint(InteriorWidth, InteriorHeight);
-					PreparedPlane.AtlasTilePaddingPixels = EffectivePadding;
 
-					const FIntPoint PitchSize(InteriorWidth + EffectivePadding * 2, InteriorHeight + EffectivePadding * 2);
-					PitchSizes[PlaneIndex] = PitchSize;
-					MaxPitchWidth = FMath::Max(MaxPitchWidth, PitchSize.X);
-					SortedPlaneIndices.Add(PlaneIndex);
-				}
+					FAtlasPackRect FrontRect;
+					FrontRect.PlaneIndex = PlaneIndex;
+					FrontRect.bBackFace = false;
+					FrontRect.InteriorSize = FIntPoint(InteriorWidth, InteriorHeight);
+					FrontRect.Padding = EffectivePadding;
+					FrontRect.PitchSize = FIntPoint(InteriorWidth + EffectivePadding * 2, InteriorHeight + EffectivePadding * 2);
+					OutPackRects.Add(FrontRect);
 
-				SortedPlaneIndices.Sort([&PitchSizes](const int32 A, const int32 B)
-				{
-					if (PitchSizes[A].Y != PitchSizes[B].Y)
+					if (ShouldBakeBackFaceAtlas(PreparedPlane, Settings))
 					{
-						return PitchSizes[A].Y > PitchSizes[B].Y;
-					}
-					return PitchSizes[A].X > PitchSizes[B].X;
-				});
-
-				int32 BestAtlasWidth = 0;
-				int32 BestAtlasHeight = 0;
-				double BestAtlasScore = TNumericLimits<double>::Max();
-				TArray<FIntPoint> BestInteriorMins;
-
-				for (int32 CandidateWidth = 1; CandidateWidth <= MaxAtlasResolution; CandidateWidth <<= 1)
-				{
-					if (CandidateWidth < MaxPitchWidth)
-					{
-						continue;
-					}
-
-					TArray<FIntPoint> CandidateInteriorMins;
-					CandidateInteriorMins.SetNum(PreparedPlanes.Num());
-					int32 CurrentX = 0;
-					int32 CurrentY = 0;
-					int32 RowHeight = 0;
-
-					for (const int32 PlaneIndex : SortedPlaneIndices)
-					{
-						const FIntPoint PitchSize = PitchSizes[PlaneIndex];
-						if (CurrentX > 0 && CurrentX + PitchSize.X > CandidateWidth)
-						{
-							CurrentY += RowHeight;
-							CurrentX = 0;
-							RowHeight = 0;
-						}
-
-						const int32 Padding = PreparedPlanes[PlaneIndex].AtlasTilePaddingPixels;
-						CandidateInteriorMins[PlaneIndex] = FIntPoint(CurrentX + Padding, CurrentY + Padding);
-						CurrentX += PitchSize.X;
-						RowHeight = FMath::Max(RowHeight, PitchSize.Y);
-					}
-
-					const int32 RequiredHeight = CurrentY + RowHeight;
-					const int32 CandidateHeight = RoundUpToPowerOfTwoWithinLimit(RequiredHeight, MaxAtlasResolution);
-					if (CandidateHeight <= 0)
-					{
-						continue;
-					}
-
-					const int64 CandidateArea = static_cast<int64>(CandidateWidth) * static_cast<int64>(CandidateHeight);
-					const double AspectRatio = static_cast<double>(FMath::Max(CandidateWidth, CandidateHeight))
-						/ static_cast<double>(FMath::Max(1, FMath::Min(CandidateWidth, CandidateHeight)));
-					const double AspectPenalty = AspectRatio * AspectRatio;
-					const double CandidateScore = static_cast<double>(CandidateArea) * AspectPenalty;
-					if (CandidateScore < BestAtlasScore)
-					{
-						BestAtlasWidth = CandidateWidth;
-						BestAtlasHeight = CandidateHeight;
-						BestAtlasScore = CandidateScore;
-						BestInteriorMins = MoveTemp(CandidateInteriorMins);
+						FAtlasPackRect BackRect = FrontRect;
+						BackRect.bBackFace = true;
+						OutPackRects.Add(BackRect);
 					}
 				}
+			};
 
-				if (BestAtlasWidth <= 0 || BestAtlasHeight <= 0)
+			TArray<FAtlasPackRect> CandidatePackRects;
+			TArray<FAtlasPackRect> BestPackRects;
+			TArray<FIntPoint> CandidateInteriorMins;
+			TArray<FIntPoint> BestInteriorMins;
+			double LowScale = 0.0;
+			double HighScale = static_cast<double>(AtlasResolution) / MaxPlaneDimension;
+			bool bFoundPack = false;
+			for (int32 Iteration = 0; Iteration < 28; ++Iteration)
+			{
+				const double MidScale = 0.5 * (LowScale + HighScale);
+				BuildPackRects(MidScale, CandidatePackRects);
+				if (TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
+				{
+					LowScale = MidScale;
+					BestPackRects = CandidatePackRects;
+					BestInteriorMins = CandidateInteriorMins;
+					bFoundPack = true;
+				}
+				else
+				{
+					HighScale = MidScale;
+				}
+			}
+
+			if (!bFoundPack)
+			{
+				BuildPackRects(0.0, CandidatePackRects);
+				if (!TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
+				{
+					return false;
+				}
+				BestPackRects = CandidatePackRects;
+				BestInteriorMins = CandidateInteriorMins;
+			}
+
+			OutAtlasWidth = AtlasResolution;
+			OutAtlasHeight = AtlasResolution;
+			OutLargestInteriorDimension = 0;
+			OutLargestPadding = 0;
+
+			for (FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
+			{
+				PreparedPlane.AtlasPixelMin = FIntPoint::ZeroValue;
+				PreparedPlane.BackAtlasPixelMin = FIntPoint::ZeroValue;
+				PreparedPlane.AtlasTileSize = FIntPoint::ZeroValue;
+				PreparedPlane.BackAtlasTileSize = FIntPoint::ZeroValue;
+				PreparedPlane.AtlasTilePaddingPixels = 0;
+				PreparedPlane.bHasBackFaceAtlas = false;
+			}
+
+			for (int32 RectIndex = 0; RectIndex < BestPackRects.Num(); ++RectIndex)
+			{
+				const FAtlasPackRect& PackRect = BestPackRects[RectIndex];
+				if (!PreparedPlanes.IsValidIndex(PackRect.PlaneIndex))
 				{
 					continue;
 				}
 
-				OutAtlasWidth = BestAtlasWidth;
-				OutAtlasHeight = BestAtlasHeight;
-				OutLargestInteriorDimension = 0;
-				OutLargestPadding = 0;
-				for (int32 PlaneIndex = 0; PlaneIndex < PreparedPlanes.Num(); ++PlaneIndex)
+				FPreparedProxyPlane& PreparedPlane = PreparedPlanes[PackRect.PlaneIndex];
+				PreparedPlane.AtlasTilePaddingPixels = FMath::Max(PreparedPlane.AtlasTilePaddingPixels, PackRect.Padding);
+				if (PackRect.bBackFace)
 				{
-					FPreparedProxyPlane& PreparedPlane = PreparedPlanes[PlaneIndex];
-					PreparedPlane.AtlasPixelMin = BestInteriorMins[PlaneIndex];
-					SetPreparedPlaneAtlasUVs(PreparedPlane, OutAtlasWidth, OutAtlasHeight);
-					OutLargestInteriorDimension = FMath::Max(OutLargestInteriorDimension, FMath::Max(PreparedPlane.AtlasTileSize.X, PreparedPlane.AtlasTileSize.Y));
-					OutLargestPadding = FMath::Max(OutLargestPadding, PreparedPlane.AtlasTilePaddingPixels);
+					PreparedPlane.bHasBackFaceAtlas = true;
+					PreparedPlane.BackAtlasPixelMin = BestInteriorMins[RectIndex];
+					PreparedPlane.BackAtlasTileSize = PackRect.InteriorSize;
 				}
-
-				return true;
+				else
+				{
+					PreparedPlane.AtlasPixelMin = BestInteriorMins[RectIndex];
+					PreparedPlane.AtlasTileSize = PackRect.InteriorSize;
+				}
 			}
 
-			return false;
+			for (FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
+			{
+				SetAtlasUVsFromTile(PreparedPlane.AtlasPixelMin, PreparedPlane.AtlasTileSize, OutAtlasWidth, OutAtlasHeight, PreparedPlane.AtlasUVs);
+				if (PreparedPlane.bHasBackFaceAtlas)
+				{
+					SetAtlasUVsFromTile(PreparedPlane.BackAtlasPixelMin, PreparedPlane.BackAtlasTileSize, OutAtlasWidth, OutAtlasHeight, PreparedPlane.BackAtlasUVs);
+				}
+				else
+				{
+					for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
+					{
+						PreparedPlane.BackAtlasUVs[CornerIndex] = PreparedPlane.AtlasUVs[CornerIndex];
+					}
+				}
+
+				OutLargestInteriorDimension = FMath::Max(OutLargestInteriorDimension, FMath::Max(PreparedPlane.AtlasTileSize.X, PreparedPlane.AtlasTileSize.Y));
+				OutLargestPadding = FMath::Max(OutLargestPadding, PreparedPlane.AtlasTilePaddingPixels);
+			}
+
+			return true;
+		}
+
+		void ComputeSignedDistanceRangeForTriangles(
+			const TArray<FSourceTriangle>& Triangles,
+			const TArray<int32>& TriangleIndices,
+			const FVector& PlaneNormal,
+			const double PlaneRho,
+			double& OutMinSignedDistance,
+			double& OutMaxSignedDistance)
+		{
+			OutMinSignedDistance = TNumericLimits<double>::Max();
+			OutMaxSignedDistance = -TNumericLimits<double>::Max();
+
+			for (const int32 TriangleIndex : TriangleIndices)
+			{
+				if (!Triangles.IsValidIndex(TriangleIndex))
+				{
+					continue;
+				}
+
+				const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+				for (const FVector& Vertex : Triangle.Vertices)
+				{
+					const double SignedDistance = FVector::DotProduct(PlaneNormal, Vertex) - PlaneRho;
+					OutMinSignedDistance = FMath::Min(OutMinSignedDistance, SignedDistance);
+					OutMaxSignedDistance = FMath::Max(OutMaxSignedDistance, SignedDistance);
+				}
+			}
+
+			if (!FMath::IsFinite(OutMinSignedDistance) || !FMath::IsFinite(OutMaxSignedDistance))
+			{
+				OutMinSignedDistance = 0.0;
+				OutMaxSignedDistance = 0.0;
+			}
+		}
+
+		bool IsPointInsidePreparedPlaneEnvelope(const FPreparedProxyPlane& Plane, const FVector& Point, const double Tolerance)
+		{
+			const double U = FVector::DotProduct(Point, Plane.AxisU);
+			const double V = FVector::DotProduct(Point, Plane.AxisV);
+			const double SignedDistance = FVector::DotProduct(Plane.OrientedNormal, Point) - Plane.OrientedRho;
+			return U >= Plane.EnvelopeMinU - Tolerance
+				&& U <= Plane.EnvelopeMaxU + Tolerance
+				&& V >= Plane.EnvelopeMinV - Tolerance
+				&& V <= Plane.EnvelopeMaxV + Tolerance
+				&& SignedDistance >= Plane.EnvelopeMinSignedDistance - Tolerance
+				&& SignedDistance <= Plane.EnvelopeMaxSignedDistance + Tolerance;
+		}
+
+		double GetPreparedPlaneEnvelopeCoordinate(const FPreparedProxyPlane& Plane, const FVector& Point, const int32 AxisIndex)
+		{
+			if (AxisIndex == 0)
+			{
+				return FVector::DotProduct(Point, Plane.AxisU);
+			}
+			if (AxisIndex == 1)
+			{
+				return FVector::DotProduct(Point, Plane.AxisV);
+			}
+			return FVector::DotProduct(Point, Plane.OrientedNormal) - Plane.OrientedRho;
+		}
+
+		void ClipPolygonAgainstPreparedPlaneEnvelopeBound(
+			TArray<FVector>& Polygon,
+			const FPreparedProxyPlane& Plane,
+			const int32 AxisIndex,
+			const double Bound,
+			const bool bKeepGreater,
+			const double Tolerance)
+		{
+			if (Polygon.IsEmpty())
+			{
+				return;
+			}
+
+			TArray<FVector> ClippedPolygon;
+			ClippedPolygon.Reserve(Polygon.Num() + 1);
+
+			FVector PreviousPoint = Polygon.Last();
+			double PreviousValue = GetPreparedPlaneEnvelopeCoordinate(Plane, PreviousPoint, AxisIndex);
+			bool bPreviousInside = bKeepGreater
+				? PreviousValue >= Bound - Tolerance
+				: PreviousValue <= Bound + Tolerance;
+
+			for (const FVector& CurrentPoint : Polygon)
+			{
+				const double CurrentValue = GetPreparedPlaneEnvelopeCoordinate(Plane, CurrentPoint, AxisIndex);
+				const bool bCurrentInside = bKeepGreater
+					? CurrentValue >= Bound - Tolerance
+					: CurrentValue <= Bound + Tolerance;
+
+				if (bPreviousInside != bCurrentInside)
+				{
+					const double Denominator = CurrentValue - PreviousValue;
+					if (FMath::Abs(Denominator) > UE_SMALL_NUMBER)
+					{
+						const double T = FMath::Clamp((Bound - PreviousValue) / Denominator, 0.0, 1.0);
+						ClippedPolygon.Add(PreviousPoint + (CurrentPoint - PreviousPoint) * T);
+					}
+				}
+
+				if (bCurrentInside)
+				{
+					ClippedPolygon.Add(CurrentPoint);
+				}
+
+				PreviousPoint = CurrentPoint;
+				PreviousValue = CurrentValue;
+				bPreviousInside = bCurrentInside;
+			}
+
+			Polygon = MoveTemp(ClippedPolygon);
+		}
+
+		double ComputePolygonArea3D(const TArray<FVector>& Polygon)
+		{
+			if (Polygon.Num() < 3)
+			{
+				return 0.0;
+			}
+
+			const FVector& Origin = Polygon[0];
+			double Area = 0.0;
+			for (int32 PointIndex = 1; PointIndex + 1 < Polygon.Num(); ++PointIndex)
+			{
+				Area += 0.5 * FVector::CrossProduct(Polygon[PointIndex] - Origin, Polygon[PointIndex + 1] - Origin).Size();
+			}
+			return Area;
+		}
+
+		bool DoesTriangleIntersectPreparedPlaneEnvelope(
+			const TArray<FSourceTriangle>& Triangles,
+			const int32 TriangleIndex,
+			const FPreparedProxyPlane& Plane,
+			const double Tolerance)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex))
+			{
+				return false;
+			}
+
+			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+			TArray<FVector> ClippedPolygon;
+			ClippedPolygon.Reserve(8);
+			ClippedPolygon.Add(Triangle.Vertices[0]);
+			ClippedPolygon.Add(Triangle.Vertices[1]);
+			ClippedPolygon.Add(Triangle.Vertices[2]);
+
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 0, Plane.EnvelopeMinU, true, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 0, Plane.EnvelopeMaxU, false, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 1, Plane.EnvelopeMinV, true, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 1, Plane.EnvelopeMaxV, false, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 2, Plane.EnvelopeMinSignedDistance, true, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 2, Plane.EnvelopeMaxSignedDistance, false, Tolerance);
+
+			return ComputePolygonArea3D(ClippedPolygon) > UE_SMALL_NUMBER;
+		}
+
+		void CollectTrianglesIntersectingPreparedPlaneEnvelope(
+			const TArray<FSourceTriangle>& Triangles,
+			const TArray<int32>& TriangleIndices,
+			const FPreparedProxyPlane& Plane,
+			const double Tolerance,
+			TArray<int32>& OutTriangleIndices)
+		{
+			OutTriangleIndices.Reset();
+			for (const int32 TriangleIndex : TriangleIndices)
+			{
+				if (DoesTriangleIntersectPreparedPlaneEnvelope(Triangles, TriangleIndex, Plane, Tolerance))
+				{
+					OutTriangleIndices.Add(TriangleIndex);
+				}
+			}
+		}
+
+		uint64 MakeCrackReductionProjectionKey(const int32 SourcePlaneInfoIndex, const int32 TriangleIndex)
+		{
+			return (static_cast<uint64>(static_cast<uint32>(SourcePlaneInfoIndex)) << 32)
+				| static_cast<uint64>(static_cast<uint32>(TriangleIndex));
+		}
+
+		void AddCrackReductionProjection(
+			TSet<uint64>& ProjectionKeySet,
+			TArray<FCrackReductionProjection>& CrackProjections,
+			const TArray<int32>& PrimaryTriangleIndices,
+			const int32 SourcePlaneInfoIndex,
+			const int32 TriangleIndex,
+			const bool bBoundaryAware)
+		{
+			if (PrimaryTriangleIndices.Contains(TriangleIndex))
+			{
+				return;
+			}
+
+			const uint64 ProjectionKey = MakeCrackReductionProjectionKey(SourcePlaneInfoIndex, TriangleIndex);
+			if (ProjectionKeySet.Contains(ProjectionKey))
+			{
+				return;
+			}
+
+			ProjectionKeySet.Add(ProjectionKey);
+			FCrackReductionProjection& Projection = CrackProjections.AddDefaulted_GetRef();
+			Projection.TriangleIndex = TriangleIndex;
+			Projection.SourcePlaneInfoIndex = SourcePlaneInfoIndex;
+			Projection.bBoundaryAware = bBoundaryAware;
+		}
+
+		void ApplyKMeansEnvelopeCrackReduction(
+			const TArray<FSourceTriangle>& Triangles,
+			const FPlaneCoverSettings& Settings,
+			TArray<FPreparedProxyPlane>& PreparedPlanes)
+		{
+			if (Settings.Technique != EPlaneCoverTechnique::KMeansClustering
+				|| Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::Off
+				|| PreparedPlanes.Num() <= 1)
+			{
+				return;
+			}
+
+			const bool bBoundaryAware = Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::BoundaryAware;
+			constexpr double Tolerance = 1.0e-4;
+			TArray<TSet<uint64>> CrackProjectionKeySets;
+			CrackProjectionKeySets.SetNum(PreparedPlanes.Num());
+			TArray<TArray<FCrackReductionProjection>> CrackProjectionLists;
+			CrackProjectionLists.SetNum(PreparedPlanes.Num());
+
+			TArray<int32> TrianglesFromAIntersectingB;
+			TArray<int32> TrianglesFromBIntersectingA;
+			for (int32 PlaneAIndex = 0; PlaneAIndex < PreparedPlanes.Num(); ++PlaneAIndex)
+			{
+				for (int32 PlaneBIndex = PlaneAIndex + 1; PlaneBIndex < PreparedPlanes.Num(); ++PlaneBIndex)
+				{
+					const FPreparedProxyPlane& PlaneA = PreparedPlanes[PlaneAIndex];
+					const FPreparedProxyPlane& PlaneB = PreparedPlanes[PlaneBIndex];
+					if (PlaneA.bIsTrunkCard || PlaneB.bIsTrunkCard)
+					{
+						continue;
+					}
+
+					CollectTrianglesIntersectingPreparedPlaneEnvelope(Triangles, PlaneA.TriangleIndices, PlaneB, Tolerance, TrianglesFromAIntersectingB);
+					CollectTrianglesIntersectingPreparedPlaneEnvelope(Triangles, PlaneB.TriangleIndices, PlaneA, Tolerance, TrianglesFromBIntersectingA);
+					if (TrianglesFromAIntersectingB.IsEmpty() || TrianglesFromBIntersectingA.IsEmpty())
+					{
+						continue;
+					}
+
+					for (const int32 TriangleIndex : TrianglesFromAIntersectingB)
+					{
+						AddCrackReductionProjection(CrackProjectionKeySets[PlaneBIndex], CrackProjectionLists[PlaneBIndex], PlaneB.TriangleIndices, PlaneAIndex, TriangleIndex, bBoundaryAware);
+					}
+					for (const int32 TriangleIndex : TrianglesFromBIntersectingA)
+					{
+						AddCrackReductionProjection(CrackProjectionKeySets[PlaneAIndex], CrackProjectionLists[PlaneAIndex], PlaneA.TriangleIndices, PlaneBIndex, TriangleIndex, bBoundaryAware);
+					}
+				}
+			}
+
+			for (int32 PlaneIndex = 0; PlaneIndex < PreparedPlanes.Num(); ++PlaneIndex)
+			{
+				PreparedPlanes[PlaneIndex].CrackReductionProjections = MoveTemp(CrackProjectionLists[PlaneIndex]);
+				PreparedPlanes[PlaneIndex].CrackReductionProjections.Sort([](const FCrackReductionProjection& A, const FCrackReductionProjection& B)
+				{
+					if (A.SourcePlaneInfoIndex != B.SourcePlaneInfoIndex)
+					{
+						return A.SourcePlaneInfoIndex < B.SourcePlaneInfoIndex;
+					}
+					return A.TriangleIndex < B.TriangleIndex;
+				});
+			}
 		}
 
 		bool AddQuadPolygon(
@@ -742,6 +1276,8 @@ namespace UE::BillboardClouds
 			TEdgeAttributesRef<bool>& EdgeHardnesses,
 			const FVector Corners[4],
 			const FVector2f CornerUVs[4],
+			const FVector2f BackCornerUVs[4],
+			const FVector2f MaskUV,
 			const FVector& InShadingNormal)
 		{
 			static constexpr int32 UnrealFrontFaceOrder[4] = { 0, 3, 2, 1 };
@@ -789,6 +1325,8 @@ namespace UE::BillboardClouds
 				const FVertexInstanceID VertexInstanceID = MeshDescription.CreateVertexInstance(VertexID);
 				VertexInstanceIDs[VertexOrderIndex] = VertexInstanceID;
 				VertexInstanceUVs.Set(VertexInstanceID, 0, CornerUVs[CornerIndex]);
+				VertexInstanceUVs.Set(VertexInstanceID, 1, BackCornerUVs[CornerIndex]);
+				VertexInstanceUVs.Set(VertexInstanceID, 2, MaskUV);
 				VertexInstanceNormals[VertexInstanceID] = FVector3f(ShadingNormal);
 				VertexInstanceTangents[VertexInstanceID] = FVector3f(Tangent);
 				VertexInstanceBinormalSigns[VertexInstanceID] = BinormalSign;
@@ -1808,6 +2346,18 @@ namespace UE::BillboardClouds
 		return FMath::Abs(FVector::DotProduct(PlaneNormal, Point) - PlaneRho) <= Settings.ErrorTolerance;
 	}
 
+	bool IsTriangleInsideGodOfWarThickSlice(const FSourceTriangle& Triangle, const FVector& PlaneNormal, const double PlaneRho, const FPlaneCoverSettings& Settings)
+	{
+		for (const FVector& Vertex : Triangle.Vertices)
+		{
+			if (!IsPointWithinPlaneError(Vertex, PlaneNormal, PlaneRho, Settings))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 	bool IsTriangleValidForPlane(const FSourceTriangle& Triangle, const FVector& PlaneNormal, const double PlaneRho, const FPlaneCoverSettings& Settings)
 	{
 		double ValidMin = 0.0;
@@ -1833,6 +2383,1383 @@ namespace UE::BillboardClouds
 			MaxDistance = FMath::Max(MaxDistance, SignedDistance);
 		}
 		return MinDistance <= Settings.ErrorTolerance && MaxDistance >= -Settings.ErrorTolerance;
+	}
+
+	struct FKMeansCluster
+	{
+		FVector Normal = FVector::UpVector;
+		double Rho = 0.0;
+		TArray<int32> TriangleIndices;
+	};
+
+	FVector ComputeTriangleCentroid(const FSourceTriangle& Triangle)
+	{
+		return (Triangle.Vertices[0] + Triangle.Vertices[1] + Triangle.Vertices[2]) / 3.0;
+	}
+
+	double ComputeTriangleToPlaneDistance(const FSourceTriangle& Triangle, const FVector& PlaneNormal, const double PlaneRho)
+	{
+		const FVector SafeNormal = PlaneNormal.GetSafeNormal();
+		return FMath::Abs(FVector::DotProduct(SafeNormal, Triangle.Vertices[0]) - PlaneRho)
+			+ FMath::Abs(FVector::DotProduct(SafeNormal, Triangle.Vertices[1]) - PlaneRho)
+			+ FMath::Abs(FVector::DotProduct(SafeNormal, Triangle.Vertices[2]) - PlaneRho);
+	}
+
+	FVector ComputeSmallestSymmetricEigenVector(double Matrix[3][3])
+	{
+		double EigenVectors[3][3] =
+		{
+			{ 1.0, 0.0, 0.0 },
+			{ 0.0, 1.0, 0.0 },
+			{ 0.0, 0.0, 1.0 }
+		};
+
+		for (int32 Iteration = 0; Iteration < 32; ++Iteration)
+		{
+			int32 P = 0;
+			int32 Q = 1;
+			double MaxOffDiagonal = FMath::Abs(Matrix[0][1]);
+			if (FMath::Abs(Matrix[0][2]) > MaxOffDiagonal)
+			{
+				P = 0;
+				Q = 2;
+				MaxOffDiagonal = FMath::Abs(Matrix[0][2]);
+			}
+			if (FMath::Abs(Matrix[1][2]) > MaxOffDiagonal)
+			{
+				P = 1;
+				Q = 2;
+				MaxOffDiagonal = FMath::Abs(Matrix[1][2]);
+			}
+
+			if (MaxOffDiagonal <= 1.0e-12)
+			{
+				break;
+			}
+
+			const double App = Matrix[P][P];
+			const double Aqq = Matrix[Q][Q];
+			const double Apq = Matrix[P][Q];
+			const double Angle = 0.5 * FMath::Atan2(2.0 * Apq, Aqq - App);
+			const double C = FMath::Cos(Angle);
+			const double S = FMath::Sin(Angle);
+
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				if (Index == P || Index == Q)
+				{
+					continue;
+				}
+
+				const double Aip = Matrix[Index][P];
+				const double Aiq = Matrix[Index][Q];
+				Matrix[Index][P] = C * Aip - S * Aiq;
+				Matrix[P][Index] = Matrix[Index][P];
+				Matrix[Index][Q] = S * Aip + C * Aiq;
+				Matrix[Q][Index] = Matrix[Index][Q];
+			}
+
+			Matrix[P][P] = C * C * App - 2.0 * S * C * Apq + S * S * Aqq;
+			Matrix[Q][Q] = S * S * App + 2.0 * S * C * Apq + C * C * Aqq;
+			Matrix[P][Q] = 0.0;
+			Matrix[Q][P] = 0.0;
+
+			for (int32 Row = 0; Row < 3; ++Row)
+			{
+				const double Vip = EigenVectors[Row][P];
+				const double Viq = EigenVectors[Row][Q];
+				EigenVectors[Row][P] = C * Vip - S * Viq;
+				EigenVectors[Row][Q] = S * Vip + C * Viq;
+			}
+		}
+
+		int32 SmallestIndex = 0;
+		if (Matrix[1][1] < Matrix[SmallestIndex][SmallestIndex])
+		{
+			SmallestIndex = 1;
+		}
+		if (Matrix[2][2] < Matrix[SmallestIndex][SmallestIndex])
+		{
+			SmallestIndex = 2;
+		}
+
+		return FVector(EigenVectors[0][SmallestIndex], EigenVectors[1][SmallestIndex], EigenVectors[2][SmallestIndex]).GetSafeNormal();
+	}
+
+	bool FitBestPlaneToTriangles(const TArray<FSourceTriangle>& Triangles, const TArray<int32>& TriangleIndices, FVector& OutNormal, double& OutRho)
+	{
+		if (TriangleIndices.IsEmpty())
+		{
+			return false;
+		}
+
+		FVector Centroid = FVector::ZeroVector;
+		int32 VertexCount = 0;
+		FVector WeightedTriangleNormal = FVector::ZeroVector;
+		for (const int32 TriangleIndex : TriangleIndices)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+
+			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+			for (const FVector& Vertex : Triangle.Vertices)
+			{
+				Centroid += Vertex;
+				++VertexCount;
+			}
+			WeightedTriangleNormal += Triangle.Area * Triangle.Normal;
+		}
+
+		if (VertexCount <= 0)
+		{
+			return false;
+		}
+
+		Centroid /= static_cast<double>(VertexCount);
+
+		double Covariance[3][3] =
+		{
+			{ 0.0, 0.0, 0.0 },
+			{ 0.0, 0.0, 0.0 },
+			{ 0.0, 0.0, 0.0 }
+		};
+
+		for (const int32 TriangleIndex : TriangleIndices)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+
+			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+			for (const FVector& Vertex : Triangle.Vertices)
+			{
+				const FVector Delta = Vertex - Centroid;
+				Covariance[0][0] += Delta.X * Delta.X;
+				Covariance[0][1] += Delta.X * Delta.Y;
+				Covariance[0][2] += Delta.X * Delta.Z;
+				Covariance[1][1] += Delta.Y * Delta.Y;
+				Covariance[1][2] += Delta.Y * Delta.Z;
+				Covariance[2][2] += Delta.Z * Delta.Z;
+			}
+		}
+
+		Covariance[1][0] = Covariance[0][1];
+		Covariance[2][0] = Covariance[0][2];
+		Covariance[2][1] = Covariance[1][2];
+
+		FVector Normal = ComputeSmallestSymmetricEigenVector(Covariance);
+		if (Normal.IsNearlyZero())
+		{
+			Normal = WeightedTriangleNormal.GetSafeNormal();
+		}
+		if (Normal.IsNearlyZero())
+		{
+			Normal = FVector::UpVector;
+		}
+
+		const FVector PreferredNormal = WeightedTriangleNormal.GetSafeNormal();
+		if (!PreferredNormal.IsNearlyZero() && FVector::DotProduct(Normal, PreferredNormal) < 0.0)
+		{
+			Normal *= -1.0;
+		}
+
+		OutNormal = Normal;
+		OutRho = FVector::DotProduct(OutNormal, Centroid);
+		return true;
+	}
+
+	void GenerateKMeansSphereDirections(const int32 DirectionCount, TArray<FVector>& OutDirections)
+	{
+		OutDirections.Reset(DirectionCount);
+		if (DirectionCount <= 0)
+		{
+			return;
+		}
+
+		const double GoldenAngle = UE_DOUBLE_PI * (3.0 - FMath::Sqrt(5.0));
+		for (int32 DirectionIndex = 0; DirectionIndex < DirectionCount; ++DirectionIndex)
+		{
+			const double T = (static_cast<double>(DirectionIndex) + 0.5) / static_cast<double>(DirectionCount);
+			const double Z = 1.0 - 2.0 * T;
+			const double Radius = FMath::Sqrt(FMath::Max(0.0, 1.0 - Z * Z));
+			const double Theta = GoldenAngle * static_cast<double>(DirectionIndex);
+			OutDirections.Add(FVector(Radius * FMath::Cos(Theta), Radius * FMath::Sin(Theta), Z).GetSafeNormal());
+		}
+
+		if (DirectionCount > 512)
+		{
+			return;
+		}
+
+		for (int32 RelaxationIteration = 0; RelaxationIteration < 12; ++RelaxationIteration)
+		{
+			TArray<FVector> Forces;
+			Forces.Init(FVector::ZeroVector, DirectionCount);
+			for (int32 A = 0; A < DirectionCount; ++A)
+			{
+				for (int32 B = A + 1; B < DirectionCount; ++B)
+				{
+					const FVector Delta = OutDirections[A] - OutDirections[B];
+					const double DistanceSquared = FMath::Max(Delta.SizeSquared(), 1.0e-6);
+					const FVector Force = Delta / (DistanceSquared * FMath::Sqrt(DistanceSquared));
+					Forces[A] += Force;
+					Forces[B] -= Force;
+				}
+			}
+
+			for (int32 DirectionIndex = 0; DirectionIndex < DirectionCount; ++DirectionIndex)
+			{
+				const FVector Normal = OutDirections[DirectionIndex];
+				const FVector TangentForce = Forces[DirectionIndex] - Normal * FVector::DotProduct(Forces[DirectionIndex], Normal);
+				OutDirections[DirectionIndex] = (Normal + TangentForce * 0.01).GetSafeNormal();
+				if (OutDirections[DirectionIndex].IsNearlyZero())
+				{
+					OutDirections[DirectionIndex] = Normal;
+				}
+			}
+		}
+	}
+
+	void InitializeKMeansClusters(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings, TArray<FKMeansCluster>& OutClusters)
+	{
+		const int32 ClusterCount = FMath::Clamp(Settings.KMeansPlaneCount, 1, FMath::Max(1, Triangles.Num()));
+		OutClusters.Reset(ClusterCount);
+
+		FBox Bounds(ForceInit);
+		for (const FSourceTriangle& Triangle : Triangles)
+		{
+			for (const FVector& Vertex : Triangle.Vertices)
+			{
+				Bounds += Vertex;
+			}
+		}
+
+		const FVector BoundsCenter = Bounds.IsValid ? Bounds.GetCenter() : FVector::ZeroVector;
+		const double BoundsRadius = Bounds.IsValid ? FMath::Max(Bounds.GetExtent().Length(), 1.0) : 1.0;
+
+		TArray<FVector> Directions;
+		GenerateKMeansSphereDirections(ClusterCount, Directions);
+		for (int32 ClusterIndex = 0; ClusterIndex < ClusterCount; ++ClusterIndex)
+		{
+			const FVector Normal = Directions.IsValidIndex(ClusterIndex) ? Directions[ClusterIndex] : FVector::UpVector;
+			FKMeansCluster& Cluster = OutClusters.AddDefaulted_GetRef();
+			Cluster.Normal = Normal.GetSafeNormal();
+			Cluster.Rho = FVector::DotProduct(Cluster.Normal, BoundsCenter + Cluster.Normal * BoundsRadius);
+		}
+	}
+
+	void AssignTrianglesToKMeansClusters(const TArray<FSourceTriangle>& Triangles, TArray<FKMeansCluster>& Clusters)
+	{
+		for (FKMeansCluster& Cluster : Clusters)
+		{
+			Cluster.TriangleIndices.Reset();
+		}
+
+		for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
+		{
+			int32 BestClusterIndex = INDEX_NONE;
+			double BestDistance = TNumericLimits<double>::Max();
+			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			{
+				const FKMeansCluster& Cluster = Clusters[ClusterIndex];
+				const double Distance = ComputeTriangleToPlaneDistance(Triangles[TriangleIndex], Cluster.Normal, Cluster.Rho);
+				if (Distance < BestDistance)
+				{
+					BestDistance = Distance;
+					BestClusterIndex = ClusterIndex;
+				}
+			}
+
+			if (Clusters.IsValidIndex(BestClusterIndex))
+			{
+				Clusters[BestClusterIndex].TriangleIndices.Add(TriangleIndex);
+			}
+		}
+	}
+
+	void FitKMeansClusters(const TArray<FSourceTriangle>& Triangles, TArray<FKMeansCluster>& Clusters)
+	{
+		for (FKMeansCluster& Cluster : Clusters)
+		{
+			FVector FittedNormal = Cluster.Normal;
+			double FittedRho = Cluster.Rho;
+			if (FitBestPlaneToTriangles(Triangles, Cluster.TriangleIndices, FittedNormal, FittedRho))
+			{
+				Cluster.Normal = FittedNormal;
+				Cluster.Rho = FittedRho;
+			}
+		}
+	}
+
+	double ComputeKMeansClusterDistance(const TArray<FSourceTriangle>& Triangles, const FKMeansCluster& Cluster)
+	{
+		double TotalDistance = 0.0;
+		for (const int32 TriangleIndex : Cluster.TriangleIndices)
+		{
+			if (Triangles.IsValidIndex(TriangleIndex))
+			{
+				TotalDistance += ComputeTriangleToPlaneDistance(Triangles[TriangleIndex], Cluster.Normal, Cluster.Rho);
+			}
+		}
+		return TotalDistance;
+	}
+
+	double ComputeKMeansClusterCentroidDistance(const TArray<FSourceTriangle>& Triangles, const FKMeansCluster& Cluster)
+	{
+		double TotalDistance = 0.0;
+		const FVector SafeNormal = Cluster.Normal.GetSafeNormal();
+		for (const int32 TriangleIndex : Cluster.TriangleIndices)
+		{
+			if (Triangles.IsValidIndex(TriangleIndex))
+			{
+				TotalDistance += FMath::Abs(FVector::DotProduct(SafeNormal, ComputeTriangleCentroid(Triangles[TriangleIndex])) - Cluster.Rho);
+			}
+		}
+		return TotalDistance;
+	}
+
+	void ComputeKMeansClusterCentroidDistances(const TArray<FSourceTriangle>& Triangles, const TArray<FKMeansCluster>& Clusters, TArray<double>& OutDistances)
+	{
+		OutDistances.Reset(Clusters.Num());
+		for (const FKMeansCluster& Cluster : Clusters)
+		{
+			OutDistances.Add(ComputeKMeansClusterCentroidDistance(Triangles, Cluster));
+		}
+	}
+
+	FVector ComputeClusterCoverageCentroid(const TArray<FSourceTriangle>& Triangles, const FKMeansCluster& Cluster)
+	{
+		if (Cluster.TriangleIndices.IsEmpty())
+		{
+			return Cluster.Normal.GetSafeNormal() * Cluster.Rho;
+		}
+
+		const FVector SafeNormal = Cluster.Normal.GetSafeNormal();
+		FVector ProjectedVertexCentroid = FVector::ZeroVector;
+		int32 ProjectedVertexCount = 0;
+		for (const int32 TriangleIndex : Cluster.TriangleIndices)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+
+			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+			for (const FVector& Vertex : Triangle.Vertices)
+			{
+				ProjectedVertexCentroid += ProjectPointToPlane(Vertex, SafeNormal, Cluster.Rho);
+				++ProjectedVertexCount;
+			}
+		}
+
+		if (ProjectedVertexCount <= 0)
+		{
+			return FVector::ZeroVector;
+		}
+
+		ProjectedVertexCentroid /= static_cast<double>(ProjectedVertexCount);
+
+		FVector BestTriangleCentroid = ProjectedVertexCentroid;
+		double BestDistanceSquared = TNumericLimits<double>::Max();
+		for (const int32 TriangleIndex : Cluster.TriangleIndices)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+
+			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+			const FVector ProjectedTriangleCentroid =
+				(ProjectPointToPlane(Triangle.Vertices[0], SafeNormal, Cluster.Rho)
+					+ ProjectPointToPlane(Triangle.Vertices[1], SafeNormal, Cluster.Rho)
+					+ ProjectPointToPlane(Triangle.Vertices[2], SafeNormal, Cluster.Rho)) / 3.0;
+			const double DistanceSquared = FVector::DistSquared(ProjectedTriangleCentroid, ProjectedVertexCentroid);
+			if (DistanceSquared < BestDistanceSquared)
+			{
+				BestDistanceSquared = DistanceSquared;
+				BestTriangleCentroid = ComputeTriangleCentroid(Triangle);
+			}
+		}
+
+		return BestTriangleCentroid;
+	}
+
+	double ComputeTriangleToCoverageCentroidDistance(const FSourceTriangle& Triangle, const FVector& Centroid)
+	{
+		return FVector::Distance(Triangle.Vertices[0], Centroid)
+			+ FVector::Distance(Triangle.Vertices[1], Centroid)
+			+ FVector::Distance(Triangle.Vertices[2], Centroid);
+	}
+
+	void ComputeCoverageCentroids(const TArray<FSourceTriangle>& Triangles, const TArray<FKMeansCluster>& Clusters, TArray<FVector>& OutCentroids)
+	{
+		OutCentroids.Reset(Clusters.Num());
+		for (const FKMeansCluster& Cluster : Clusters)
+		{
+			OutCentroids.Add(ComputeClusterCoverageCentroid(Triangles, Cluster));
+		}
+	}
+
+	void AssignTrianglesToCoverageCentroids(const TArray<FSourceTriangle>& Triangles, const TArray<FVector>& Centroids, TArray<FKMeansCluster>& Clusters)
+	{
+		for (FKMeansCluster& Cluster : Clusters)
+		{
+			Cluster.TriangleIndices.Reset();
+		}
+
+		for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
+		{
+			int32 BestClusterIndex = INDEX_NONE;
+			double BestDistance = TNumericLimits<double>::Max();
+			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			{
+				if (!Centroids.IsValidIndex(ClusterIndex))
+				{
+					continue;
+				}
+
+				const double Distance = ComputeTriangleToCoverageCentroidDistance(Triangles[TriangleIndex], Centroids[ClusterIndex]);
+				if (Distance < BestDistance)
+				{
+					BestDistance = Distance;
+					BestClusterIndex = ClusterIndex;
+				}
+			}
+
+			if (Clusters.IsValidIndex(BestClusterIndex))
+			{
+				Clusters[BestClusterIndex].TriangleIndices.Add(TriangleIndex);
+			}
+		}
+	}
+
+	void ApplyKMeansCoverageCentroidRelaxation(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings&, TArray<FKMeansCluster>& Clusters)
+	{
+		if (Clusters.Num() <= 1)
+		{
+			return;
+		}
+
+		TArray<FVector> Centroids;
+		ComputeCoverageCentroids(Triangles, Clusters, Centroids);
+		AssignTrianglesToCoverageCentroids(Triangles, Centroids, Clusters);
+	}
+
+	double ComputeClusterCoverageRadius(const TArray<FSourceTriangle>& Triangles, const FKMeansCluster& Cluster, const FVector& Centroid)
+	{
+		double Radius = 0.0;
+		for (const int32 TriangleIndex : Cluster.TriangleIndices)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+
+			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+			for (const FVector& Vertex : Triangle.Vertices)
+			{
+				Radius = FMath::Max(Radius, FVector::Distance(Vertex, Centroid));
+			}
+		}
+		return Radius;
+	}
+
+	double ComputeClusterRadiusVariance(const TArray<FSourceTriangle>& Triangles, const TArray<FKMeansCluster>& Clusters, TArray<FVector>* OutCentroids = nullptr, TArray<double>* OutRadii = nullptr)
+	{
+		TArray<FVector> Centroids;
+		ComputeCoverageCentroids(Triangles, Clusters, Centroids);
+
+		TArray<double> Radii;
+		Radii.Reset(Clusters.Num());
+		double MeanRadius = 0.0;
+		int32 ValidClusterCount = 0;
+		for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+		{
+			const double Radius = Clusters[ClusterIndex].TriangleIndices.IsEmpty()
+				? 0.0
+				: ComputeClusterCoverageRadius(Triangles, Clusters[ClusterIndex], Centroids[ClusterIndex]);
+			Radii.Add(Radius);
+			if (!Clusters[ClusterIndex].TriangleIndices.IsEmpty())
+			{
+				MeanRadius += Radius;
+				++ValidClusterCount;
+			}
+		}
+
+		if (ValidClusterCount <= 0)
+		{
+			if (OutCentroids)
+			{
+				*OutCentroids = MoveTemp(Centroids);
+			}
+			if (OutRadii)
+			{
+				*OutRadii = MoveTemp(Radii);
+			}
+			return 0.0;
+		}
+
+		MeanRadius /= static_cast<double>(ValidClusterCount);
+		double Variance = 0.0;
+		for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+		{
+			if (Clusters[ClusterIndex].TriangleIndices.IsEmpty())
+			{
+				continue;
+			}
+
+			const double Delta = Radii[ClusterIndex] - MeanRadius;
+			Variance += Delta * Delta;
+		}
+		Variance /= static_cast<double>(ValidClusterCount);
+
+		if (OutCentroids)
+		{
+			*OutCentroids = MoveTemp(Centroids);
+		}
+		if (OutRadii)
+		{
+			*OutRadii = MoveTemp(Radii);
+		}
+		return Variance;
+	}
+
+	void RedistributeTrianglesToNearestClusters(const TArray<FSourceTriangle>& Triangles, const TArray<int32>& TriangleIndices, TArray<FKMeansCluster>& Clusters)
+	{
+		for (const int32 TriangleIndex : TriangleIndices)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex) || Clusters.IsEmpty())
+			{
+				continue;
+			}
+
+			int32 BestClusterIndex = INDEX_NONE;
+			double BestDistance = TNumericLimits<double>::Max();
+			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			{
+				const FKMeansCluster& Cluster = Clusters[ClusterIndex];
+				const double Distance = ComputeTriangleToPlaneDistance(Triangles[TriangleIndex], Cluster.Normal, Cluster.Rho);
+				if (Distance < BestDistance)
+				{
+					BestDistance = Distance;
+					BestClusterIndex = ClusterIndex;
+				}
+			}
+
+			if (Clusters.IsValidIndex(BestClusterIndex))
+			{
+				Clusters[BestClusterIndex].TriangleIndices.Add(TriangleIndex);
+			}
+		}
+	}
+
+	bool MakeClusterPlaneFromTriangle(const FSourceTriangle& Triangle, FKMeansCluster& OutCluster)
+	{
+		FVector TriangleNormal = Triangle.Normal.GetSafeNormal();
+		if (TriangleNormal.IsNearlyZero())
+		{
+			TriangleNormal = FVector::CrossProduct(Triangle.Vertices[1] - Triangle.Vertices[0], Triangle.Vertices[2] - Triangle.Vertices[0]).GetSafeNormal();
+		}
+		if (TriangleNormal.IsNearlyZero())
+		{
+			return false;
+		}
+
+		OutCluster.Normal = TriangleNormal;
+		OutCluster.Rho = FVector::DotProduct(TriangleNormal, ComputeTriangleCentroid(Triangle));
+		OutCluster.TriangleIndices.Reset();
+		return true;
+	}
+
+	void ApplyKMeansMinimumCoverageClusterReplacement(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings, TArray<FKMeansCluster>& Clusters)
+	{
+		if (Clusters.Num() <= 2)
+		{
+			return;
+		}
+
+		TArray<double> PreviousRadii;
+		PreviousRadii.Init(TNumericLimits<double>::Max(), Clusters.Num());
+		bool bFirstLoop = true;
+		const int32 MaxIterations = FMath::Clamp(Settings.KMeansMaxIterations, 1, 512);
+
+		for (int32 Iteration = 0; Iteration < MaxIterations; ++Iteration)
+		{
+			int32 SmallestClusterIndex = INDEX_NONE;
+			int32 SmallestTriangleCount = TNumericLimits<int32>::Max();
+			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			{
+				if (Clusters[ClusterIndex].TriangleIndices.Num() < SmallestTriangleCount)
+				{
+					SmallestTriangleCount = Clusters[ClusterIndex].TriangleIndices.Num();
+					SmallestClusterIndex = ClusterIndex;
+				}
+			}
+
+			if (!Clusters.IsValidIndex(SmallestClusterIndex))
+			{
+				break;
+			}
+
+			const TArray<int32> RedistributeTriangleIndices = Clusters[SmallestClusterIndex].TriangleIndices;
+			Clusters.RemoveAt(SmallestClusterIndex, 1, EAllowShrinking::No);
+			RedistributeTrianglesToNearestClusters(Triangles, RedistributeTriangleIndices, Clusters);
+			FitKMeansClusters(Triangles, Clusters);
+
+			int32 LargestClusterIndex = INDEX_NONE;
+			int32 LargestTriangleCount = -1;
+			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			{
+				if (Clusters[ClusterIndex].TriangleIndices.Num() > LargestTriangleCount)
+				{
+					LargestTriangleCount = Clusters[ClusterIndex].TriangleIndices.Num();
+					LargestClusterIndex = ClusterIndex;
+				}
+			}
+
+			if (!Clusters.IsValidIndex(LargestClusterIndex) || Clusters[LargestClusterIndex].TriangleIndices.IsEmpty())
+			{
+				break;
+			}
+
+			int32 FarthestTriangleArrayIndex = INDEX_NONE;
+			double FarthestDistance = -TNumericLimits<double>::Max();
+			const FVector LargestCentroid = ComputeClusterCoverageCentroid(Triangles, Clusters[LargestClusterIndex]);
+			for (int32 TriangleArrayIndex = 0; TriangleArrayIndex < Clusters[LargestClusterIndex].TriangleIndices.Num(); ++TriangleArrayIndex)
+			{
+				const int32 TriangleIndex = Clusters[LargestClusterIndex].TriangleIndices[TriangleArrayIndex];
+				if (!Triangles.IsValidIndex(TriangleIndex))
+				{
+					continue;
+				}
+
+				const double Distance = FVector::Distance(ComputeTriangleCentroid(Triangles[TriangleIndex]), LargestCentroid);
+				if (Distance > FarthestDistance)
+				{
+					FarthestDistance = Distance;
+					FarthestTriangleArrayIndex = TriangleArrayIndex;
+				}
+			}
+
+			if (!Clusters[LargestClusterIndex].TriangleIndices.IsValidIndex(FarthestTriangleArrayIndex))
+			{
+				break;
+			}
+
+			const int32 SeedTriangleIndex = Clusters[LargestClusterIndex].TriangleIndices[FarthestTriangleArrayIndex];
+			FKMeansCluster NewCluster;
+			if (!Triangles.IsValidIndex(SeedTriangleIndex) || !MakeClusterPlaneFromTriangle(Triangles[SeedTriangleIndex], NewCluster))
+			{
+				break;
+			}
+
+			NewCluster.TriangleIndices.Add(SeedTriangleIndex);
+			Clusters[LargestClusterIndex].TriangleIndices.RemoveAt(FarthestTriangleArrayIndex, 1, EAllowShrinking::No);
+			Clusters.Add(NewCluster);
+			FitKMeansClusters(Triangles, Clusters);
+
+			TArray<double> CurrentRadii;
+			ComputeClusterRadiusVariance(Triangles, Clusters, nullptr, &CurrentRadii);
+
+			bool bStop = true;
+			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			{
+				if (!PreviousRadii.IsValidIndex(ClusterIndex))
+				{
+					PreviousRadii.Add(TNumericLimits<double>::Max());
+				}
+				if (CurrentRadii.IsValidIndex(ClusterIndex) && CurrentRadii[ClusterIndex] > PreviousRadii[ClusterIndex])
+				{
+					bStop = false;
+				}
+				if (CurrentRadii.IsValidIndex(ClusterIndex))
+				{
+					PreviousRadii[ClusterIndex] = CurrentRadii[ClusterIndex];
+				}
+			}
+
+			if (bFirstLoop)
+			{
+				bStop = false;
+				bFirstLoop = false;
+			}
+
+			if (bStop)
+			{
+				break;
+			}
+		}
+	}
+
+	void InitializeKMeansClustersFromPaper(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings, TArray<FKMeansCluster>& Clusters)
+	{
+		InitializeKMeansClusters(Triangles, Settings, Clusters);
+		AssignTrianglesToKMeansClusters(Triangles, Clusters);
+		FitKMeansClusters(Triangles, Clusters);
+		ApplyKMeansCoverageCentroidRelaxation(Triangles, Settings, Clusters);
+		ApplyKMeansMinimumCoverageClusterReplacement(Triangles, Settings, Clusters);
+	}
+
+	FPlaneCoverResult BuildKMeansPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings)
+	{
+		const double TotalStartSeconds = FPlatformTime::Seconds();
+		FPlaneCoverResult Result;
+		Result.SourceTriangleCount = Triangles.Num();
+		for (const FSourceTriangle& Triangle : Triangles)
+		{
+			Result.SourceArea += Triangle.Area;
+		}
+
+		if (Triangles.IsEmpty())
+		{
+			Result.TotalSeconds = FPlatformTime::Seconds() - TotalStartSeconds;
+			return Result;
+		}
+
+		const double InitializationStartSeconds = FPlatformTime::Seconds();
+		TArray<FKMeansCluster> Clusters;
+		InitializeKMeansClustersFromPaper(Triangles, Settings, Clusters);
+		Result.DensityBuildSeconds = FPlatformTime::Seconds() - InitializationStartSeconds;
+
+		TArray<double> PreviousClusterDistances;
+		PreviousClusterDistances.Init(TNumericLimits<double>::Max(), Clusters.Num());
+		bool bFirstLoop = true;
+		int32 IterationCount = 0;
+		const int32 MaxIterations = FMath::Clamp(Settings.KMeansMaxIterations, 1, 512);
+
+		for (int32 Iteration = 0; Iteration < MaxIterations; ++Iteration)
+		{
+			const double AssignmentStartSeconds = FPlatformTime::Seconds();
+			AssignTrianglesToKMeansClusters(Triangles, Clusters);
+			Result.CandidateSearchSeconds += FPlatformTime::Seconds() - AssignmentStartSeconds;
+
+			const double FitStartSeconds = FPlatformTime::Seconds();
+			FitKMeansClusters(Triangles, Clusters);
+			Result.CandidatePlaneBuildSeconds += FPlatformTime::Seconds() - FitStartSeconds;
+
+			TArray<double> CurrentClusterDistances;
+			ComputeKMeansClusterCentroidDistances(Triangles, Clusters, CurrentClusterDistances);
+			++IterationCount;
+
+			bool bStop = true;
+			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			{
+				if (!PreviousClusterDistances.IsValidIndex(ClusterIndex))
+				{
+					PreviousClusterDistances.Add(TNumericLimits<double>::Max());
+				}
+				if (CurrentClusterDistances.IsValidIndex(ClusterIndex) && CurrentClusterDistances[ClusterIndex] > PreviousClusterDistances[ClusterIndex])
+				{
+					bStop = false;
+				}
+				if (CurrentClusterDistances.IsValidIndex(ClusterIndex))
+				{
+					PreviousClusterDistances[ClusterIndex] = CurrentClusterDistances[ClusterIndex];
+				}
+			}
+
+			if (bFirstLoop)
+			{
+				bStop = false;
+				bFirstLoop = false;
+			}
+
+			if (bStop)
+			{
+				break;
+			}
+		}
+
+		Result.GreedyIterationCount = IterationCount;
+		Result.MaxIterationCandidatePlaneCount = Clusters.Num();
+		Result.TotalCandidatePlaneCount = Clusters.Num() * IterationCount;
+		Result.CandidatePlaneCount = Clusters.Num();
+		Result.CoveredTriangleCount = 0;
+		Result.CoveredArea = 0.0;
+
+		for (const FKMeansCluster& Cluster : Clusters)
+		{
+			if (Cluster.TriangleIndices.IsEmpty())
+			{
+				continue;
+			}
+
+			FPlaneCoverPlane& Plane = Result.Planes.AddDefaulted_GetRef();
+			Plane.Normal = Cluster.Normal.GetSafeNormal();
+			Plane.Rho = Cluster.Rho;
+			Plane.Score = -ComputeKMeansClusterDistance(Triangles, Cluster);
+			Plane.TriangleIndices = Cluster.TriangleIndices;
+
+			for (const int32 TriangleIndex : Plane.TriangleIndices)
+			{
+				if (Triangles.IsValidIndex(TriangleIndex))
+				{
+					Plane.CoveredArea += Triangles[TriangleIndex].Area;
+				}
+			}
+
+			Result.CoveredTriangleCount += Plane.TriangleIndices.Num();
+			Result.CoveredArea += Plane.CoveredArea;
+		}
+
+		Result.TotalSeconds = FPlatformTime::Seconds() - TotalStartSeconds;
+		return Result;
+	}
+
+	FBox ComputeSourceBounds(const TArray<FSourceTriangle>& Triangles)
+	{
+		FBox Bounds(ForceInit);
+		for (const FSourceTriangle& Triangle : Triangles)
+		{
+			for (const FVector& Vertex : Triangle.Vertices)
+			{
+				Bounds += Vertex;
+			}
+		}
+		return Bounds;
+	}
+
+	int32 AddGeodesicVertex(TArray<FVector>& Vertices, const FVector& Vertex)
+	{
+		Vertices.Add(Vertex.GetSafeNormal());
+		return Vertices.Num() - 1;
+	}
+
+	uint64 MakeGeodesicEdgeKey(const int32 A, const int32 B)
+	{
+		const uint32 MinIndex = static_cast<uint32>(FMath::Min(A, B));
+		const uint32 MaxIndex = static_cast<uint32>(FMath::Max(A, B));
+		return (static_cast<uint64>(MinIndex) << 32) | static_cast<uint64>(MaxIndex);
+	}
+
+	int32 GetOrAddGeodesicMidpoint(TArray<FVector>& Vertices, TMap<uint64, int32>& MidpointCache, const int32 A, const int32 B)
+	{
+		const uint64 EdgeKey = MakeGeodesicEdgeKey(A, B);
+		if (const int32* ExistingIndex = MidpointCache.Find(EdgeKey))
+		{
+			return *ExistingIndex;
+		}
+
+		const int32 MidpointIndex = AddGeodesicVertex(Vertices, (Vertices[A] + Vertices[B]) * 0.5);
+		MidpointCache.Add(EdgeKey, MidpointIndex);
+		return MidpointIndex;
+	}
+
+	FVector CanonicalizeHemisphereDirection(FVector Direction)
+	{
+		Direction = Direction.GetSafeNormal();
+		constexpr double Epsilon = 1.0e-8;
+		if (Direction.Z < -Epsilon
+			|| (FMath::Abs(Direction.Z) <= Epsilon
+				&& (Direction.Y < -Epsilon
+					|| (FMath::Abs(Direction.Y) <= Epsilon && Direction.X < -Epsilon))))
+		{
+			Direction *= -1.0;
+		}
+		return Direction;
+	}
+
+	FIntVector MakeDirectionKey(const FVector& Direction)
+	{
+		constexpr double QuantizeScale = 1000000.0;
+		return FIntVector(
+			FMath::RoundToInt(Direction.X * QuantizeScale),
+			FMath::RoundToInt(Direction.Y * QuantizeScale),
+			FMath::RoundToInt(Direction.Z * QuantizeScale));
+	}
+
+	void GenerateGeodesicHemisphereDirections(const int32 Subdivisions, TArray<FVector>& OutDirections)
+	{
+		TArray<FVector> Vertices;
+		TArray<FIntVector> Faces;
+		Vertices.Reserve(12);
+		Faces.Reserve(20);
+
+		const double T = (1.0 + FMath::Sqrt(5.0)) * 0.5;
+		AddGeodesicVertex(Vertices, FVector(-1.0, T, 0.0));
+		AddGeodesicVertex(Vertices, FVector(1.0, T, 0.0));
+		AddGeodesicVertex(Vertices, FVector(-1.0, -T, 0.0));
+		AddGeodesicVertex(Vertices, FVector(1.0, -T, 0.0));
+		AddGeodesicVertex(Vertices, FVector(0.0, -1.0, T));
+		AddGeodesicVertex(Vertices, FVector(0.0, 1.0, T));
+		AddGeodesicVertex(Vertices, FVector(0.0, -1.0, -T));
+		AddGeodesicVertex(Vertices, FVector(0.0, 1.0, -T));
+		AddGeodesicVertex(Vertices, FVector(T, 0.0, -1.0));
+		AddGeodesicVertex(Vertices, FVector(T, 0.0, 1.0));
+		AddGeodesicVertex(Vertices, FVector(-T, 0.0, -1.0));
+		AddGeodesicVertex(Vertices, FVector(-T, 0.0, 1.0));
+
+		Faces.Add(FIntVector(0, 11, 5));
+		Faces.Add(FIntVector(0, 5, 1));
+		Faces.Add(FIntVector(0, 1, 7));
+		Faces.Add(FIntVector(0, 7, 10));
+		Faces.Add(FIntVector(0, 10, 11));
+		Faces.Add(FIntVector(1, 5, 9));
+		Faces.Add(FIntVector(5, 11, 4));
+		Faces.Add(FIntVector(11, 10, 2));
+		Faces.Add(FIntVector(10, 7, 6));
+		Faces.Add(FIntVector(7, 1, 8));
+		Faces.Add(FIntVector(3, 9, 4));
+		Faces.Add(FIntVector(3, 4, 2));
+		Faces.Add(FIntVector(3, 2, 6));
+		Faces.Add(FIntVector(3, 6, 8));
+		Faces.Add(FIntVector(3, 8, 9));
+		Faces.Add(FIntVector(4, 9, 5));
+		Faces.Add(FIntVector(2, 4, 11));
+		Faces.Add(FIntVector(6, 2, 10));
+		Faces.Add(FIntVector(8, 6, 7));
+		Faces.Add(FIntVector(9, 8, 1));
+
+		const int32 SafeSubdivisions = FMath::Clamp(Subdivisions, 0, 5);
+		for (int32 SubdivisionIndex = 0; SubdivisionIndex < SafeSubdivisions; ++SubdivisionIndex)
+		{
+			TMap<uint64, int32> MidpointCache;
+			TArray<FIntVector> RefinedFaces;
+			RefinedFaces.Reserve(Faces.Num() * 4);
+			for (const FIntVector& Face : Faces)
+			{
+				const int32 A = Face.X;
+				const int32 B = Face.Y;
+				const int32 C = Face.Z;
+				const int32 AB = GetOrAddGeodesicMidpoint(Vertices, MidpointCache, A, B);
+				const int32 BC = GetOrAddGeodesicMidpoint(Vertices, MidpointCache, B, C);
+				const int32 CA = GetOrAddGeodesicMidpoint(Vertices, MidpointCache, C, A);
+				RefinedFaces.Add(FIntVector(A, AB, CA));
+				RefinedFaces.Add(FIntVector(B, BC, AB));
+				RefinedFaces.Add(FIntVector(C, CA, BC));
+				RefinedFaces.Add(FIntVector(AB, BC, CA));
+			}
+			Faces = MoveTemp(RefinedFaces);
+		}
+
+		TSet<FIntVector> DirectionKeys;
+		OutDirections.Reset();
+		OutDirections.Reserve(Vertices.Num() / 2 + 1);
+		for (const FVector& Vertex : Vertices)
+		{
+			const FVector Direction = CanonicalizeHemisphereDirection(Vertex);
+			if (Direction.IsNearlyZero())
+			{
+				continue;
+			}
+
+			const FIntVector DirectionKey = MakeDirectionKey(Direction);
+			if (DirectionKeys.Contains(DirectionKey))
+			{
+				continue;
+			}
+
+			DirectionKeys.Add(DirectionKey);
+			OutDirections.Add(Direction);
+		}
+
+		OutDirections.Sort([](const FVector& A, const FVector& B)
+		{
+			if (!FMath::IsNearlyEqual(A.Z, B.Z, 1.0e-8))
+			{
+				return A.Z > B.Z;
+			}
+			if (!FMath::IsNearlyEqual(A.Y, B.Y, 1.0e-8))
+			{
+				return A.Y > B.Y;
+			}
+			return A.X > B.X;
+		});
+	}
+
+	void ComputeBoundsProjectionRange(const FBox& Bounds, const FVector& Normal, double& OutMinRho, double& OutMaxRho)
+	{
+		const FVector Center = Bounds.GetCenter();
+		const FVector Extent = Bounds.GetExtent();
+		OutMinRho = TNumericLimits<double>::Max();
+		OutMaxRho = -TNumericLimits<double>::Max();
+
+		for (int32 ZSign = -1; ZSign <= 1; ZSign += 2)
+		{
+			for (int32 YSign = -1; YSign <= 1; YSign += 2)
+			{
+				for (int32 XSign = -1; XSign <= 1; XSign += 2)
+				{
+					const FVector Corner = Center + FVector(
+						static_cast<double>(XSign) * Extent.X,
+						static_cast<double>(YSign) * Extent.Y,
+						static_cast<double>(ZSign) * Extent.Z);
+					const double Rho = FVector::DotProduct(Normal, Corner);
+					OutMinRho = FMath::Min(OutMinRho, Rho);
+					OutMaxRho = FMath::Max(OutMaxRho, Rho);
+				}
+			}
+		}
+	}
+
+	double ComputeGodOfWarCandidateSpacing(const FPlaneCoverSettings& Settings)
+	{
+		return FMath::Max(Settings.ErrorTolerance * FMath::Max(0.1, Settings.GodOfWarCandidateSpacingMultiplier), 0.1);
+	}
+
+	void BuildGodOfWarCandidateRhos(
+		const TArray<FVector>& Directions,
+		const FBox& Bounds,
+		const double CandidateSpacing,
+		TArray<TArray<double>>& OutRhosByDirection)
+	{
+		OutRhosByDirection.Reset(Directions.Num());
+		if (!Bounds.IsValid || CandidateSpacing <= 0.0)
+		{
+			return;
+		}
+
+		const FVector BoundsCenter = Bounds.GetCenter();
+		for (const FVector& Direction : Directions)
+		{
+			TArray<double>& Rhos = OutRhosByDirection.AddDefaulted_GetRef();
+			double MinRho = 0.0;
+			double MaxRho = 0.0;
+			ComputeBoundsProjectionRange(Bounds, Direction, MinRho, MaxRho);
+			const double CenterRho = FVector::DotProduct(Direction, BoundsCenter);
+			const int32 StartStep = FMath::CeilToInt((MinRho - CenterRho) / CandidateSpacing);
+			const int32 EndStep = FMath::FloorToInt((MaxRho - CenterRho) / CandidateSpacing);
+
+			for (int32 Step = StartStep; Step <= EndStep; ++Step)
+			{
+				Rhos.Add(CenterRho + static_cast<double>(Step) * CandidateSpacing);
+			}
+
+			if (Rhos.IsEmpty())
+			{
+				Rhos.Add(FMath::Clamp(CenterRho, MinRho, MaxRho));
+			}
+		}
+	}
+
+	void PrecomputeGodOfWarProjectedAreas(
+		const TArray<FSourceTriangle>& Triangles,
+		const TArray<FVector>& Directions,
+		TArray<double>& OutProjectedAreas)
+	{
+		OutProjectedAreas.SetNumZeroed(Directions.Num() * Triangles.Num());
+		for (int32 DirectionIndex = 0; DirectionIndex < Directions.Num(); ++DirectionIndex)
+		{
+			const FVector& Direction = Directions[DirectionIndex];
+			const int32 DirectionOffset = DirectionIndex * Triangles.Num();
+			for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
+			{
+				OutProjectedAreas[DirectionOffset + TriangleIndex] = ComputeContribution(Triangles[TriangleIndex], Direction);
+			}
+		}
+	}
+
+	struct FGodOfWarBestCard
+	{
+		int32 DirectionIndex = INDEX_NONE;
+		double Rho = 0.0;
+		double Score = 0.0;
+		double CoveredArea = 0.0;
+		int32 TriangleCount = 0;
+	};
+
+	FGodOfWarBestCard FindBestGodOfWarCard(
+		const TArray<FSourceTriangle>& Triangles,
+		const TBitArray<>& CoveredTriangles,
+		const FPlaneCoverSettings& Settings,
+		const TArray<FVector>& Directions,
+		const TArray<TArray<double>>& RhosByDirection,
+		const TArray<double>& ProjectedAreas,
+		int32& OutCandidatesTested)
+	{
+		FGodOfWarBestCard BestCard;
+		OutCandidatesTested = 0;
+		const int32 TriangleCount = Triangles.Num();
+
+		for (int32 DirectionIndex = 0; DirectionIndex < Directions.Num(); ++DirectionIndex)
+		{
+			if (!RhosByDirection.IsValidIndex(DirectionIndex))
+			{
+				continue;
+			}
+
+			const FVector& Direction = Directions[DirectionIndex];
+			const int32 DirectionOffset = DirectionIndex * TriangleCount;
+			for (const double Rho : RhosByDirection[DirectionIndex])
+			{
+				++OutCandidatesTested;
+				double CandidateScore = 0.0;
+				double CandidateArea = 0.0;
+				int32 CandidateTriangleCount = 0;
+
+				for (int32 TriangleIndex = 0; TriangleIndex < TriangleCount; ++TriangleIndex)
+				{
+					if (CoveredTriangles[TriangleIndex])
+					{
+						continue;
+					}
+
+					if (!IsTriangleInsideGodOfWarThickSlice(Triangles[TriangleIndex], Direction, Rho, Settings))
+					{
+						continue;
+					}
+
+					CandidateScore += ProjectedAreas[DirectionOffset + TriangleIndex];
+					CandidateArea += Triangles[TriangleIndex].Area;
+					++CandidateTriangleCount;
+				}
+
+				if (CandidateTriangleCount > 0 && CandidateScore > BestCard.Score)
+				{
+					BestCard.DirectionIndex = DirectionIndex;
+					BestCard.Rho = Rho;
+					BestCard.Score = CandidateScore;
+					BestCard.CoveredArea = CandidateArea;
+					BestCard.TriangleCount = CandidateTriangleCount;
+				}
+			}
+		}
+
+		return BestCard;
+	}
+
+	void CollectGodOfWarCardTriangles(
+		const TArray<FSourceTriangle>& Triangles,
+		const TBitArray<>& CoveredTriangles,
+		const FPlaneCoverSettings& Settings,
+		const FVector& Direction,
+		const double Rho,
+		const TArray<double>& ProjectedAreas,
+		const int32 DirectionIndex,
+		TArray<int32>& OutTriangleIndices,
+		double& OutScore,
+		double& OutCoveredArea)
+	{
+		OutTriangleIndices.Reset();
+		OutScore = 0.0;
+		OutCoveredArea = 0.0;
+		const int32 DirectionOffset = DirectionIndex * Triangles.Num();
+		for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
+		{
+			if (CoveredTriangles[TriangleIndex])
+			{
+				continue;
+			}
+
+			if (!IsTriangleInsideGodOfWarThickSlice(Triangles[TriangleIndex], Direction, Rho, Settings))
+			{
+				continue;
+			}
+
+			OutTriangleIndices.Add(TriangleIndex);
+			OutScore += ProjectedAreas[DirectionOffset + TriangleIndex];
+			OutCoveredArea += Triangles[TriangleIndex].Area;
+		}
+	}
+
+	void ApplyGodOfWarFinalFaceReclaim(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings, FPlaneCoverResult& Result)
+	{
+		if (Settings.Technique != EPlaneCoverTechnique::GodOfWarCards || Result.Planes.Num() <= 1 || Triangles.IsEmpty())
+		{
+			return;
+		}
+
+		TArray<int32> OriginalPlaneByTriangle;
+		OriginalPlaneByTriangle.Init(INDEX_NONE, Triangles.Num());
+		for (int32 PlaneIndex = 0; PlaneIndex < Result.Planes.Num(); ++PlaneIndex)
+		{
+			for (const int32 TriangleIndex : Result.Planes[PlaneIndex].TriangleIndices)
+			{
+				if (OriginalPlaneByTriangle.IsValidIndex(TriangleIndex) && OriginalPlaneByTriangle[TriangleIndex] == INDEX_NONE)
+				{
+					OriginalPlaneByTriangle[TriangleIndex] = PlaneIndex;
+				}
+			}
+		}
+
+		TArray<TArray<int32>> ReclaimedTriangleIndices;
+		ReclaimedTriangleIndices.SetNum(Result.Planes.Num());
+		TArray<double> ReclaimedScores;
+		ReclaimedScores.Init(0.0, Result.Planes.Num());
+		TArray<double> ReclaimedAreas;
+		ReclaimedAreas.Init(0.0, Result.Planes.Num());
+
+		int32 CoveredTriangleCount = 0;
+		int32 ReassignedTriangleCount = 0;
+		double CoveredArea = 0.0;
+
+		for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
+		{
+			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
+			const int32 OriginalPlaneIndex = OriginalPlaneByTriangle[TriangleIndex];
+			if (!Result.Planes.IsValidIndex(OriginalPlaneIndex))
+			{
+				continue;
+			}
+
+			int32 BestPlaneIndex = INDEX_NONE;
+			double BestScore = -TNumericLimits<double>::Max();
+
+			for (int32 PlaneIndex = 0; PlaneIndex < Result.Planes.Num(); ++PlaneIndex)
+			{
+				const FPlaneCoverPlane& Plane = Result.Planes[PlaneIndex];
+				if (!IsTriangleInsideGodOfWarThickSlice(Triangle, Plane.Normal, Plane.Rho, Settings))
+				{
+					continue;
+				}
+
+				const double Score = ComputeContribution(Triangle, Plane.Normal);
+				if (Score > BestScore)
+				{
+					BestScore = Score;
+					BestPlaneIndex = PlaneIndex;
+				}
+			}
+
+			if (BestPlaneIndex == INDEX_NONE)
+			{
+				BestPlaneIndex = OriginalPlaneIndex;
+				BestScore = ComputeContribution(Triangle, Result.Planes[OriginalPlaneIndex].Normal);
+			}
+
+			if (!Result.Planes.IsValidIndex(BestPlaneIndex))
+			{
+				continue;
+			}
+
+			ReclaimedTriangleIndices[BestPlaneIndex].Add(TriangleIndex);
+			ReclaimedScores[BestPlaneIndex] += BestScore;
+			ReclaimedAreas[BestPlaneIndex] += Triangle.Area;
+			++CoveredTriangleCount;
+			CoveredArea += Triangle.Area;
+
+			if (OriginalPlaneIndex != BestPlaneIndex)
+			{
+				++ReassignedTriangleCount;
+			}
+		}
+
+		for (int32 PlaneIndex = 0; PlaneIndex < Result.Planes.Num(); ++PlaneIndex)
+		{
+			Result.Planes[PlaneIndex].TriangleIndices = MoveTemp(ReclaimedTriangleIndices[PlaneIndex]);
+			Result.Planes[PlaneIndex].Score = ReclaimedScores[PlaneIndex];
+			Result.Planes[PlaneIndex].CoveredArea = ReclaimedAreas[PlaneIndex];
+		}
+
+		for (int32 PlaneIndex = Result.Planes.Num() - 1; PlaneIndex >= 0; --PlaneIndex)
+		{
+			if (Result.Planes[PlaneIndex].TriangleIndices.IsEmpty())
+			{
+				Result.Planes.RemoveAt(PlaneIndex, 1, EAllowShrinking::No);
+			}
+		}
+
+		Result.CoveredTriangleCount = CoveredTriangleCount;
+		Result.CoveredArea = CoveredArea;
+		Result.FinalReassignedTriangleCount = ReassignedTriangleCount;
+	}
+
+	FPlaneCoverResult BuildGodOfWarPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings)
+	{
+		const double TotalStartSeconds = FPlatformTime::Seconds();
+		FPlaneCoverResult Result;
+		Result.SourceTriangleCount = Triangles.Num();
+		for (const FSourceTriangle& Triangle : Triangles)
+		{
+			Result.SourceArea += Triangle.Area;
+		}
+
+		if (Triangles.IsEmpty())
+		{
+			Result.TotalSeconds = FPlatformTime::Seconds() - TotalStartSeconds;
+			return Result;
+		}
+
+		const double CandidateBuildStartSeconds = FPlatformTime::Seconds();
+		const FBox Bounds = ComputeSourceBounds(Triangles);
+		const double CandidateSpacing = ComputeGodOfWarCandidateSpacing(Settings);
+		TArray<FVector> Directions;
+		GenerateGeodesicHemisphereDirections(Settings.GodOfWarGeodesicSubdivisions, Directions);
+
+		TArray<TArray<double>> RhosByDirection;
+		BuildGodOfWarCandidateRhos(Directions, Bounds, CandidateSpacing, RhosByDirection);
+
+		TArray<double> ProjectedAreas;
+		PrecomputeGodOfWarProjectedAreas(Triangles, Directions, ProjectedAreas);
+		Result.DensityBuildSeconds = FPlatformTime::Seconds() - CandidateBuildStartSeconds;
+		Result.CandidatePlaneCount = Directions.Num();
+
+		TBitArray<> CoveredTriangles;
+		CoveredTriangles.Init(false, Triangles.Num());
+		int32 RemainingTriangleCount = Triangles.Num();
+		while (RemainingTriangleCount > 0)
+		{
+			const double SearchStartSeconds = FPlatformTime::Seconds();
+			int32 CandidatesTested = 0;
+			const FGodOfWarBestCard BestCard = FindBestGodOfWarCard(
+				Triangles,
+				CoveredTriangles,
+				Settings,
+				Directions,
+				RhosByDirection,
+				ProjectedAreas,
+				CandidatesTested);
+			Result.CandidateSearchSeconds += FPlatformTime::Seconds() - SearchStartSeconds;
+			Result.TotalCandidatePlaneCount += CandidatesTested;
+			Result.MaxIterationCandidatePlaneCount = FMath::Max(Result.MaxIterationCandidatePlaneCount, CandidatesTested);
+			++Result.GreedyIterationCount;
+
+			FPlaneCoverPlane NewPlane;
+			if (Directions.IsValidIndex(BestCard.DirectionIndex))
+			{
+				double Score = 0.0;
+				double CoveredArea = 0.0;
+				TArray<int32> ClaimedTriangleIndices;
+				CollectGodOfWarCardTriangles(
+					Triangles,
+					CoveredTriangles,
+					Settings,
+					Directions[BestCard.DirectionIndex],
+					BestCard.Rho,
+					ProjectedAreas,
+					BestCard.DirectionIndex,
+					ClaimedTriangleIndices,
+					Score,
+					CoveredArea);
+
+				NewPlane.Normal = Directions[BestCard.DirectionIndex];
+				NewPlane.Rho = BestCard.Rho;
+				NewPlane.Score = Score;
+				NewPlane.CoveredArea = CoveredArea;
+				NewPlane.TriangleIndices = MoveTemp(ClaimedTriangleIndices);
+			}
+			else
+			{
+				break;
+			}
+
+			if (NewPlane.TriangleIndices.IsEmpty())
+			{
+				break;
+			}
+
+			FPlaneCoverPlane& ResultPlane = Result.Planes.AddDefaulted_GetRef();
+			ResultPlane = MoveTemp(NewPlane);
+			for (const int32 TriangleIndex : ResultPlane.TriangleIndices)
+			{
+				if (!CoveredTriangles[TriangleIndex])
+				{
+					CoveredTriangles[TriangleIndex] = true;
+					--RemainingTriangleCount;
+					++Result.CoveredTriangleCount;
+					Result.CoveredArea += Triangles[TriangleIndex].Area;
+				}
+			}
+		}
+
+		ApplyGodOfWarFinalFaceReclaim(Triangles, Settings, Result);
+		Result.CandidatePrepareSeconds = 0.0;
+		Result.CandidatePlaneBuildSeconds = Result.DensityBuildSeconds;
+		Result.TotalSeconds = FPlatformTime::Seconds() - TotalStartSeconds;
+		return Result;
 	}
 
 	FPlaneCoverResult BuildGreedyPlaneCoverSingle(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings)
@@ -1929,6 +3856,20 @@ namespace UE::BillboardClouds
 		return BuildGreedyPlaneCoverSingle(Triangles, Settings);
 	}
 
+	FPlaneCoverResult BuildPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings)
+	{
+		if (Settings.Technique == EPlaneCoverTechnique::KMeansClustering)
+		{
+			return BuildKMeansPlaneCover(Triangles, Settings);
+		}
+		if (Settings.Technique == EPlaneCoverTechnique::GodOfWarCards)
+		{
+			return BuildGodOfWarPlaneCover(Triangles, Settings);
+		}
+
+		return BuildGreedyPlaneCover(Triangles, Settings);
+	}
+
 	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverResult& Result, const FPlaneCoverSettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos)
 	{
 		OutMeshDescription.Empty();
@@ -1975,7 +3916,7 @@ namespace UE::BillboardClouds
 		TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
 		TPolygonGroupAttributesRef<FName> PolygonGroupImportedMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
 
-		VertexInstanceUVs.SetNumChannels(1);
+		VertexInstanceUVs.SetNumChannels(3);
 
 		OutMeshDescription.ReserveNewVertices(Result.Planes.Num() * 4);
 		OutMeshDescription.ReserveNewVertexInstances(Result.Planes.Num() * 4);
@@ -2016,7 +3957,12 @@ namespace UE::BillboardClouds
 			}
 
 			double PlaneToShadingNormalDot = FVector::DotProduct(PlaneShadingNormal, OrientedNormal);
-			if (FVector::DotProduct(PlaneShadingNormal, OrientedNormal) < 0.0)
+			if (Plane.bIsTrunkCard)
+			{
+				PlaneShadingNormal = OrientedNormal;
+				PlaneToShadingNormalDot = 1.0;
+			}
+			else if (FVector::DotProduct(PlaneShadingNormal, OrientedNormal) < 0.0)
 			{
 				OrientedNormal *= -1.0;
 				OrientedRho *= -1.0;
@@ -2025,17 +3971,42 @@ namespace UE::BillboardClouds
 
 			FVector AxisU = FVector::RightVector;
 			FVector AxisV = FVector::UpVector;
-			BuildPlaneFrame(OrientedNormal, AxisU, AxisV);
+			if (Plane.bUseFixedPlaneFrame)
+			{
+				AxisU = (Plane.FixedAxisU - OrientedNormal * FVector::DotProduct(Plane.FixedAxisU, OrientedNormal)).GetSafeNormal();
+				AxisV = (Plane.FixedAxisV - OrientedNormal * FVector::DotProduct(Plane.FixedAxisV, OrientedNormal) - AxisU * FVector::DotProduct(Plane.FixedAxisV, AxisU)).GetSafeNormal();
+				if (AxisU.IsNearlyZero() || AxisV.IsNearlyZero())
+				{
+					BuildPlaneFrame(OrientedNormal, AxisU, AxisV);
+				}
+			}
+			else
+			{
+				BuildPlaneFrame(OrientedNormal, AxisU, AxisV);
+			}
 
 			double MinU = TNumericLimits<double>::Max();
 			double MaxU = -TNumericLimits<double>::Max();
 			double MinV = TNumericLimits<double>::Max();
 			double MaxV = -TNumericLimits<double>::Max();
 
-			if (!ComputeMinimumAreaPlaneRectangle(Triangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, AxisU, AxisV, MinU, MaxU, MinV, MaxV))
+			const bool bComputedRectangle = Plane.bUseFixedPlaneFrame
+				? ComputeFixedFramePlaneRectangle(Triangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, AxisU, AxisV, MinU, MaxU, MinV, MaxV)
+				: ComputeMinimumAreaPlaneRectangle(Triangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, AxisU, AxisV, MinU, MaxU, MinV, MaxV);
+			if (!bComputedRectangle)
 			{
 				continue;
 			}
+
+			double MinSignedDistance = 0.0;
+			double MaxSignedDistance = 0.0;
+			ComputeSignedDistanceRangeForTriangles(Triangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, MinSignedDistance, MaxSignedDistance);
+			const double EnvelopeMinU = MinU;
+			const double EnvelopeMaxU = MaxU;
+			const double EnvelopeMinV = MinV;
+			const double EnvelopeMaxV = MaxV;
+			const double EnvelopeMinSignedDistance = MinSignedDistance;
+			const double EnvelopeMaxSignedDistance = MaxSignedDistance;
 
 			if (MaxU - MinU < MinHalfExtent * 2.0)
 			{
@@ -2054,6 +4025,8 @@ namespace UE::BillboardClouds
 			MaxU += Padding;
 			MinV -= Padding;
 			MaxV += Padding;
+			MinSignedDistance -= Padding;
+			MaxSignedDistance += Padding;
 
 			const FVector PlaneOrigin = OrientedNormal * OrientedRho;
 			FVector FrontCorners[4];
@@ -2064,6 +4037,7 @@ namespace UE::BillboardClouds
 
 			FPreparedProxyPlane& PreparedPlane = PreparedPlanes.AddDefaulted_GetRef();
 			PreparedPlane.SourcePlaneIndex = SourcePlaneIndex;
+			PreparedPlane.bIsTrunkCard = Plane.bIsTrunkCard;
 			PreparedPlane.OrientedNormal = OrientedNormal;
 			PreparedPlane.OrientedRho = OrientedRho;
 			PreparedPlane.AxisU = AxisU;
@@ -2073,6 +4047,14 @@ namespace UE::BillboardClouds
 			PreparedPlane.MaxU = MaxU;
 			PreparedPlane.MinV = MinV;
 			PreparedPlane.MaxV = MaxV;
+			PreparedPlane.MinSignedDistance = MinSignedDistance;
+			PreparedPlane.MaxSignedDistance = MaxSignedDistance;
+			PreparedPlane.EnvelopeMinU = EnvelopeMinU;
+			PreparedPlane.EnvelopeMaxU = EnvelopeMaxU;
+			PreparedPlane.EnvelopeMinV = EnvelopeMinV;
+			PreparedPlane.EnvelopeMaxV = EnvelopeMaxV;
+			PreparedPlane.EnvelopeMinSignedDistance = EnvelopeMinSignedDistance;
+			PreparedPlane.EnvelopeMaxSignedDistance = EnvelopeMaxSignedDistance;
 			PreparedPlane.PlaneToShadingNormalDot = FMath::Clamp(PlaneToShadingNormalDot, -1.0, 1.0);
 			PreparedPlane.TriangleIndices = Plane.TriangleIndices;
 			for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
@@ -2087,6 +4069,8 @@ namespace UE::BillboardClouds
 			return false;
 		}
 
+		ApplyKMeansEnvelopeCrackReduction(Triangles, Settings, PreparedPlanes);
+
 		const double SourceMaxDimension = ComputeSourceBoundsMaxDimension(Triangles);
 		if (!PackPreparedProxyPlanesIntoAtlas(
 			PreparedPlanes,
@@ -2097,14 +4081,17 @@ namespace UE::BillboardClouds
 			OutStats.AtlasTileResolution,
 			OutStats.AtlasTilePaddingPixels))
 		{
-			OutError = TEXT("Could not pack billboard textures into the configured maximum atlas resolution.");
+			OutError = TEXT("Could not pack billboard textures into the configured atlas resolution.");
 			return false;
 		}
 
 		double PlaneToShadingNormalDotSum = 0.0;
 		for (const FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
 		{
-			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PreparedPlane.Corners, PreparedPlane.AtlasUVs, PreparedPlane.ShadingNormal))
+			const FVector2f MaskUV = PreparedPlane.bIsTrunkCard
+				? FVector2f(0.0f, 0.0f)
+				: FVector2f(1.0f, 0.0f);
+			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PreparedPlane.Corners, PreparedPlane.AtlasUVs, PreparedPlane.BackAtlasUVs, MaskUV, PreparedPlane.ShadingNormal))
 			{
 				continue;
 			}
@@ -2113,6 +4100,7 @@ namespace UE::BillboardClouds
 			{
 				FPlaneProxyPlaneInfo& PlaneInfo = OutPlaneInfos->AddDefaulted_GetRef();
 				PlaneInfo.SourcePlaneIndex = PreparedPlane.SourcePlaneIndex;
+				PlaneInfo.bIsTrunkCard = PreparedPlane.bIsTrunkCard;
 				PlaneInfo.Normal = PreparedPlane.OrientedNormal;
 				PlaneInfo.Rho = PreparedPlane.OrientedRho;
 				PlaneInfo.AxisU = PreparedPlane.AxisU;
@@ -2122,15 +4110,28 @@ namespace UE::BillboardClouds
 				PlaneInfo.MaxU = PreparedPlane.MaxU;
 				PlaneInfo.MinV = PreparedPlane.MinV;
 				PlaneInfo.MaxV = PreparedPlane.MaxV;
+				PlaneInfo.MinSignedDistance = PreparedPlane.MinSignedDistance;
+				PlaneInfo.MaxSignedDistance = PreparedPlane.MaxSignedDistance;
+				PlaneInfo.EnvelopeMinU = PreparedPlane.EnvelopeMinU;
+				PlaneInfo.EnvelopeMaxU = PreparedPlane.EnvelopeMaxU;
+				PlaneInfo.EnvelopeMinV = PreparedPlane.EnvelopeMinV;
+				PlaneInfo.EnvelopeMaxV = PreparedPlane.EnvelopeMaxV;
+				PlaneInfo.EnvelopeMinSignedDistance = PreparedPlane.EnvelopeMinSignedDistance;
+				PlaneInfo.EnvelopeMaxSignedDistance = PreparedPlane.EnvelopeMaxSignedDistance;
 				PlaneInfo.AtlasPixelMin = PreparedPlane.AtlasPixelMin;
 				PlaneInfo.AtlasTileSize = PreparedPlane.AtlasTileSize;
+				PlaneInfo.BackAtlasPixelMin = PreparedPlane.BackAtlasPixelMin;
+				PlaneInfo.BackAtlasTileSize = PreparedPlane.BackAtlasTileSize;
 				PlaneInfo.AtlasTileResolution = FMath::Min(PreparedPlane.AtlasTileSize.X, PreparedPlane.AtlasTileSize.Y);
 				PlaneInfo.AtlasTilePaddingPixels = PreparedPlane.AtlasTilePaddingPixels;
+				PlaneInfo.bHasBackFaceAtlas = PreparedPlane.bHasBackFaceAtlas;
 				PlaneInfo.TriangleIndices = PreparedPlane.TriangleIndices;
+				PlaneInfo.CrackReductionProjections = PreparedPlane.CrackReductionProjections;
 				for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
 				{
 					PlaneInfo.Corners[CornerIndex] = PreparedPlane.Corners[CornerIndex];
 					PlaneInfo.AtlasUVs[CornerIndex] = PreparedPlane.AtlasUVs[CornerIndex];
+					PlaneInfo.BackAtlasUVs[CornerIndex] = PreparedPlane.BackAtlasUVs[CornerIndex];
 				}
 			}
 
@@ -2163,11 +4164,156 @@ namespace UE::BillboardClouds
 
 		const FString MetricSummary = FString::Printf(TEXT("object-space, epsilon=%.2f cm"), Settings.ErrorTolerance);
 		const FString PenaltySummary = FString::Printf(TEXT("on, weight=%.2f, directional missed set"), PaperPenaltyWeight);
-		const FString TextureSummary = FString::Printf(
-			TEXT("on, object-space variable tiles up to %d px, padding=%d px, max atlas=%d, clipped valid-zone shooting"),
-			Settings.TextureTileResolution,
-			Settings.TextureTilePaddingPixels,
-			Settings.TextureAtlasMaxResolution);
+		FString KMeansCrackReductionSummary = TEXT("off");
+		if (Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::PaperExact)
+		{
+			KMeansCrackReductionSummary = TEXT("paper-exact envelope-intersection stencil");
+		}
+		else if (Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::BoundaryAware)
+		{
+			KMeansCrackReductionSummary = FString::Printf(
+				TEXT("boundary-aware envelope-intersection band, width=%.2f cm"),
+				Settings.KMeansBoundaryCrackReductionWidth);
+		}
+		FString TextureSummary;
+		const TCHAR* DoubleSidedBakeSummary = TEXT("off");
+		switch (Settings.DoubleSidedBakeMode)
+		{
+		case EDoubleSidedBakeMode::TrunkCardsOnly:
+			DoubleSidedBakeSummary = TEXT("trunk cards only");
+			break;
+		case EDoubleSidedBakeMode::BillboardPlanesOnly:
+			DoubleSidedBakeSummary = TEXT("billboard planes only");
+			break;
+		case EDoubleSidedBakeMode::AllPlanes:
+			DoubleSidedBakeSummary = TEXT("all planes");
+			break;
+		case EDoubleSidedBakeMode::Off:
+		default:
+			break;
+		}
+		if (Settings.Technique == EPlaneCoverTechnique::KMeansClustering)
+		{
+			TextureSummary = FString::Printf(
+				TEXT("on, fixed %dx%d atlas, auto-scaled packed object-space tiles, padding=%d px, cluster projection, crack reduction=%s, double-sided bake=%s"),
+				Settings.TextureAtlasResolution,
+				Settings.TextureAtlasResolution,
+				Settings.TextureTilePaddingPixels,
+				*KMeansCrackReductionSummary,
+				DoubleSidedBakeSummary);
+		}
+		else if (Settings.Technique == EPlaneCoverTechnique::GodOfWarCards)
+		{
+			TextureSummary = FString::Printf(
+				TEXT("on, fixed %dx%d atlas, auto-scaled packed object-space tiles, padding=%d px, per-card ortho bounds, closeness clipped, reclaimed faces only, double-sided bake=%s"),
+				Settings.TextureAtlasResolution,
+				Settings.TextureAtlasResolution,
+				Settings.TextureTilePaddingPixels,
+				DoubleSidedBakeSummary);
+		}
+		else
+		{
+			TextureSummary = FString::Printf(
+				TEXT("on, fixed %dx%d atlas, auto-scaled packed object-space tiles, padding=%d px, clipped valid-zone shooting, double-sided bake=%s"),
+				Settings.TextureAtlasResolution,
+				Settings.TextureAtlasResolution,
+				Settings.TextureTilePaddingPixels,
+				DoubleSidedBakeSummary);
+		}
+
+		if (Settings.Technique == EPlaneCoverTechnique::KMeansClustering)
+		{
+			double TotalKMeansDistance = 0.0;
+			for (const FPlaneCoverPlane& Plane : Result.Planes)
+			{
+				TotalKMeansDistance += -Plane.Score;
+			}
+
+			FString Summary = FString::Printf(
+				TEXT("%s\n  algorithm: improved billboard clouds k-means best-fit plane clustering\n  triangles: %d, target planes: %d, output planes: %d\n  iterations: %d, covered: %d / %d (%.1f%%), area: %.1f%%\n  metric: budget-driven triangle-to-plane distance, total distance %.3f\n  initialization: bounding-sphere tangent planes, one-pass coverage-centroid relaxation, count-based minimum-coverage cluster replacement\n  assignment: nearest plane by summed vertex-to-plane distance\n  empty clusters: handled by minimum-coverage replacement, skipped if still empty\n  plane refit: symmetric covariance eigensolve / SVD-equivalent best-fit plane\n  billboard footprint: object-space projection minimum-area rectangle\n  texture atlas: %s\n  timing: total %.2fs, initialization %.2fs, assignment %.2fs, plane refit %.2fs"),
+				*MeshName,
+				Result.SourceTriangleCount,
+				Settings.KMeansPlaneCount,
+				Result.Planes.Num(),
+				Result.GreedyIterationCount,
+				Result.CoveredTriangleCount,
+				Result.SourceTriangleCount,
+				CoveredTrianglePercent,
+				CoveredAreaPercent,
+				TotalKMeansDistance,
+				*TextureSummary,
+				Result.TotalSeconds,
+				Result.DensityBuildSeconds,
+				Result.CandidateSearchSeconds,
+				Result.CandidatePlaneBuildSeconds);
+
+			const int32 PreviewPlaneCount = FMath::Min(5, Result.Planes.Num());
+			for (int32 PlaneIndex = 0; PlaneIndex < PreviewPlaneCount; ++PlaneIndex)
+			{
+				const FPlaneCoverPlane& Plane = Result.Planes[PlaneIndex];
+				Summary += FString::Printf(
+					TEXT("\n    plane %d: tris=%d, area=%.1f, distance=%.1f, n=(%.2f %.2f %.2f), rho=%.2f"),
+					PlaneIndex,
+					Plane.TriangleIndices.Num(),
+					Plane.CoveredArea,
+					-Plane.Score,
+					Plane.Normal.X,
+					Plane.Normal.Y,
+					Plane.Normal.Z,
+					Plane.Rho);
+			}
+
+			return Summary;
+		}
+
+		if (Settings.Technique == EPlaneCoverTechnique::GodOfWarCards)
+		{
+			double TotalScore = 0.0;
+			for (const FPlaneCoverPlane& Plane : Result.Planes)
+			{
+				TotalScore += Plane.Score;
+			}
+
+			FString Summary = FString::Printf(
+				TEXT("%s\n  algorithm: God of War greedy card capture\n  triangles: %d, cards: %d, covered: %d / %d (%.1f%%), area: %.1f%%\n  metric: thick object-space slice, closeness=%.2f cm, all triangle vertices must satisfy abs(dot(N, vertex) - rho) <= closeness\n  candidate space: 6D card planes reduced to direction + distance from bounds center\n  directions: geodesic hemisphere subdivisions=%d, directions=%d\n  distance sampling: spacing %.2fx closeness, candidate planes tested total=%d, max %d/iteration\n  score: sum projected triangle areas, world area * abs(dot(triangle normal, card normal)), total %.1f\n  greedy claim: best sampled card claims close faces, repeat until no sampled card can claim remaining faces\n  fallback cards: off; increase geodesic subdivisions, reduce spacing, or increase closeness if coverage is below 100%%\n  final reclaim: retested claimed faces against close final cards, moved=%d\n  billboard footprint: object-space projection minimum-area rectangle\n  texture atlas: %s\n  timing: total %.2fs, candidate setup %.2fs, search %.2fs"),
+				*MeshName,
+				Result.SourceTriangleCount,
+				Result.Planes.Num(),
+				Result.CoveredTriangleCount,
+				Result.SourceTriangleCount,
+				CoveredTrianglePercent,
+				CoveredAreaPercent,
+				Settings.ErrorTolerance,
+				Settings.GodOfWarGeodesicSubdivisions,
+				Result.CandidatePlaneCount,
+				Settings.GodOfWarCandidateSpacingMultiplier,
+				Result.TotalCandidatePlaneCount,
+				Result.MaxIterationCandidatePlaneCount,
+				TotalScore,
+				Result.FinalReassignedTriangleCount,
+				*TextureSummary,
+				Result.TotalSeconds,
+				Result.DensityBuildSeconds,
+				Result.CandidateSearchSeconds);
+
+			const int32 PreviewPlaneCount = FMath::Min(5, Result.Planes.Num());
+			for (int32 PlaneIndex = 0; PlaneIndex < PreviewPlaneCount; ++PlaneIndex)
+			{
+				const FPlaneCoverPlane& Plane = Result.Planes[PlaneIndex];
+				Summary += FString::Printf(
+					TEXT("\n    card %d: tris=%d, area=%.1f, score=%.1f, n=(%.2f %.2f %.2f), rho=%.2f"),
+					PlaneIndex,
+					Plane.TriangleIndices.Num(),
+					Plane.CoveredArea,
+					Plane.Score,
+					Plane.Normal.X,
+					Plane.Normal.Y,
+					Plane.Normal.Z,
+					Plane.Rho);
+			}
+
+			return Summary;
+		}
 
 		FString Summary = FString::Printf(
 			TEXT("%s\n  algorithm: RR-4485 greedy plane-space cover\n  triangles: %d, picked candidates: max %d/iter, total %d\n  iterations: %d, planes: %d, covered: %d / %d (%.1f%%), area: %.1f%%\n  metric: %s\n  grid: theta bins=%d, phi bins=%d, rho bins=%d\n  density: angular-bin conservative rho range, rho-overlap weighted contribution, compactness weight %.2f\n  density update: persistent grid, incremental remove collapsed faces, parallel direction slices\n  adaptive refinement: theta/phi/rho 27-neighbor subdivision, parallel score-only sub-bin evaluation, shared candidate sets, winner-only index collection, safety depth %d\n  validity: angular-bin vertex extrema rho range, per-cell angular context\n  final validity: strict oriented final set\n  plane placement: refined density plane used directly\n  billboard footprint: object-space projection minimum-area rectangle\n  texture atlas: %s\n  timing: total %.2fs, density init %.2fs, search/refine %.2fs, candidate build/refine %.2fs, prepare %.2fs, density update %.2fs\n  penalty: %s"),

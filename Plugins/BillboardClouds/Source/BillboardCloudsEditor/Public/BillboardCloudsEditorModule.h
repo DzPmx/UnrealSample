@@ -12,6 +12,5 @@ public:
 
 private:
 	void RegisterMenus();
-	void ExecuteAnalyzeSelectedStaticMeshes(const FToolMenuContext& MenuContext) const;
 	void ExecuteCreatePlaneProxyMeshes(const FToolMenuContext& MenuContext) const;
 };
