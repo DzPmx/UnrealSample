@@ -5,6 +5,8 @@
 
 #include "BillboardCloudsEditorSettings.generated.h"
 
+class UMaterialInstanceConstant;
+
 UENUM()
 enum class EBillboardCloudsTechnique : uint8
 {
@@ -95,4 +97,16 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))
 	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::Off;
+
+	UPROPERTY(config, EditAnywhere, Category = "Texture|Atlas Outputs", meta = (ToolTip = "Generate and assign the BaseColor/Opacity atlas to the ColorOpacity texture parameter. RGB stores base color, A stores the opacity mask."))
+	bool bBakeBaseColorOpacityAtlas = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Texture|Atlas Outputs", meta = (ToolTip = "Generate and assign the object-space normal atlas to the NormalMask texture parameter."))
+	bool bBakeNormalMaskAtlas = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Texture|Atlas Outputs", meta = (ToolTip = "Generate and assign the packed material mask atlas to the Mix texture parameter. RGBA stores Occlusion, Roughness, Metallic, Emission."))
+	bool bBakeMixAtlas = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ToolTip = "Template material instance copied for every generated proxy. Enabled atlas outputs are assigned to ColorOpacity, NormalMask, and Mix texture parameters."))
+	TSoftObjectPtr<UMaterialInstanceConstant> BillboardMaterialTemplate;
 };

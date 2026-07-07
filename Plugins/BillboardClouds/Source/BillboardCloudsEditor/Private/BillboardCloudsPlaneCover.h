@@ -33,12 +33,17 @@ namespace UE::BillboardClouds
 	{
 		FVector Vertices[3] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 		FVector2f UVs[3] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
+		FVector VertexNormals[3] = { FVector::UpVector, FVector::UpVector, FVector::UpVector };
+		FVector VertexTangents[3] = { FVector::ForwardVector, FVector::ForwardVector, FVector::ForwardVector };
+		float VertexBinormalSigns[3] = { 1.0f, 1.0f, 1.0f };
 		FVector Normal = FVector::UpVector;
 		FVector ShadingNormal = FVector::UpVector;
 		double Area = 0.0;
 		int32 MaterialIndex = INDEX_NONE;
 		bool bHasUVs = false;
 		bool bHasSourceShadingNormal = false;
+		bool bHasSourceVertexNormals = false;
+		bool bHasSourceTangents = false;
 		bool bTrunkCardOnly = false;
 	};
 

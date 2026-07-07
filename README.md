@@ -1,167 +1,281 @@
-# UnrealSample Billboard Clouds Demo
+# Billboard Clouds Plugin V1.0
 
-本仓库当前 Demo 版本包含一个 Unreal Editor 插件：
+Unreal Editor plugin path:
 
 `Plugins/BillboardClouds`
 
-它用于从选中的 Static Mesh 生成 Billboard Clouds / card proxy，用少量 plane 和一张 atlas 近似原模型。当前主要面向树、灌木、枝叶等植被类资产的远景简化。
+This plugin generates billboard-card proxy meshes from selected Static Mesh assets. It is designed for distant-view simplification of vegetation assets such as trees, trunks, branches, and foliage cards.
 
-## 功能概览
+V1.0 focuses on an editor-side, asset-generation workflow:
 
-- 支持三种生成技术：
-  - Paper 1 - Plane-Space Greedy Cover
-  - Paper 2 - K-Means Best-Fit Planes
-  - God of War - Greedy Card Capture
-- 支持按材质关键字将树干/树枝从 Billboard Clouds 输入中排除，单独生成 2 到 4 张垂直交叉插片。
-- 支持固定 atlas 分辨率，自动缩放 tile 并做矩形 packing，提高贴图利用率。
-- 支持可选双面拍片：
-  - Off
-  - Trunk Cards Only
-  - Billboard Planes Only
-  - All Planes
-- 支持 Masked 材质输出，默认 `Opacity Mask Clip Value = 0.333`。
-- 支持源材质 alpha/cutout mask 采样，并对 atlas tile 做 RGB padding，减少透明边缘发黑。
-- 支持 UV 通道约定：
-  - `UV0`：正面 atlas
-  - `UV1`：背面 atlas，未开启双面拍片的 plane 会镜像 `UV0`
-  - `UV2`：trunk/leaf 分类点，trunk 为 `(0,0)`，billboard/leaf 为 `(1,0)`
+- Select one or more Static Mesh assets.
+- Run the Billboard Clouds tool.
+- Generate a proxy Static Mesh, atlas textures, and a copied material instance.
 
-## 原理简述
+## Core Features
+
+- Three generation techniques:
+  - `Paper 1 - Plane-Space Greedy Cover`
+  - `Paper 2 - K-Means Best-Fit Planes`
+  - `God of War - Greedy Card Capture`
+- Optional trunk/branch cross-card pass.
+- Optional front/back atlas baking for two-sided planes.
+- Fixed atlas resolution with automatic tile scaling and rectangle packing.
+- RGB padding and tile-border padding to reduce dark transparent edges.
+- Render-data normal extraction, object-space normal atlas baking, and source normal-map baking when the source material explicitly connects a normal texture.
+- User-provided material instance workflow. The plugin copies your configured material instance and assigns generated textures to known texture parameters.
+- Optional atlas outputs controlled from settings:
+  - `ColorOpacity`
+  - `NormalMask`
+  - `Mix`
+
+## Generation Techniques
 
 ### Paper 1 - Plane-Space Greedy Cover
 
-第一篇论文的方法把候选平面离散到 plane space 中，用方向和距离寻找能够覆盖最多三角形的平面。每轮选择当前最优 plane，移除已覆盖三角形，再继续寻找下一张 billboard。
+The first-paper path searches discretized plane space. A plane is evaluated by the source triangles it can approximate within the configured object-space error.
 
-当前实现保留了以下核心路径：
+Current implementation includes:
 
-- 根据误差容忍度判断三角形是否能被某个 plane 近似。
-- 在离散 normal/rho 空间中搜索高密度 plane。
-- 对选中的 plane 做对象空间投影矩形，生成 proxy quad。
-- 用源三角形投影到 quad 的 atlas tile 中生成颜色和 opacity mask。
+- normal/rho plane-space search
+- adaptive refinement
+- greedy best-plane selection
+- object-space projection footprint
+- compactness weighting for texture-friendly clusters
+- valid-zone clipped texture projection
 
 ### Paper 2 - K-Means Best-Fit Planes
 
-第二篇论文的方法更偏向预算驱动：给定目标 plane 数量，用 K-Means 风格的聚类把三角形分配给若干 best-fit plane。
+The second-paper path uses a budget-driven K-Means style assignment/refit process.
 
-当前实现包含：
+Current implementation includes:
 
-- 目标 plane 数量控制。
-- 三角形到 plane 的距离度量。
-- 聚类分配与 best-fit plane refit。
-- 可选 crack reduction：
-  - Off
-  - Paper Exact - envelope intersection
-  - Boundary Aware - 更适合 alpha-card 植被的边界感知补缝
+- target plane count
+- nearest-plane assignment by triangle-to-plane distance
+- symmetric covariance best-fit plane refit
+- coverage-centroid relaxation
+- minimum-coverage cluster replacement
+- optional crack reduction:
+  - `Off`
+  - `Paper Exact - Envelope Intersection`
+  - `Boundary Aware - Envelope Boundary Band`
+
+For alpha-card vegetation, `Boundary Aware` is usually safer than strict paper-style envelope projection because it limits extra projections to boundary regions.
 
 ### God of War - Greedy Card Capture
 
-God of War 风格路径是逐张 card 贪心选择：
+The God of War style path greedily selects one card at a time.
 
-- 候选 card 由方向和距离定义。
-- 每张候选 card 吸附一层厚切片，只有距离 card plane 足够近的三角形可以被压扁到该 card 上。
-- card 评分基于可捕获三角形投影面积，越大且形变越小越好。
-- 最优 card 认领三角形，重复直到没有可认领内容。
-- 最终对已生成 card 做一次 face reclaim，让三角形切换到更合适的 close card，减少局部空洞。
+Current implementation includes:
 
-## 树干/树枝交叉插片
+- geodesic hemisphere candidate directions
+- candidate plane spacing based on the closeness/error metric
+- thick-slice triangle capture
+- projected-area card scoring
+- greedy face claiming
+- final face reclaim to move triangles to a better close card before texture baking
+- ortho-style card bounds and closeness-clipped projection behavior
 
-有些树干或大树枝不适合用 Billboard Clouds 聚类。插件提供了独立 trunk cards 流程：
+## Trunk Cards
 
-- 通过材质实例名或父材质名中的关键字识别 trunk/branch 三角形。
-- 匹配到的三角形会从 Billboard Clouds 输入中完全排除。
-- 这些三角形会单独生成 2 到 4 张垂直交叉插片。
-- 插片中心使用模型原点，避免只按 trunk bounds 中心放置导致偏移。
-- 可选择是否只给 trunk cards 或所有 plane 开启双面拍片。
+Some trunks or large branches are not good Billboard Clouds candidates. V1.0 can route matching material triangles out of the Billboard Clouds input and generate fixed vertical cross cards instead.
 
-## 双面拍片
+Settings:
 
-默认情况下，普通 two-sided 材质会让 plane 的背面复用正面内容，这对非对称树干或枝叶可能会把错误方向的内容镜像到背面。
+- `Enable Trunk Cards`
+- `Trunk Card Plane Count`
+  - range: `2` to `4`
+  - `2` = cross card
+  - `3` = three-way star
+  - `4` = four-way star
+- `Trunk Card Material Keywords`
+  - matches material instance names and parent material names
 
-当前 Demo 支持额外生成背面 atlas tile：
+Matched trunk/branch triangles are fully excluded from the Billboard Clouds clustering input. Trunk cards are centered at the source mesh origin rather than only the trunk bounds center.
 
-- 正面写入 `UV0`
-- 背面写入 `UV1`
-- 生成材质通过 `TwoSidedSign` 判断当前面向：
-  - front face 采样 `UV0`
-  - back face 采样 `UV1`
+## Two-Sided Baking
 
-如果某个 plane 没有启用双面拍片，则 `UV1` 会镜像 `UV0`，行为等价于旧的 two-sided 复用。
+By default, a two-sided material can reuse one side of a plane on the back face. This is cheap, but it mirrors the same captured content.
 
-## 贴图与 UV
+V1.0 supports optional separate back-side atlas baking:
 
-生成的 atlas 使用固定方形分辨率，由设置项 `TextureAtlasResolution` 控制。tile 尺寸不再手动设置，而是根据所有 plane 的对象空间尺寸自动缩放，并通过矩形 packing 尽量提高利用率。
+- `Off`
+- `Trunk Cards Only`
+- `Billboard Planes Only`
+- `All Planes`
 
-日志中会输出：
+UV convention:
 
-- atlas 分辨率
-- largest tile
-- packed tile usage
-- front tiles
-- back tiles
-- painted pixels
+- `UV0`: front-side atlas tile
+- `UV1`: back-side atlas tile
+- `UV2`: trunk/leaf point mask
+  - trunk = `(0, 0)`
+  - billboard/leaf = `(1, 0)`
 
-注意：`painted pixels` 不是 atlas 矩形利用率。树叶 cutout 天然有大量透明区域，所以判断布局利用率应优先看 `packed tile usage`。
+If a plane does not have a baked back-side tile, `UV1` mirrors the `UV0` layout.
 
-## 使用方法
+## Material Workflow
 
-1. 启动 Unreal Editor。
-2. 在 Content Browser 中选择一个或多个 `Static Mesh`。
-3. 打开菜单：
+V1.0 does not generate a material graph.
+
+Instead, configure your own material instance in:
+
+`Project Settings > Plugins > Billboard Clouds > Billboard Material Template`
+
+The plugin duplicates that material instance for every generated proxy and assigns the enabled atlas textures to these texture parameters:
+
+- `ColorOpacity`
+- `NormalMask`
+- `Mix`
+
+The template material is responsible for sampling those parameters correctly. This lets the project keep its own shading model, material functions, switches, and rendering policy.
+
+## Atlas Outputs
+
+Atlas output is controlled from:
+
+`Project Settings > Plugins > Billboard Clouds > Texture | Atlas Outputs`
+
+### BaseColorOpacity
+
+Setting: `Bake Base Color Opacity Atlas`
+
+Parameter: `ColorOpacity`
+
+Channels:
+
+- RGB = source base color
+- A = source opacity/cutout mask
+
+Default: enabled.
+
+### NormalMask
+
+Setting: `Bake Normal Mask Atlas`
+
+Parameter: `NormalMask`
+
+Stores object-space normal as encoded XYZ. The generated texture is linear and uses vector-style compression.
+
+Default: enabled.
+
+Normal bake behavior:
+
+- Uses Static Mesh render-data vertex normals/tangents when available.
+- If the source material explicitly connects a normal texture to the material Normal input, that tangent-space normal is sampled and converted to object space.
+- If no explicit normal texture is connected, the bake falls back to source render normals.
+
+### Mix
+
+Setting: `Bake Mix Atlas`
+
+Parameter: `Mix`
+
+Channels:
+
+- R = Occlusion
+- G = Roughness
+- B = Metallic
+- A = Emission
+
+Default: disabled.
+
+Mix bake behavior:
+
+- Reads directly connected texture samples or texture parameters from the source material properties when available.
+- Uses fallback defaults when no readable source is found:
+  - Occlusion = `1.0`
+  - Roughness = `0.5`
+  - Metallic = `0.0`
+  - Emission = `0.0`
+
+The generated Mix texture is linear mask data.
+
+## Usage
+
+1. Enable the `BillboardClouds` plugin.
+2. Create or select a material instance template.
+3. Configure the template in:
+
+   `Project Settings > Plugins > Billboard Clouds > Billboard Material Template`
+
+4. Configure the generation technique and atlas outputs.
+5. Select one or more `Static Mesh` assets in the Content Browser.
+6. Run:
 
    `Tools > Billboard Clouds > Create Plane Proxy Meshes`
 
-4. 插件会在源 mesh 所在目录生成：
-   - `*_BillboardCloudProxy`
-   - `*_BillboardCloudAtlas`
-   - `*_BillboardCloudMaterial`
+Generated assets are created next to the source mesh and the Content Browser syncs to them after generation.
 
-生成完成后，Content Browser 会自动同步到新创建的资产。
+Typical outputs:
 
-## 主要设置
+- `*_BillboardCloudProxy`
+- `*_BillboardCloudAtlas`
+- `*_BillboardCloudNormalAtlas`
+- `*_BillboardCloudMixAtlas`
+- `*_BillboardCloudMaterialInstance`
 
-设置位于：
+Only enabled atlas outputs are generated.
 
-`Project Settings > Plugins > Billboard Clouds`
-
-常用参数：
+## Important Settings
 
 - `Technique`
-  - 选择 Paper 1、Paper 2 或 God of War 路径。
+  - Selects Paper 1, Paper 2, or God of War path.
 - `Relative Error`
-  - 基于 mesh bounds 半径的相对误差。
+  - Relative object-space error based on source mesh bounds radius.
 - `Minimum Error Cm`
-  - 最小对象空间误差。
+  - Absolute minimum object-space error.
 - `KMeans Plane Count`
-  - K-Means 模式下的目标 plane 数量。
+  - Target plane budget for K-Means mode.
+- `KMeans Crack Reduction Mode`
+  - Controls Paper 2 crack reduction behavior.
 - `God Of War Geodesic Subdivisions`
-  - God of War 模式的候选方向精度。
+  - Candidate direction density for God of War mode.
 - `God Of War Candidate Spacing Multiplier`
-  - God of War 模式的候选 plane 距离采样间隔。
+  - Candidate plane distance spacing multiplier.
 - `Enable Trunk Cards`
-  - 是否启用 trunk/branch 单独交叉插片。
+  - Routes matching trunk/branch material triangles into fixed cross-card planes.
 - `Trunk Card Plane Count`
-  - trunk cards 数量，范围 2 到 4。
+  - Number of trunk planes, from `2` to `4`.
 - `Trunk Card Material Keywords`
-  - 用于识别 trunk/branch 材质的关键字。
+  - Material-name keywords used to identify trunk/branch triangles.
 - `Texture Atlas Resolution`
-  - 生成 atlas 的固定分辨率。
+  - Fixed square atlas resolution.
 - `Texture Tile Padding Pixels`
-  - tile 周围透明 padding。
+  - Transparent padding around each tile.
 - `Double Sided Bake Mode`
-  - 控制哪些 plane 额外拍背面。
+  - Controls which planes receive separate back-side atlas tiles.
+- `Bake Base Color Opacity Atlas`
+  - Generates `ColorOpacity`.
+- `Bake Normal Mask Atlas`
+  - Generates `NormalMask`.
+- `Bake Mix Atlas`
+  - Generates `Mix`.
+- `Billboard Material Template`
+  - Material instance to duplicate and assign textures into.
 
-## 当前 Demo 约束
+## Log Output
 
-- 这是 Editor 插件流程，不是运行时生成系统。
-- 输出材质当前以 Masked atlas 为主。
-- 生成质量依赖源 mesh 的材质、UV、alpha mask 和用户设置。
-- 不同植被资产需要针对 plane 数量、误差、trunk 关键字和双面拍片模式做调参。
+The tool report includes:
 
-## 推荐调参顺序
+- selected algorithm
+- source triangle count
+- output plane count
+- atlas size
+- largest tile size
+- packed tile usage
+- front/back tile count
+- painted pixel count
+- readable source texture count
+- alpha policy
+- normal source information
+- generated asset paths
 
-1. 先确认 trunk/branch 是否需要从 Billboard Clouds 输入中排除。
-2. 调整 `Technique`。
-3. 调整误差或 K-Means plane 数量。
-4. 检查 atlas 日志中的 `packed tile usage`。
-5. 对非对称 trunk/branch 开启 `Trunk Cards Only` 双面拍片。
-6. 对枝叶背面明显错误的资产，再尝试 `Billboard Planes Only` 或 `All Planes`。
+For texture packing, prefer `packed tile usage` over `painted pixels` when judging layout efficiency. Vegetation cutout textures naturally contain many transparent pixels.
+
+## Notes
+
+- This is an editor asset-generation plugin, not a runtime generation system.
+- Source material graph evaluation is intentionally limited to explicit texture and common parameter reads. Complex procedural material logic is not fully evaluated.
+- The generated proxy quality depends on source geometry, UVs, material setup, alpha masks, and the selected technique/settings.
+- The material template is project-owned. The plugin only duplicates it and assigns generated texture parameters.

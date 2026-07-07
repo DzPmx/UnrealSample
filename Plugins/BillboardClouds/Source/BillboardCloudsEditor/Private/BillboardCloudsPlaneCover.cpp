@@ -4,7 +4,9 @@
 #include "Engine/StaticMesh.h"
 #include "HAL/PlatformTime.h"
 #include "MeshDescription.h"
+#include "RawIndexBuffer.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshResources.h"
 
 namespace UE::BillboardClouds
 {
@@ -2216,6 +2218,112 @@ namespace UE::BillboardClouds
 
 			return PreparedCandidates;
 		}
+
+		bool ExtractTrianglesFromRenderData(const UStaticMesh* StaticMesh, const int32 LODIndex, TArray<FSourceTriangle>& OutTriangles)
+		{
+			OutTriangles.Reset();
+			if (!StaticMesh || !StaticMesh->GetRenderData() || !StaticMesh->GetRenderData()->LODResources.IsValidIndex(LODIndex))
+			{
+				return false;
+			}
+
+			const FStaticMeshLODResources& LODResources = StaticMesh->GetRenderData()->LODResources[LODIndex];
+			const FPositionVertexBuffer& PositionBuffer = LODResources.VertexBuffers.PositionVertexBuffer;
+			const FStaticMeshVertexBuffer& StaticMeshVertexBuffer = LODResources.VertexBuffers.StaticMeshVertexBuffer;
+			const FIndexArrayView Indices = LODResources.IndexBuffer.GetArrayView();
+			if (PositionBuffer.GetNumVertices() == 0 || StaticMeshVertexBuffer.GetNumVertices() == 0 || Indices.Num() < 3)
+			{
+				return false;
+			}
+
+			const bool bHasUVs = StaticMeshVertexBuffer.GetNumTexCoords() > 0;
+			OutTriangles.Reserve(Indices.Num() / 3);
+
+			for (const FStaticMeshSection& Section : LODResources.Sections)
+			{
+				const int32 FirstIndex = static_cast<int32>(Section.FirstIndex);
+				const int32 LastIndexExclusive = FirstIndex + static_cast<int32>(Section.NumTriangles) * 3;
+				if (FirstIndex < 0 || LastIndexExclusive > Indices.Num())
+				{
+					continue;
+				}
+
+				for (int32 IndexOffset = FirstIndex; IndexOffset < LastIndexExclusive; IndexOffset += 3)
+				{
+					const uint32 VertexIndices[3] =
+					{
+						Indices[IndexOffset + 0],
+						Indices[IndexOffset + 1],
+						Indices[IndexOffset + 2]
+					};
+
+					if (VertexIndices[0] >= PositionBuffer.GetNumVertices()
+						|| VertexIndices[1] >= PositionBuffer.GetNumVertices()
+						|| VertexIndices[2] >= PositionBuffer.GetNumVertices()
+						|| VertexIndices[0] >= StaticMeshVertexBuffer.GetNumVertices()
+						|| VertexIndices[1] >= StaticMeshVertexBuffer.GetNumVertices()
+						|| VertexIndices[2] >= StaticMeshVertexBuffer.GetNumVertices())
+					{
+						continue;
+					}
+
+					FSourceTriangle Triangle;
+					bool bAllTangentsValid = true;
+					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+					{
+						const uint32 RenderVertexIndex = VertexIndices[VertexIndex];
+						Triangle.Vertices[VertexIndex] = FVector(PositionBuffer.VertexPosition(RenderVertexIndex));
+						if (bHasUVs)
+						{
+							Triangle.UVs[VertexIndex] = StaticMeshVertexBuffer.GetVertexUV(RenderVertexIndex, 0);
+						}
+
+						const FVector4f RenderTangentX4 = StaticMeshVertexBuffer.VertexTangentX(RenderVertexIndex);
+						const FVector3f RenderTangentY3 = StaticMeshVertexBuffer.VertexTangentY(RenderVertexIndex);
+						const FVector4f RenderTangentZ4 = StaticMeshVertexBuffer.VertexTangentZ(RenderVertexIndex);
+						FVector SourceNormal(RenderTangentZ4.X, RenderTangentZ4.Y, RenderTangentZ4.Z);
+						FVector SourceTangent(RenderTangentX4.X, RenderTangentX4.Y, RenderTangentX4.Z);
+						const FVector SourceBinormal(RenderTangentY3.X, RenderTangentY3.Y, RenderTangentY3.Z);
+						SourceNormal = SourceNormal.GetSafeNormal();
+						if (SourceNormal.IsNearlyZero())
+						{
+							SourceNormal = FVector::UpVector;
+						}
+						SourceTangent = (SourceTangent - SourceNormal * FVector::DotProduct(SourceTangent, SourceNormal)).GetSafeNormal();
+						if (SourceTangent.IsNearlyZero())
+						{
+							bAllTangentsValid = false;
+							SourceTangent = FVector::ForwardVector;
+						}
+
+						Triangle.VertexNormals[VertexIndex] = SourceNormal;
+						Triangle.VertexTangents[VertexIndex] = SourceTangent;
+						Triangle.VertexBinormalSigns[VertexIndex] = FVector::DotProduct(FVector::CrossProduct(SourceNormal, SourceTangent), SourceBinormal) >= 0.0 ? 1.0f : -1.0f;
+					}
+
+					const FVector Edge01 = Triangle.Vertices[1] - Triangle.Vertices[0];
+					const FVector Edge02 = Triangle.Vertices[2] - Triangle.Vertices[0];
+					const FVector AreaVector = FVector::CrossProduct(Edge01, Edge02);
+					const double DoubleArea = AreaVector.Size();
+					if (DoubleArea <= DegenerateTriangleTolerance)
+					{
+						continue;
+					}
+
+					Triangle.Normal = AreaVector / DoubleArea;
+					Triangle.ShadingNormal = (Triangle.VertexNormals[0] + Triangle.VertexNormals[1] + Triangle.VertexNormals[2]).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Triangle.Normal);
+					Triangle.Area = 0.5 * DoubleArea;
+					Triangle.MaterialIndex = Section.MaterialIndex;
+					Triangle.bHasUVs = bHasUVs;
+					Triangle.bHasSourceShadingNormal = true;
+					Triangle.bHasSourceVertexNormals = true;
+					Triangle.bHasSourceTangents = bAllTangentsValid;
+					OutTriangles.Add(Triangle);
+				}
+			}
+
+			return !OutTriangles.IsEmpty();
+		}
 	}
 
 	bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError)
@@ -2229,6 +2337,11 @@ namespace UE::BillboardClouds
 			return false;
 		}
 
+		if (ExtractTrianglesFromRenderData(StaticMesh, LODIndex, OutTriangles))
+		{
+			return true;
+		}
+
 		const FMeshDescription* MeshDescription = StaticMesh->GetMeshDescription(LODIndex);
 		if (!MeshDescription)
 		{
@@ -2239,12 +2352,24 @@ namespace UE::BillboardClouds
 		const TVertexAttributesConstRef<FVector3f> VertexPositions = MeshDescription->GetVertexPositions();
 		const FStaticMeshConstAttributes MeshAttributes(*MeshDescription);
 		const bool bHasVertexInstanceNormals = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Normal);
+		const bool bHasVertexInstanceTangents = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Tangent);
+		const bool bHasVertexInstanceBinormalSigns = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::BinormalSign);
 		const bool bHasVertexInstanceUVs = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::TextureCoordinate);
 		const bool bHasPolygonGroupMaterialSlots = MeshDescription->PolygonGroupAttributes().HasAttribute(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
 		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceNormals;
 		if (bHasVertexInstanceNormals)
 		{
 			VertexInstanceNormals = MeshAttributes.GetVertexInstanceNormals();
+		}
+		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceTangents;
+		if (bHasVertexInstanceTangents)
+		{
+			VertexInstanceTangents = MeshAttributes.GetVertexInstanceTangents();
+		}
+		TVertexInstanceAttributesConstRef<float> VertexInstanceBinormalSigns;
+		if (bHasVertexInstanceBinormalSigns)
+		{
+			VertexInstanceBinormalSigns = MeshAttributes.GetVertexInstanceBinormalSigns();
 		}
 		TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs;
 		if (bHasVertexInstanceUVs)
@@ -2282,19 +2407,63 @@ namespace UE::BillboardClouds
 
 			Triangle.Normal = AreaVector / DoubleArea;
 			Triangle.ShadingNormal = Triangle.Normal;
+			for (FVector& VertexNormal : Triangle.VertexNormals)
+			{
+				VertexNormal = Triangle.Normal;
+			}
+			for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+			{
+				Triangle.VertexTangents[VertexIndex] = Edge01.GetSafeNormal();
+				Triangle.VertexBinormalSigns[VertexIndex] = 1.0f;
+			}
 			if (bHasVertexInstanceNormals)
 			{
 				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
 				FVector AveragedNormal = FVector::ZeroVector;
-				for (const FVertexInstanceID VertexInstanceID : TriangleVertexInstanceIDs)
+				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
-					AveragedNormal += FVector(VertexInstanceNormals[VertexInstanceID]);
-				}
+					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+					{
+						FVector SourceNormal = FVector(VertexInstanceNormals[TriangleVertexInstanceIDs[VertexIndex]]).GetSafeNormal();
+						if (SourceNormal.IsNearlyZero())
+						{
+							SourceNormal = Triangle.Normal;
+						}
+						Triangle.VertexNormals[VertexIndex] = SourceNormal;
+						AveragedNormal += SourceNormal;
+					}
 
-				if (!AveragedNormal.IsNearlyZero())
+					if (!AveragedNormal.IsNearlyZero())
+					{
+						Triangle.ShadingNormal = AveragedNormal.GetSafeNormal();
+						Triangle.bHasSourceShadingNormal = true;
+						Triangle.bHasSourceVertexNormals = true;
+					}
+				}
+			}
+			if (bHasVertexInstanceTangents && bHasVertexInstanceBinormalSigns)
+			{
+				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
-					Triangle.ShadingNormal = AveragedNormal.GetSafeNormal();
-					Triangle.bHasSourceShadingNormal = true;
+					bool bAllTangentsValid = true;
+					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+					{
+						const FVertexInstanceID VertexInstanceID = TriangleVertexInstanceIDs[VertexIndex];
+						FVector SourceTangent = FVector(VertexInstanceTangents[VertexInstanceID]);
+						const FVector SourceNormal = Triangle.VertexNormals[VertexIndex].GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Triangle.Normal);
+						SourceTangent = (SourceTangent - SourceNormal * FVector::DotProduct(SourceTangent, SourceNormal)).GetSafeNormal();
+						if (SourceTangent.IsNearlyZero())
+						{
+							bAllTangentsValid = false;
+							break;
+						}
+
+						Triangle.VertexTangents[VertexIndex] = SourceTangent;
+						Triangle.VertexBinormalSigns[VertexIndex] = VertexInstanceBinormalSigns[VertexInstanceID] >= 0.0f ? 1.0f : -1.0f;
+					}
+
+					Triangle.bHasSourceTangents = bAllTangentsValid;
 				}
 			}
 			if (bHasVertexInstanceUVs && VertexInstanceUVs.GetNumChannels() > 0)
