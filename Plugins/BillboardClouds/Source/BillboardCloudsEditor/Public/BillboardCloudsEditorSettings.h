@@ -32,12 +32,26 @@ enum class EBillboardCloudsDoubleSidedBakeMode : uint8
 	AllPlanes UMETA(DisplayName = "All Planes")
 };
 
+UENUM()
+enum class EBillboardCloudsMeshOutputMode : uint8
+{
+	SeparateMeshAsset UMETA(DisplayName = "Create Separate Mesh Asset"),
+	AddToSourceMeshLOD UMETA(DisplayName = "Add To Source Mesh LODs"),
+	ReplaceSourceMeshLOD UMETA(DisplayName = "Replace Source Mesh LOD")
+};
+
 UCLASS(config = EditorPerProjectUserSettings, defaultconfig, meta = (DisplayName = "Billboard Clouds"))
 class BILLBOARDCLOUDSEDITOR_API UBillboardCloudsEditorSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
 public:
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Output", meta = (ToolTip = "Choose whether generated proxy geometry is written as a separate Static Mesh asset, appended as a new LOD on the selected source Static Mesh, or used to replace an existing source Static Mesh LOD. Texture assets and the copied material instance are still generated next to the source mesh."))
+	EBillboardCloudsMeshOutputMode MeshOutputMode = EBillboardCloudsMeshOutputMode::SeparateMeshAsset;
+
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Output", meta = (ClampMin = "0", EditCondition = "MeshOutputMode == EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD", EditConditionHides, ToolTip = "Source Static Mesh LOD index to replace when Mesh Output Mode is Replace Source Mesh LOD. The LOD must already exist; the tool will not create missing replacement LODs."))
+	int32 ReplaceSourceLODIndex = 1;
+
 	UPROPERTY(config, EditAnywhere, Category = "Technique", meta = (ToolTip = "Plane-space greedy cover follows the first paper. K-means clustering follows the improved second paper. God of War card capture greedily picks the best card until all faces are claimed."))
 	EBillboardCloudsTechnique Technique = EBillboardCloudsTechnique::PlaneSpaceGreedy;
 

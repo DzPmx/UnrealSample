@@ -10,7 +10,8 @@ V1.0 focuses on an editor-side, asset-generation workflow:
 
 - Select one or more Static Mesh assets.
 - Run the Billboard Clouds tool.
-- Generate a proxy Static Mesh, atlas textures, and a copied material instance.
+- Generate atlas textures and a copied material instance.
+- Output the generated proxy geometry either as a separate Static Mesh asset, as a new LOD on the source Static Mesh, or as a replacement for an existing source Static Mesh LOD.
 
 ## Core Features
 
@@ -24,6 +25,10 @@ V1.0 focuses on an editor-side, asset-generation workflow:
 - RGB padding and tile-border padding to reduce dark transparent edges.
 - Render-data normal extraction, object-space normal atlas baking, and source normal-map baking when the source material explicitly connects a normal texture.
 - User-provided material instance workflow. The plugin copies your configured material instance and assigns generated textures to known texture parameters.
+- Mesh output modes:
+  - separate proxy Static Mesh asset
+  - append generated proxy geometry as a new source Static Mesh LOD
+  - replace an existing source Static Mesh LOD
 - Optional atlas outputs controlled from settings:
   - `ColorOpacity`
   - `NormalMask`
@@ -205,11 +210,11 @@ The generated Mix texture is linear mask data.
 
    `Tools > Billboard Clouds > Create Plane Proxy Meshes`
 
-Generated assets are created next to the source mesh and the Content Browser syncs to them after generation.
+Generated textures and material instances are created next to the source mesh and the Content Browser syncs to the generated or modified assets after generation.
 
 Typical outputs:
 
-- `*_BillboardCloudProxy`
+- `*_BillboardCloudProxy` when `Mesh Output Mode` is `Create Separate Mesh Asset`
 - `*_BillboardCloudAtlas`
 - `*_BillboardCloudNormalAtlas`
 - `*_BillboardCloudMixAtlas`
@@ -217,10 +222,43 @@ Typical outputs:
 
 Only enabled atlas outputs are generated.
 
+## Mesh Output
+
+Mesh output is controlled from:
+
+`Project Settings > Plugins > Billboard Clouds > Mesh Output`
+
+### Create Separate Mesh Asset
+
+Setting: `Mesh Output Mode = Create Separate Mesh Asset`
+
+The tool creates a new `*_BillboardCloudProxy` Static Mesh asset next to the source mesh. This is the default V1.0 behavior.
+
+### Add To Source Mesh LODs
+
+Setting: `Mesh Output Mode = Add To Source Mesh LODs`
+
+The tool appends the generated proxy geometry as a new LOD on the selected source Static Mesh. The copied material instance is added or updated in the source mesh material slots as `BillboardProxy`, and the generated LOD section uses that slot.
+
+### Replace Source Mesh LOD
+
+Settings:
+
+- `Mesh Output Mode = Replace Source Mesh LOD`
+- `Replace Source LOD Index`
+
+The tool replaces an existing source Static Mesh LOD with the generated proxy geometry. The target LOD must already exist. The tool does not create missing replacement LODs. The copied material instance is added or updated in the source mesh material slots as `BillboardProxy`, and the replacement LOD section uses that slot.
+
+When replacing an existing LOD, the existing LOD ScreenSize is preserved.
+
 ## Important Settings
 
 - `Technique`
   - Selects Paper 1, Paper 2, or God of War path.
+- `Mesh Output Mode`
+  - Selects separate mesh asset, append-to-source LOD, or replace-source LOD output.
+- `Replace Source LOD Index`
+  - Existing source mesh LOD index replaced when using replace mode.
 - `Relative Error`
   - Relative object-space error based on source mesh bounds radius.
 - `Minimum Error Cm`
@@ -270,6 +308,7 @@ The tool report includes:
 - alpha policy
 - normal source information
 - generated asset paths
+- mesh output target and source LOD index when source mesh LOD output is enabled
 
 For texture packing, prefer `packed tile usage` over `painted pixels` when judging layout efficiency. Vegetation cutout textures naturally contain many transparent pixels.
 

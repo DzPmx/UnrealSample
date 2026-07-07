@@ -21,6 +21,7 @@
 #include "Misc/ScopedSlowTask.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "TextureResource.h"
 #include "ToolMenus.h"
 
@@ -30,6 +31,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogBillboardCloudsEditor, Log, All);
 
 namespace
 {
+	const FName BillboardProxyMaterialSlotName(TEXT("BillboardProxy"));
+
 	TArray<UStaticMesh*> GetSelectedStaticMeshes()
 	{
 		TArray<FAssetData> SelectedAssets;
@@ -2105,39 +2108,104 @@ namespace
 		return MaterialInstance;
 	}
 
-	void KeepOnlyUvChannels(UStaticMesh& StaticMesh, const int32 DesiredChannelCount)
+	int32 EnsureBillboardProxyMaterialSlot(UStaticMesh& StaticMesh, UMaterialInterface* ProxyMaterial)
+	{
+		UMaterialInterface* Material = ProxyMaterial ? ProxyMaterial : UMaterial::GetDefaultMaterial(MD_Surface);
+		TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
+		for (int32 MaterialIndex = 0; MaterialIndex < StaticMaterials.Num(); ++MaterialIndex)
+		{
+			FStaticMaterial& StaticMaterial = StaticMaterials[MaterialIndex];
+			if (StaticMaterial.MaterialSlotName == BillboardProxyMaterialSlotName
+				|| StaticMaterial.ImportedMaterialSlotName == BillboardProxyMaterialSlotName)
+			{
+				StaticMaterial.MaterialInterface = Material;
+				StaticMaterial.MaterialSlotName = BillboardProxyMaterialSlotName;
+				StaticMaterial.ImportedMaterialSlotName = BillboardProxyMaterialSlotName;
+				return MaterialIndex;
+			}
+		}
+
+		return StaticMaterials.Add(FStaticMaterial(Material, BillboardProxyMaterialSlotName, BillboardProxyMaterialSlotName));
+	}
+
+	void ConfigureBillboardProxySourceModel(UStaticMesh& StaticMesh, const int32 LODIndex, const bool bPreserveExistingScreenSize = false)
+	{
+		if (!StaticMesh.IsSourceModelValid(LODIndex))
+		{
+			return;
+		}
+
+		FStaticMeshSourceModel& SourceModel = StaticMesh.GetSourceModel(LODIndex);
+		const float ExistingScreenSize = SourceModel.ScreenSize.Default;
+		SourceModel.BuildSettings.bRecomputeNormals = false;
+		SourceModel.BuildSettings.bRecomputeTangents = false;
+		SourceModel.BuildSettings.bRemoveDegenerates = false;
+		SourceModel.BuildSettings.bGenerateLightmapUVs = false;
+		SourceModel.BuildSettings.SrcLightmapIndex = 0;
+		SourceModel.BuildSettings.DstLightmapIndex = 0;
+		SourceModel.BuildSettings.bUseFullPrecisionUVs = false;
+		SourceModel.BuildSettings.DistanceFieldResolutionScale = 0.0f;
+		SourceModel.ReductionSettings.PercentTriangles = 1.0f;
+		SourceModel.ReductionSettings.PercentVertices = 1.0f;
+		SourceModel.ReductionSettings.BaseLODModel = LODIndex;
+
+		if (bPreserveExistingScreenSize)
+		{
+			SourceModel.ScreenSize.Default = ExistingScreenSize;
+		}
+		else if (LODIndex == 0)
+		{
+			SourceModel.ScreenSize.Default = 1.0f;
+		}
+		else if (StaticMesh.IsSourceModelValid(LODIndex - 1))
+		{
+			const float PreviousScreenSize = StaticMesh.GetSourceModel(LODIndex - 1).ScreenSize.Default;
+			SourceModel.ScreenSize.Default = FMath::Clamp(PreviousScreenSize * 0.5f, 0.01f, 0.99f);
+		}
+		else
+		{
+			SourceModel.ScreenSize.Default = 0.01f;
+		}
+	}
+
+	void KeepOnlyUvChannels(UStaticMesh& StaticMesh, const int32 LODIndex, const int32 DesiredChannelCount)
 	{
 		StaticMesh.SetLightMapCoordinateIndex(0);
 		const int32 ClampedDesiredChannelCount = FMath::Clamp(DesiredChannelCount, 1, 8);
 
-		if (StaticMesh.GetNumSourceModels() > 0)
+		if (StaticMesh.IsSourceModelValid(LODIndex))
 		{
-			FStaticMeshSourceModel& SourceModel = StaticMesh.GetSourceModel(0);
+			FStaticMeshSourceModel& SourceModel = StaticMesh.GetSourceModel(LODIndex);
 			SourceModel.BuildSettings.bGenerateLightmapUVs = false;
 			SourceModel.BuildSettings.SrcLightmapIndex = 0;
 			SourceModel.BuildSettings.DstLightmapIndex = 0;
 			SourceModel.BuildSettings.bUseFullPrecisionUVs = false;
 		}
 
-		if (FMeshDescription* MeshDescription = StaticMesh.GetMeshDescription(0))
+		if (FMeshDescription* MeshDescription = StaticMesh.GetMeshDescription(LODIndex))
 		{
 			TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = FStaticMeshAttributes(*MeshDescription).GetVertexInstanceUVs();
 			if (VertexInstanceUVs.GetNumChannels() != ClampedDesiredChannelCount)
 			{
 				VertexInstanceUVs.SetNumChannels(ClampedDesiredChannelCount);
-				StaticMesh.CommitMeshDescription(0);
+				StaticMesh.CommitMeshDescription(LODIndex);
 			}
 		}
 
-		for (int32 Guard = 0; Guard < 8 && StaticMesh.GetNumUVChannels(0) > ClampedDesiredChannelCount; ++Guard)
+		for (int32 Guard = 0; Guard < 8 && StaticMesh.GetNumUVChannels(LODIndex) > ClampedDesiredChannelCount; ++Guard)
 		{
-			if (!StaticMesh.RemoveUVChannel(0, ClampedDesiredChannelCount))
+			if (!StaticMesh.RemoveUVChannel(LODIndex, ClampedDesiredChannelCount))
 			{
 				break;
 			}
 		}
 
 		StaticMesh.SetLightMapCoordinateIndex(0);
+	}
+
+	void KeepOnlyUvChannels(UStaticMesh& StaticMesh, const int32 DesiredChannelCount)
+	{
+		KeepOnlyUvChannels(StaticMesh, 0, DesiredChannelCount);
 	}
 
 	UStaticMesh* CreateStaticMeshAssetFromDescription(const UStaticMesh& SourceStaticMesh, const FMeshDescription& MeshDescription, UMaterialInterface* ProxyMaterial, FString& OutError)
@@ -2173,8 +2241,7 @@ namespace
 		ProxyMesh->InitResources();
 		ProxyMesh->SetLightingGuid();
 
-		const FName MaterialSlotName(TEXT("BillboardProxy"));
-		ProxyMesh->GetStaticMaterials().Add(FStaticMaterial(ProxyMaterial ? ProxyMaterial : UMaterial::GetDefaultMaterial(MD_Surface), MaterialSlotName, MaterialSlotName));
+		EnsureBillboardProxyMaterialSlot(*ProxyMesh, ProxyMaterial);
 		ProxyMesh->SetLightMapCoordinateIndex(0);
 		ProxyMesh->SetLightMapResolution(64);
 		ProxyMesh->SetImportVersion(EImportStaticMeshVersion::LastVersion);
@@ -2189,18 +2256,7 @@ namespace
 		BuildParams.bMarkPackageDirty = true;
 		ProxyMesh->BuildFromMeshDescriptions(MeshDescriptions, BuildParams);
 
-		if (ProxyMesh->GetNumSourceModels() > 0)
-		{
-			FStaticMeshSourceModel& SourceModel = ProxyMesh->GetSourceModel(0);
-			SourceModel.BuildSettings.bRecomputeNormals = false;
-			SourceModel.BuildSettings.bRecomputeTangents = false;
-			SourceModel.BuildSettings.bRemoveDegenerates = false;
-			SourceModel.BuildSettings.bGenerateLightmapUVs = false;
-			SourceModel.BuildSettings.SrcLightmapIndex = 0;
-			SourceModel.BuildSettings.DstLightmapIndex = 0;
-			SourceModel.BuildSettings.bUseFullPrecisionUVs = false;
-			SourceModel.BuildSettings.DistanceFieldResolutionScale = 0.0f;
-		}
+		ConfigureBillboardProxySourceModel(*ProxyMesh, 0);
 
 		KeepOnlyUvChannels(*ProxyMesh, 3);
 		ProxyMesh->PostEditChange();
@@ -2208,6 +2264,131 @@ namespace
 
 		FAssetRegistryModule::AssetCreated(ProxyMesh);
 		return ProxyMesh;
+	}
+
+	const TCHAR* GetMeshOutputModeText(const EBillboardCloudsMeshOutputMode OutputMode)
+	{
+		switch (OutputMode)
+		{
+		case EBillboardCloudsMeshOutputMode::AddToSourceMeshLOD:
+			return TEXT("added to source mesh LODs");
+		case EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD:
+			return TEXT("replaced source mesh LOD");
+		case EBillboardCloudsMeshOutputMode::SeparateMeshAsset:
+		default:
+			return TEXT("separate mesh asset");
+		}
+	}
+
+	void ClearSectionInfoForLOD(UStaticMesh& StaticMesh, const int32 LODIndex)
+	{
+		int32 SectionCount = StaticMesh.GetSectionInfoMap().GetSectionNumber(LODIndex);
+		for (int32 SectionIndex = 0; SectionIndex < SectionCount; ++SectionIndex)
+		{
+			StaticMesh.GetSectionInfoMap().Remove(LODIndex, SectionIndex);
+		}
+
+		SectionCount = StaticMesh.GetOriginalSectionInfoMap().GetSectionNumber(LODIndex);
+		for (int32 SectionIndex = 0; SectionIndex < SectionCount; ++SectionIndex)
+		{
+			StaticMesh.GetOriginalSectionInfoMap().Remove(LODIndex, SectionIndex);
+		}
+	}
+
+	bool InstallMeshDescriptionAsSourceMeshLOD(
+		UStaticMesh& SourceStaticMesh,
+		const FMeshDescription& MeshDescription,
+		UMaterialInterface* ProxyMaterial,
+		const EBillboardCloudsMeshOutputMode OutputMode,
+		const int32 RequestedReplaceLODIndex,
+		int32& OutLODIndex,
+		FString& OutError)
+	{
+		OutLODIndex = INDEX_NONE;
+		OutError.Reset();
+
+		if (OutputMode == EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD)
+		{
+			if (!SourceStaticMesh.IsSourceModelValid(RequestedReplaceLODIndex))
+			{
+				OutError = FString::Printf(
+					TEXT("Cannot replace LOD %d on %s because that source LOD does not exist."),
+					RequestedReplaceLODIndex,
+					*SourceStaticMesh.GetName());
+				return false;
+			}
+			OutLODIndex = RequestedReplaceLODIndex;
+		}
+		else if (OutputMode == EBillboardCloudsMeshOutputMode::AddToSourceMeshLOD)
+		{
+			OutLODIndex = SourceStaticMesh.GetNumSourceModels();
+		}
+		else
+		{
+			OutError = TEXT("InstallMeshDescriptionAsSourceMeshLOD requires a source-mesh LOD output mode.");
+			return false;
+		}
+
+		UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+		const bool bStaticMeshWasEdited = AssetEditorSubsystem && AssetEditorSubsystem->FindEditorForAsset(&SourceStaticMesh, false);
+		if (bStaticMeshWasEdited)
+		{
+			AssetEditorSubsystem->CloseAllEditorsForAsset(&SourceStaticMesh);
+		}
+
+		auto ReopenSourceMeshEditor = [&]()
+		{
+			if (bStaticMeshWasEdited && AssetEditorSubsystem)
+			{
+				AssetEditorSubsystem->OpenEditorForAsset(&SourceStaticMesh);
+			}
+		};
+
+		SourceStaticMesh.Modify();
+		SourceStaticMesh.PreEditChange(nullptr);
+
+		if (OutputMode == EBillboardCloudsMeshOutputMode::AddToSourceMeshLOD)
+		{
+			SourceStaticMesh.AddSourceModel();
+		}
+
+		if (!SourceStaticMesh.IsSourceModelValid(OutLODIndex))
+		{
+			OutError = FString::Printf(TEXT("Could not allocate source LOD %d on %s."), OutLODIndex, *SourceStaticMesh.GetName());
+			ReopenSourceMeshEditor();
+			return false;
+		}
+
+		const int32 MaterialIndex = EnsureBillboardProxyMaterialSlot(SourceStaticMesh, ProxyMaterial);
+		ClearSectionInfoForLOD(SourceStaticMesh, OutLODIndex);
+
+		FMeshDescription MeshDescriptionCopy = MeshDescription;
+		if (!SourceStaticMesh.CreateMeshDescription(OutLODIndex, MoveTemp(MeshDescriptionCopy)))
+		{
+			OutError = FString::Printf(TEXT("Could not create MeshDescription for source LOD %d on %s."), OutLODIndex, *SourceStaticMesh.GetName());
+			ReopenSourceMeshEditor();
+			return false;
+		}
+
+		UStaticMesh::FCommitMeshDescriptionParams CommitParams;
+		CommitParams.bMarkPackageDirty = true;
+		CommitParams.bUseHashAsGuid = false;
+		SourceStaticMesh.CommitMeshDescription(OutLODIndex, CommitParams);
+
+		ConfigureBillboardProxySourceModel(SourceStaticMesh, OutLODIndex, OutputMode == EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD);
+		KeepOnlyUvChannels(SourceStaticMesh, OutLODIndex, 3);
+
+		FMeshSectionInfo SectionInfo;
+		SectionInfo.MaterialIndex = MaterialIndex;
+		SourceStaticMesh.GetSectionInfoMap().Set(OutLODIndex, 0, SectionInfo);
+		SourceStaticMesh.GetOriginalSectionInfoMap().Set(OutLODIndex, 0, SectionInfo);
+		SourceStaticMesh.SetLightMapCoordinateIndex(0);
+		SourceStaticMesh.SetImportVersion(EImportStaticMeshVersion::LastVersion);
+		SourceStaticMesh.PostEditChange();
+		SourceStaticMesh.MarkPackageDirty();
+
+		ReopenSourceMeshEditor();
+		return true;
 	}
 
 	struct FProxyPlaneCoverBuildData
@@ -2246,6 +2427,8 @@ namespace
 		bool bSucceeded = false;
 		FString Report;
 		UStaticMesh* ProxyMesh = nullptr;
+		EBillboardCloudsMeshOutputMode MeshOutputMode = EBillboardCloudsMeshOutputMode::SeparateMeshAsset;
+		int32 SourceMeshLODIndex = INDEX_NONE;
 		UTexture2D* AtlasTexture = nullptr;
 		UTexture2D* NormalAtlasTexture = nullptr;
 		UTexture2D* MixAtlasTexture = nullptr;
@@ -2419,16 +2602,40 @@ namespace
 	}
 
 	bool CreateProxyMeshAssetBundle(
-		const UStaticMesh& StaticMesh,
+		UStaticMesh& StaticMesh,
+		const UBillboardCloudsEditorSettings& EditorSettings,
 		const FProxyMeshBuildData& MeshData,
 		const FProxyTextureBuildData& TextureData,
 		FProxyAssetBuildResult& OutResult,
 		FString& OutError)
 	{
-		OutResult.ProxyMesh = CreateStaticMeshAssetFromDescription(StaticMesh, MeshData.MeshDescription, TextureData.Material, OutError);
-		if (!OutResult.ProxyMesh)
+		OutResult.MeshOutputMode = EditorSettings.MeshOutputMode;
+
+		if (EditorSettings.MeshOutputMode == EBillboardCloudsMeshOutputMode::SeparateMeshAsset)
 		{
-			return false;
+			OutResult.ProxyMesh = CreateStaticMeshAssetFromDescription(StaticMesh, MeshData.MeshDescription, TextureData.Material, OutError);
+			if (!OutResult.ProxyMesh)
+			{
+				return false;
+			}
+		}
+		else
+		{
+			int32 InstalledLODIndex = INDEX_NONE;
+			if (!InstallMeshDescriptionAsSourceMeshLOD(
+				StaticMesh,
+				MeshData.MeshDescription,
+				TextureData.Material,
+				EditorSettings.MeshOutputMode,
+				FMath::Max(0, EditorSettings.ReplaceSourceLODIndex),
+				InstalledLODIndex,
+				OutError))
+			{
+				return false;
+			}
+
+			OutResult.ProxyMesh = &StaticMesh;
+			OutResult.SourceMeshLODIndex = InstalledLODIndex;
 		}
 
 		OutResult.AtlasTexture = TextureData.AtlasTexture;
@@ -2452,12 +2659,18 @@ namespace
 		const FString BaseAtlasPath = TextureData.AtlasTexture ? TextureData.AtlasTexture->GetPathName() : TEXT("disabled");
 		const FString NormalAtlasPath = TextureData.NormalAtlasTexture ? TextureData.NormalAtlasTexture->GetPathName() : TEXT("disabled");
 		const FString MixAtlasPath = TextureData.MixAtlasTexture ? TextureData.MixAtlasTexture->GetPathName() : TEXT("disabled");
+		const FString MeshOutputDetails = AssetResult.MeshOutputMode == EBillboardCloudsMeshOutputMode::SeparateMeshAsset
+			? FString::Printf(TEXT("%s: %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), *AssetResult.ProxyMesh->GetPathName())
+			: FString::Printf(TEXT("%s %d on %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), AssetResult.SourceMeshLODIndex, *AssetResult.ProxyMesh->GetPathName());
+		const TCHAR* MeshBuildPathDetails = AssetResult.MeshOutputMode == EBillboardCloudsMeshOutputMode::SeparateMeshAsset
+			? TEXT("BuildFromMeshDescriptions fast path")
+			: TEXT("source StaticMesh LOD MeshDescription commit");
 
 		return FString::Printf(
-			TEXT("%s%s\n  proxy asset: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, max padding=%d, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, readable material textures=%d, normal-map materials=%d, mix-texture materials=%d, alpha-mask materials=%d, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, crack-reduction refs=%d, alpha refs texture=%d, normal refs texture=%d, mix refs texture=%d, forced opaque=%d, shooting=%s\n  base/color opacity atlas: %s\n  normal atlas: %s, object-space XYZ, linear vector texture, same UV0/UV1 front/back layout as color atlas\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (copied from settings template; enabled parameters set: ColorOpacity, NormalMask, Mix)\n  normal source triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: BuildFromMeshDescriptions fast path, recompute normals/tangents off, distance fields off\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, max padding=%d, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, readable material textures=%d, normal-map materials=%d, mix-texture materials=%d, alpha-mask materials=%d, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, crack-reduction refs=%d, alpha refs texture=%d, normal refs texture=%d, mix refs texture=%d, forced opaque=%d, shooting=%s\n  base/color opacity atlas: %s\n  normal atlas: %s, object-space XYZ, linear vector texture, same UV0/UV1 front/back layout as color atlas\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (copied from settings template; enabled parameters set: ColorOpacity, NormalMask, Mix)\n  normal source triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, distance fields off\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
-			*AssetResult.ProxyMesh->GetPathName(),
+			*MeshOutputDetails,
 			MeshData.Stats.PlaneCount,
 			MeshData.Stats.QuadCount,
 			MeshData.Stats.TriangleCount,
@@ -2489,11 +2702,12 @@ namespace
 			MeshData.Stats.SourceShadingNormalTriangleCount,
 			MeshData.Stats.SourceTriangleCount,
 			MeshData.Stats.AveragePlaneToShadingNormalDot,
-			MeshData.Stats.AveragePlaneToShadingNormalAngleDegrees);
+			MeshData.Stats.AveragePlaneToShadingNormalAngleDegrees,
+			MeshBuildPathDetails);
 	}
 
 	FProxyAssetBuildResult BuildBillboardCloudProxyAsset(
-		const UStaticMesh& StaticMesh,
+		UStaticMesh& StaticMesh,
 		const UBillboardCloudsEditorSettings& EditorSettings)
 	{
 		FString Error;
@@ -2516,7 +2730,7 @@ namespace
 		}
 
 		FProxyAssetBuildResult Result;
-		if (!CreateProxyMeshAssetBundle(StaticMesh, MeshData, TextureData, Result, Error))
+		if (!CreateProxyMeshAssetBundle(StaticMesh, EditorSettings, MeshData, TextureData, Result, Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
@@ -2578,7 +2792,7 @@ void FBillboardCloudsEditorModule::RegisterMenus()
 	Section.AddMenuEntry(
 		"BillboardCloudsCreatePlaneProxyMeshes",
 		LOCTEXT("CreatePlaneProxyMeshesLabel", "Create Plane Proxy Meshes"),
-		LOCTEXT("CreatePlaneProxyMeshesTooltip", "Create Static Mesh assets from the selected Billboard Clouds paper-style plane cover."),
+		LOCTEXT("CreatePlaneProxyMeshesTooltip", "Create or install Static Mesh proxy geometry from the selected Billboard Clouds plane cover."),
 		FSlateIcon(),
 		FToolMenuExecuteAction::CreateRaw(this, &FBillboardCloudsEditorModule::ExecuteCreatePlaneProxyMeshes)
 	);
