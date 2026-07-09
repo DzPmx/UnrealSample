@@ -97,6 +97,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Trunk Cards", meta = (ClampMin = "2", ClampMax = "4", EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Number of vertical trunk cross-card planes. 2 is a cross card, 3 is a three-way star, 4 is a four-way star."))
 	int32 TrunkCardPlaneCount = 4;
 
+	UPROPERTY(config, EditAnywhere, Category = "Trunk Cards", meta = (EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Give trunk cross-card atlas tiles a fixed 2x resolution weight during packing. The atlas resolution stays fixed, so foliage billboard tiles are compressed to make room."))
+	bool bBoostTrunkCardAtlasResolution = true;
+
 	UPROPERTY(config, EditAnywhere, Category = "Trunk Cards", meta = (EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Material instance or parent material name keywords used to route triangles into fixed vertical trunk cross-card planes instead of the selected Billboard Clouds technique. Empty means no triangles are routed."))
 	TArray<FString> TrunkCardMaterialKeywords;
 
@@ -108,6 +111,15 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "256", ClampMax = "8192", ToolTip = "Generated square atlas resolution. Billboard tile sizes are automatically scaled and packed to maximize use of this texture."))
 	int32 TextureAtlasResolution = 4096;
+
+	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "256", ClampMax = "8192", ToolTip = "Resolution used for per-material UV-space baking before projecting evaluated source material outputs into the billboard atlas. Higher values preserve complex material graphs better but increase bake cost per material slot."))
+	int32 SourceMaterialBakeResolution = 2048;
+
+	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ToolTip = "Run a pre-bake alpha pass and crop each billboard tile rectangle to the alpha-painted outer bounds before final packing. This improves per-tile usage by removing transparent outer borders; it does not fill interior alpha holes."))
+	bool bEnableAlphaAwareTileCrop = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "0", ClampMax = "16", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra source-tile pixels kept around the alpha-painted bounds when alpha-aware tile crop is enabled."))
+	int32 AlphaAwareTileCropGuardPixels = 2;
 
 	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))
 	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::Off;

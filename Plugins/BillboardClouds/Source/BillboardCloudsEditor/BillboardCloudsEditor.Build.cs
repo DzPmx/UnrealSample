@@ -23,14 +23,12 @@ public class BillboardCloudsEditor : ModuleRules
 				"SlateCore",
 				"UnrealEd",
 				"ToolMenus",
-				"Projects",
 				"AssetTools",
 				"AssetRegistry",
 				"ContentBrowser",
 				"MeshDescription",
 				"StaticMeshDescription",
-				"GeometryCore",
-				"MeshConversion",
+				"MaterialBaking",
 			}
 		);
 	}

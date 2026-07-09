@@ -34,16 +34,12 @@ namespace UE::BillboardClouds
 		FVector Vertices[3] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 		FVector2f UVs[3] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
 		FVector VertexNormals[3] = { FVector::UpVector, FVector::UpVector, FVector::UpVector };
-		FVector VertexTangents[3] = { FVector::ForwardVector, FVector::ForwardVector, FVector::ForwardVector };
-		float VertexBinormalSigns[3] = { 1.0f, 1.0f, 1.0f };
 		FVector Normal = FVector::UpVector;
 		FVector ShadingNormal = FVector::UpVector;
 		double Area = 0.0;
 		int32 MaterialIndex = INDEX_NONE;
 		bool bHasUVs = false;
 		bool bHasSourceShadingNormal = false;
-		bool bHasSourceVertexNormals = false;
-		bool bHasSourceTangents = false;
 		bool bTrunkCardOnly = false;
 	};
 
@@ -84,7 +80,11 @@ namespace UE::BillboardClouds
 		int32 AdaptiveRefinementDepth = 10;
 		int32 TextureTilePaddingPixels = 2;
 		int32 TextureAtlasResolution = 4096;
+		int32 SourceMaterialBakeResolution = 2048;
 		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;
+		bool bBoostTrunkCardAtlasResolution = true;
+		bool bEnableAlphaAwareTileCrop = false;
+		int32 AlphaAwareTileCropGuardPixels = 2;
 	};
 
 	struct FPlaneCoverResult
@@ -164,6 +164,15 @@ namespace UE::BillboardClouds
 		TArray<FCrackReductionProjection> CrackReductionProjections;
 	};
 
+	struct FPlaneProxyTileCrop
+	{
+		bool bEnabled = false;
+		double MinUFraction = 0.0;
+		double MaxUFraction = 1.0;
+		double MinVFraction = 0.0;
+		double MaxVFraction = 1.0;
+	};
+
 	bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError);
 	FVector ProjectPointToPlane(const FVector& Point, const FVector& PlaneNormal, double PlaneRho);
 	bool IsPointWithinPlaneError(const FVector& Point, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
@@ -173,5 +182,6 @@ namespace UE::BillboardClouds
 	FPlaneCoverResult BuildKMeansPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
 	FPlaneCoverResult BuildPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
 	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverResult& Result, const FPlaneCoverSettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
+	bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const TArray<FPlaneProxyTileCrop>& TileCrops, const FPlaneCoverSettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);
 	FString SummarizePlaneCover(const FString& MeshName, const FPlaneCoverSettings& Settings, const FPlaneCoverResult& Result);
 }

@@ -15,6 +15,7 @@ namespace UE::BillboardClouds
 		constexpr double DegenerateTriangleTolerance = 1.0e-8;
 		constexpr double RhoRangePadding = 1.0e-4;
 		constexpr double PaperPenaltyWeight = 10.0;
+		constexpr double TrunkCardAtlasResolutionScale = 2.0;
 
 		struct FRhoBinAccumulator
 		{
@@ -868,7 +869,12 @@ namespace UE::BillboardClouds
 			double MaxPlaneDimension = 1.0;
 			for (const FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
 			{
-				MaxPlaneDimension = FMath::Max(MaxPlaneDimension, FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, PreparedPlane.MaxV - PreparedPlane.MinV));
+				const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PreparedPlane.bIsTrunkCard
+					? TrunkCardAtlasResolutionScale
+					: 1.0;
+				MaxPlaneDimension = FMath::Max(
+					MaxPlaneDimension,
+					FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, PreparedPlane.MaxV - PreparedPlane.MinV) * AtlasResolutionScale);
 			}
 
 			auto BuildPackRects = [&](const double PixelsPerUnit, TArray<FAtlasPackRect>& OutPackRects)
@@ -877,8 +883,11 @@ namespace UE::BillboardClouds
 				for (int32 PlaneIndex = 0; PlaneIndex < PreparedPlanes.Num(); ++PlaneIndex)
 				{
 					FPreparedProxyPlane& PreparedPlane = PreparedPlanes[PlaneIndex];
-					const double PlaneWidth = FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, 1.0);
-					const double PlaneHeight = FMath::Max(PreparedPlane.MaxV - PreparedPlane.MinV, 1.0);
+					const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PreparedPlane.bIsTrunkCard
+						? TrunkCardAtlasResolutionScale
+						: 1.0;
+					const double PlaneWidth = FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, 1.0) * AtlasResolutionScale;
+					const double PlaneHeight = FMath::Max(PreparedPlane.MaxV - PreparedPlane.MinV, 1.0) * AtlasResolutionScale;
 					const int32 InteriorWidth = FMath::Max(1, FMath::CeilToInt(PlaneWidth * PixelsPerUnit));
 					const int32 InteriorHeight = FMath::Max(1, FMath::CeilToInt(PlaneHeight * PixelsPerUnit));
 					const int32 EffectivePadding = FMath::Clamp(RequestedPadding, 0, FMath::Max(0, (FMath::Min(InteriorWidth, InteriorHeight) - 1) / 2));
@@ -990,6 +999,169 @@ namespace UE::BillboardClouds
 
 				OutLargestInteriorDimension = FMath::Max(OutLargestInteriorDimension, FMath::Max(PreparedPlane.AtlasTileSize.X, PreparedPlane.AtlasTileSize.Y));
 				OutLargestPadding = FMath::Max(OutLargestPadding, PreparedPlane.AtlasTilePaddingPixels);
+			}
+
+			return true;
+		}
+
+		void UpdatePlaneInfoCornersFromBounds(FPlaneProxyPlaneInfo& PlaneInfo)
+		{
+			const FVector PlaneOrigin = PlaneInfo.Normal * PlaneInfo.Rho;
+			PlaneInfo.Corners[0] = PlaneOrigin + PlaneInfo.AxisU * PlaneInfo.MinU + PlaneInfo.AxisV * PlaneInfo.MinV;
+			PlaneInfo.Corners[1] = PlaneOrigin + PlaneInfo.AxisU * PlaneInfo.MaxU + PlaneInfo.AxisV * PlaneInfo.MinV;
+			PlaneInfo.Corners[2] = PlaneOrigin + PlaneInfo.AxisU * PlaneInfo.MaxU + PlaneInfo.AxisV * PlaneInfo.MaxV;
+			PlaneInfo.Corners[3] = PlaneOrigin + PlaneInfo.AxisU * PlaneInfo.MinU + PlaneInfo.AxisV * PlaneInfo.MaxV;
+		}
+
+		bool PackPlaneInfosIntoAtlas(
+			TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
+			const FPlaneCoverSettings& Settings,
+			int32& OutAtlasWidth,
+			int32& OutAtlasHeight,
+			int32& OutLargestInteriorDimension,
+			int32& OutLargestPadding)
+		{
+			if (PlaneInfos.IsEmpty())
+			{
+				return false;
+			}
+
+			const int32 RequestedPadding = FMath::Clamp(Settings.TextureTilePaddingPixels, 0, 128);
+			const int32 AtlasResolution = FMath::Clamp(Settings.TextureAtlasResolution, 256, 8192);
+
+			double MaxPlaneDimension = 1.0;
+			for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+			{
+				const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PlaneInfo.bIsTrunkCard
+					? TrunkCardAtlasResolutionScale
+					: 1.0;
+				MaxPlaneDimension = FMath::Max(
+					MaxPlaneDimension,
+					FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, PlaneInfo.MaxV - PlaneInfo.MinV) * AtlasResolutionScale);
+			}
+
+			auto BuildPackRects = [&](const double PixelsPerUnit, TArray<FAtlasPackRect>& OutPackRects)
+			{
+				OutPackRects.Reset();
+				for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
+				{
+					FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
+					const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PlaneInfo.bIsTrunkCard
+						? TrunkCardAtlasResolutionScale
+						: 1.0;
+					const double PlaneWidth = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, 1.0) * AtlasResolutionScale;
+					const double PlaneHeight = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, 1.0) * AtlasResolutionScale;
+					const int32 InteriorWidth = FMath::Max(1, FMath::CeilToInt(PlaneWidth * PixelsPerUnit));
+					const int32 InteriorHeight = FMath::Max(1, FMath::CeilToInt(PlaneHeight * PixelsPerUnit));
+					const int32 EffectivePadding = FMath::Clamp(RequestedPadding, 0, FMath::Max(0, (FMath::Min(InteriorWidth, InteriorHeight) - 1) / 2));
+
+					FAtlasPackRect FrontRect;
+					FrontRect.PlaneIndex = PlaneIndex;
+					FrontRect.bBackFace = false;
+					FrontRect.InteriorSize = FIntPoint(InteriorWidth, InteriorHeight);
+					FrontRect.Padding = EffectivePadding;
+					FrontRect.PitchSize = FIntPoint(InteriorWidth + EffectivePadding * 2, InteriorHeight + EffectivePadding * 2);
+					OutPackRects.Add(FrontRect);
+
+					if (PlaneInfo.bHasBackFaceAtlas)
+					{
+						FAtlasPackRect BackRect = FrontRect;
+						BackRect.bBackFace = true;
+						OutPackRects.Add(BackRect);
+					}
+				}
+			};
+
+			TArray<FAtlasPackRect> CandidatePackRects;
+			TArray<FAtlasPackRect> BestPackRects;
+			TArray<FIntPoint> CandidateInteriorMins;
+			TArray<FIntPoint> BestInteriorMins;
+			double LowScale = 0.0;
+			double HighScale = static_cast<double>(AtlasResolution) / MaxPlaneDimension;
+			bool bFoundPack = false;
+			for (int32 Iteration = 0; Iteration < 28; ++Iteration)
+			{
+				const double MidScale = 0.5 * (LowScale + HighScale);
+				BuildPackRects(MidScale, CandidatePackRects);
+				if (TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
+				{
+					LowScale = MidScale;
+					BestPackRects = CandidatePackRects;
+					BestInteriorMins = CandidateInteriorMins;
+					bFoundPack = true;
+				}
+				else
+				{
+					HighScale = MidScale;
+				}
+			}
+
+			if (!bFoundPack)
+			{
+				BuildPackRects(0.0, CandidatePackRects);
+				if (!TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
+				{
+					return false;
+				}
+				BestPackRects = CandidatePackRects;
+				BestInteriorMins = CandidateInteriorMins;
+			}
+
+			OutAtlasWidth = AtlasResolution;
+			OutAtlasHeight = AtlasResolution;
+			OutLargestInteriorDimension = 0;
+			OutLargestPadding = 0;
+
+			for (FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+			{
+				PlaneInfo.AtlasPixelMin = FIntPoint::ZeroValue;
+				PlaneInfo.BackAtlasPixelMin = FIntPoint::ZeroValue;
+				PlaneInfo.AtlasTileSize = FIntPoint::ZeroValue;
+				PlaneInfo.BackAtlasTileSize = FIntPoint::ZeroValue;
+				PlaneInfo.AtlasTileResolution = 0;
+				PlaneInfo.AtlasTilePaddingPixels = 0;
+			}
+
+			for (int32 RectIndex = 0; RectIndex < BestPackRects.Num(); ++RectIndex)
+			{
+				const FAtlasPackRect& PackRect = BestPackRects[RectIndex];
+				if (!PlaneInfos.IsValidIndex(PackRect.PlaneIndex))
+				{
+					continue;
+				}
+
+				FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PackRect.PlaneIndex];
+				PlaneInfo.AtlasTilePaddingPixels = FMath::Max(PlaneInfo.AtlasTilePaddingPixels, PackRect.Padding);
+				if (PackRect.bBackFace)
+				{
+					PlaneInfo.BackAtlasPixelMin = BestInteriorMins[RectIndex];
+					PlaneInfo.BackAtlasTileSize = PackRect.InteriorSize;
+				}
+				else
+				{
+					PlaneInfo.AtlasPixelMin = BestInteriorMins[RectIndex];
+					PlaneInfo.AtlasTileSize = PackRect.InteriorSize;
+				}
+			}
+
+			for (FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+			{
+				SetAtlasUVsFromTile(PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize, OutAtlasWidth, OutAtlasHeight, PlaneInfo.AtlasUVs);
+				if (PlaneInfo.bHasBackFaceAtlas)
+				{
+					SetAtlasUVsFromTile(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize, OutAtlasWidth, OutAtlasHeight, PlaneInfo.BackAtlasUVs);
+				}
+				else
+				{
+					for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
+					{
+						PlaneInfo.BackAtlasUVs[CornerIndex] = PlaneInfo.AtlasUVs[CornerIndex];
+					}
+				}
+
+				PlaneInfo.AtlasTileResolution = FMath::Min(PlaneInfo.AtlasTileSize.X, PlaneInfo.AtlasTileSize.Y);
+				OutLargestInteriorDimension = FMath::Max(OutLargestInteriorDimension, FMath::Max(PlaneInfo.AtlasTileSize.X, PlaneInfo.AtlasTileSize.Y));
+				OutLargestPadding = FMath::Max(OutLargestPadding, PlaneInfo.AtlasTilePaddingPixels);
 			}
 
 			return true;
@@ -2268,7 +2440,6 @@ namespace UE::BillboardClouds
 					}
 
 					FSourceTriangle Triangle;
-					bool bAllTangentsValid = true;
 					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
 					{
 						const uint32 RenderVertexIndex = VertexIndices[VertexIndex];
@@ -2278,27 +2449,15 @@ namespace UE::BillboardClouds
 							Triangle.UVs[VertexIndex] = StaticMeshVertexBuffer.GetVertexUV(RenderVertexIndex, 0);
 						}
 
-						const FVector4f RenderTangentX4 = StaticMeshVertexBuffer.VertexTangentX(RenderVertexIndex);
-						const FVector3f RenderTangentY3 = StaticMeshVertexBuffer.VertexTangentY(RenderVertexIndex);
 						const FVector4f RenderTangentZ4 = StaticMeshVertexBuffer.VertexTangentZ(RenderVertexIndex);
 						FVector SourceNormal(RenderTangentZ4.X, RenderTangentZ4.Y, RenderTangentZ4.Z);
-						FVector SourceTangent(RenderTangentX4.X, RenderTangentX4.Y, RenderTangentX4.Z);
-						const FVector SourceBinormal(RenderTangentY3.X, RenderTangentY3.Y, RenderTangentY3.Z);
 						SourceNormal = SourceNormal.GetSafeNormal();
 						if (SourceNormal.IsNearlyZero())
 						{
 							SourceNormal = FVector::UpVector;
 						}
-						SourceTangent = (SourceTangent - SourceNormal * FVector::DotProduct(SourceTangent, SourceNormal)).GetSafeNormal();
-						if (SourceTangent.IsNearlyZero())
-						{
-							bAllTangentsValid = false;
-							SourceTangent = FVector::ForwardVector;
-						}
 
 						Triangle.VertexNormals[VertexIndex] = SourceNormal;
-						Triangle.VertexTangents[VertexIndex] = SourceTangent;
-						Triangle.VertexBinormalSigns[VertexIndex] = FVector::DotProduct(FVector::CrossProduct(SourceNormal, SourceTangent), SourceBinormal) >= 0.0 ? 1.0f : -1.0f;
 					}
 
 					const FVector Edge01 = Triangle.Vertices[1] - Triangle.Vertices[0];
@@ -2316,8 +2475,6 @@ namespace UE::BillboardClouds
 					Triangle.MaterialIndex = Section.MaterialIndex;
 					Triangle.bHasUVs = bHasUVs;
 					Triangle.bHasSourceShadingNormal = true;
-					Triangle.bHasSourceVertexNormals = true;
-					Triangle.bHasSourceTangents = bAllTangentsValid;
 					OutTriangles.Add(Triangle);
 				}
 			}
@@ -2352,24 +2509,12 @@ namespace UE::BillboardClouds
 		const TVertexAttributesConstRef<FVector3f> VertexPositions = MeshDescription->GetVertexPositions();
 		const FStaticMeshConstAttributes MeshAttributes(*MeshDescription);
 		const bool bHasVertexInstanceNormals = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Normal);
-		const bool bHasVertexInstanceTangents = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Tangent);
-		const bool bHasVertexInstanceBinormalSigns = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::BinormalSign);
 		const bool bHasVertexInstanceUVs = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::TextureCoordinate);
 		const bool bHasPolygonGroupMaterialSlots = MeshDescription->PolygonGroupAttributes().HasAttribute(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
 		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceNormals;
 		if (bHasVertexInstanceNormals)
 		{
 			VertexInstanceNormals = MeshAttributes.GetVertexInstanceNormals();
-		}
-		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceTangents;
-		if (bHasVertexInstanceTangents)
-		{
-			VertexInstanceTangents = MeshAttributes.GetVertexInstanceTangents();
-		}
-		TVertexInstanceAttributesConstRef<float> VertexInstanceBinormalSigns;
-		if (bHasVertexInstanceBinormalSigns)
-		{
-			VertexInstanceBinormalSigns = MeshAttributes.GetVertexInstanceBinormalSigns();
 		}
 		TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs;
 		if (bHasVertexInstanceUVs)
@@ -2411,11 +2556,6 @@ namespace UE::BillboardClouds
 			{
 				VertexNormal = Triangle.Normal;
 			}
-			for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
-			{
-				Triangle.VertexTangents[VertexIndex] = Edge01.GetSafeNormal();
-				Triangle.VertexBinormalSigns[VertexIndex] = 1.0f;
-			}
 			if (bHasVertexInstanceNormals)
 			{
 				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
@@ -2437,33 +2577,7 @@ namespace UE::BillboardClouds
 					{
 						Triangle.ShadingNormal = AveragedNormal.GetSafeNormal();
 						Triangle.bHasSourceShadingNormal = true;
-						Triangle.bHasSourceVertexNormals = true;
 					}
-				}
-			}
-			if (bHasVertexInstanceTangents && bHasVertexInstanceBinormalSigns)
-			{
-				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
-				if (TriangleVertexInstanceIDs.Num() == 3)
-				{
-					bool bAllTangentsValid = true;
-					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
-					{
-						const FVertexInstanceID VertexInstanceID = TriangleVertexInstanceIDs[VertexIndex];
-						FVector SourceTangent = FVector(VertexInstanceTangents[VertexInstanceID]);
-						const FVector SourceNormal = Triangle.VertexNormals[VertexIndex].GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Triangle.Normal);
-						SourceTangent = (SourceTangent - SourceNormal * FVector::DotProduct(SourceTangent, SourceNormal)).GetSafeNormal();
-						if (SourceTangent.IsNearlyZero())
-						{
-							bAllTangentsValid = false;
-							break;
-						}
-
-						Triangle.VertexTangents[VertexIndex] = SourceTangent;
-						Triangle.VertexBinormalSigns[VertexIndex] = VertexInstanceBinormalSigns[VertexInstanceID] >= 0.0f ? 1.0f : -1.0f;
-					}
-
-					Triangle.bHasSourceTangents = bAllTangentsValid;
 				}
 			}
 			if (bHasVertexInstanceUVs && VertexInstanceUVs.GetNumChannels() > 0)
@@ -4318,6 +4432,126 @@ namespace UE::BillboardClouds
 
 		OutStats.AveragePlaneToShadingNormalDot = PlaneToShadingNormalDotSum / static_cast<double>(OutStats.PlaneCount);
 		OutStats.AveragePlaneToShadingNormalAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(OutStats.AveragePlaneToShadingNormalDot, -1.0, 1.0)));
+
+		return true;
+	}
+
+	bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(
+		TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
+		const TArray<FPlaneProxyTileCrop>& TileCrops,
+		const FPlaneCoverSettings& Settings,
+		FMeshDescription& OutMeshDescription,
+		FPlaneProxyMeshStats& InOutStats,
+		FString& OutError)
+	{
+		OutError.Reset();
+		if (PlaneInfos.IsEmpty())
+		{
+			OutError = TEXT("No proxy planes are available for alpha-aware tile crop.");
+			return false;
+		}
+		if (TileCrops.Num() != PlaneInfos.Num())
+		{
+			OutError = TEXT("Alpha-aware tile crop count does not match proxy plane count.");
+			return false;
+		}
+
+		bool bAppliedAnyCrop = false;
+		for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
+		{
+			FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
+			const FPlaneProxyTileCrop& Crop = TileCrops[PlaneIndex];
+			if (!Crop.bEnabled)
+			{
+				UpdatePlaneInfoCornersFromBounds(PlaneInfo);
+				continue;
+			}
+
+			const double MinUFraction = FMath::Clamp(Crop.MinUFraction, 0.0, 1.0);
+			const double MaxUFraction = FMath::Clamp(Crop.MaxUFraction, 0.0, 1.0);
+			const double MinVFraction = FMath::Clamp(Crop.MinVFraction, 0.0, 1.0);
+			const double MaxVFraction = FMath::Clamp(Crop.MaxVFraction, 0.0, 1.0);
+			if (MaxUFraction <= MinUFraction || MaxVFraction <= MinVFraction)
+			{
+				UpdatePlaneInfoCornersFromBounds(PlaneInfo);
+				continue;
+			}
+
+			const double OldMinU = PlaneInfo.MinU;
+			const double OldMaxU = PlaneInfo.MaxU;
+			const double OldMinV = PlaneInfo.MinV;
+			const double OldMaxV = PlaneInfo.MaxV;
+			PlaneInfo.MinU = FMath::Lerp(OldMinU, OldMaxU, MinUFraction);
+			PlaneInfo.MaxU = FMath::Lerp(OldMinU, OldMaxU, MaxUFraction);
+			PlaneInfo.MinV = FMath::Lerp(OldMinV, OldMaxV, MinVFraction);
+			PlaneInfo.MaxV = FMath::Lerp(OldMinV, OldMaxV, MaxVFraction);
+			UpdatePlaneInfoCornersFromBounds(PlaneInfo);
+			bAppliedAnyCrop = true;
+		}
+
+		if (!bAppliedAnyCrop)
+		{
+			return true;
+		}
+
+		if (!PackPlaneInfosIntoAtlas(
+			PlaneInfos,
+			Settings,
+			InOutStats.AtlasWidth,
+			InOutStats.AtlasHeight,
+			InOutStats.AtlasTileResolution,
+			InOutStats.AtlasTilePaddingPixels))
+		{
+			OutError = TEXT("Could not repack alpha-cropped billboard texture tiles into the configured atlas resolution.");
+			return false;
+		}
+
+		OutMeshDescription.Empty();
+		FStaticMeshAttributes Attributes(OutMeshDescription);
+		Attributes.Register();
+		Attributes.RegisterTriangleNormalAndTangentAttributes();
+
+		TVertexAttributesRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
+		TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
+		TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
+		TVertexInstanceAttributesRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
+		TVertexInstanceAttributesRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
+		TTriangleAttributesRef<FVector3f> TriangleNormals = Attributes.GetTriangleNormals();
+		TTriangleAttributesRef<FVector3f> TriangleTangents = Attributes.GetTriangleTangents();
+		TTriangleAttributesRef<FVector3f> TriangleBinormals = Attributes.GetTriangleBinormals();
+		TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
+		TPolygonGroupAttributesRef<FName> PolygonGroupImportedMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
+
+		VertexInstanceUVs.SetNumChannels(3);
+		OutMeshDescription.ReserveNewVertices(PlaneInfos.Num() * 4);
+		OutMeshDescription.ReserveNewVertexInstances(PlaneInfos.Num() * 4);
+		OutMeshDescription.ReserveNewPolygons(PlaneInfos.Num());
+
+		const FPolygonGroupID PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
+		PolygonGroupImportedMaterialSlotNames[PolygonGroupID] = TEXT("BillboardProxy");
+
+		InOutStats.PlaneCount = 0;
+		InOutStats.QuadCount = 0;
+		for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			const FVector2f MaskUV = PlaneInfo.bIsTrunkCard
+				? FVector2f(0.0f, 0.0f)
+				: FVector2f(1.0f, 0.0f);
+			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PlaneInfo.Corners, PlaneInfo.AtlasUVs, PlaneInfo.BackAtlasUVs, MaskUV, PlaneInfo.ShadingNormal))
+			{
+				continue;
+			}
+
+			++InOutStats.PlaneCount;
+			++InOutStats.QuadCount;
+		}
+
+		InOutStats.TriangleCount = OutMeshDescription.Triangles().Num();
+		if (InOutStats.PlaneCount == 0)
+		{
+			OutError = TEXT("No alpha-cropped proxy planes could be rebuilt.");
+			return false;
+		}
 
 		return true;
 	}

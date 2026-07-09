@@ -22,8 +22,10 @@ V1.0 focuses on an editor-side, asset-generation workflow:
 - Optional trunk/branch cross-card pass.
 - Optional front/back atlas baking for two-sided planes.
 - Fixed atlas resolution with automatic tile scaling and rectangle packing.
+- Optional alpha-aware tile crop that removes transparent outer borders before final packing.
 - RGB padding and tile-border padding to reduce dark transparent edges.
-- Render-data normal extraction, object-space normal atlas baking, and source normal-map baking when the source material explicitly connects a normal texture.
+- Unreal material-output baking for source BaseColor, OpacityMask, Occlusion, Roughness, Metallic, and Emission before billboard atlas projection.
+- Render-data normal extraction and object-space normal atlas baking.
 - User-provided material instance workflow. The plugin copies your configured material instance and assigns generated textures to known texture parameters.
 - Mesh output modes:
   - separate proxy Static Mesh asset
@@ -93,10 +95,15 @@ Settings:
   - `2` = cross card
   - `3` = three-way star
   - `4` = four-way star
+- `Boost Trunk Card Atlas Resolution`
+  - gives trunk cross-card atlas tiles a fixed `2x` resolution weight during packing
+  - disable this to use the same atlas resolution weight as foliage billboard tiles
 - `Trunk Card Material Keywords`
   - matches material instance names and parent material names
 
 Matched trunk/branch triangles are fully excluded from the Billboard Clouds clustering input. Trunk cards are centered at the source mesh origin rather than only the trunk bounds center.
+
+When `Boost Trunk Card Atlas Resolution` is enabled, trunk card tile resolution is weighted at `2x` during packing. The final atlas resolution remains fixed by `Texture Atlas Resolution`; the packer gives trunk cards more pixels and correspondingly compresses foliage billboard tiles.
 
 ## Two-Sided Baking
 
@@ -150,9 +157,15 @@ Parameter: `ColorOpacity`
 Channels:
 
 - RGB = source base color
-- A = source opacity/cutout mask
+- A = evaluated source material `OpacityMask`
 
 Default: enabled.
+
+BaseColor/Opacity bake behavior:
+
+- Uses Unreal material baking to evaluate the source material's final `BaseColor` and `OpacityMask` outputs in source UV space when available.
+- This supports material functions, Material Attributes, layered blends, parameter-driven mixes, and other graph logic that cannot be resolved by directly reading source textures.
+- If material-output baking is unavailable, the bake falls back to direct texture/parameter reads.
 
 ### NormalMask
 
@@ -166,9 +179,12 @@ Default: enabled.
 
 Normal bake behavior:
 
-- Uses Static Mesh render-data vertex normals/tangents when available.
-- If the source material explicitly connects a normal texture to the material Normal input, that tangent-space normal is sampled and converted to object space.
-- If no explicit normal texture is connected, the bake falls back to source render normals.
+- Uses Static Mesh render-data vertex normals when available.
+- The atlas uses the source Static Mesh LOD render-data normals (`VertexTangentZ`) as ground truth. Normal textures and evaluated material normal output are intentionally ignored.
+- Source render normals are interpolated and written through the same atlas rasterization, opacity clipping, and two-sided slice resolve path as `ColorOpacity`.
+- Atlas outputs use two-sided slice resolve: front and back atlas tiles both allow source fragments from either side of the card plane, then choose the fragment nearest to the card plane inside the clipped slice.
+- For source materials marked two-sided, back-facing source fragments are flipped relative to the current card capture direction before being written to `NormalMask`.
+- The tool intentionally does not use normal textures or Unreal material-output baking for `Normal` in this path; `NormalMask` is a source render-data normal atlas.
 
 ### Mix
 
@@ -187,7 +203,8 @@ Default: disabled.
 
 Mix bake behavior:
 
-- Reads directly connected texture samples or texture parameters from the source material properties when available.
+- Uses Unreal material baking to evaluate source material `AmbientOcclusion`, `Roughness`, `Metallic`, and `EmissiveColor` outputs in source UV space when available.
+- Falls back to directly connected texture samples or common scalar/vector parameters when material-output baking is unavailable.
 - Uses fallback defaults when no readable source is found:
   - Occlusion = `1.0`
   - Roughness = `0.5`
@@ -195,6 +212,17 @@ Mix bake behavior:
   - Emission = `0.0`
 
 The generated Mix texture is linear mask data.
+
+## Alpha-Aware Tile Crop
+
+Setting:
+
+- `Enable Alpha Aware Tile Crop`
+- `Alpha Aware Tile Crop Guard Pixels`
+
+When enabled, the tool runs a pre-bake alpha pass, finds the painted alpha bounds of each tile, crops the proxy plane rectangle to that outer painted region, repacks the atlas, rebuilds the proxy mesh, and then runs the final bake.
+
+This improves per-tile usage when a tile has transparent outer borders. It does not fill or reuse transparent holes inside a tile, because atlas packing still packs rectangular billboard tiles.
 
 ## Usage
 
@@ -275,12 +303,20 @@ When replacing an existing LOD, the existing LOD ScreenSize is preserved.
   - Routes matching trunk/branch material triangles into fixed cross-card planes.
 - `Trunk Card Plane Count`
   - Number of trunk planes, from `2` to `4`.
+- `Boost Trunk Card Atlas Resolution`
+  - Gives trunk cross-card atlas tiles a fixed `2x` packing weight.
 - `Trunk Card Material Keywords`
   - Material-name keywords used to identify trunk/branch triangles.
 - `Texture Atlas Resolution`
   - Fixed square atlas resolution.
+- `Source Material Bake Resolution`
+  - Per-material UV-space bake resolution used before projecting evaluated source material outputs into the billboard atlas.
 - `Texture Tile Padding Pixels`
   - Transparent padding around each tile.
+- `Enable Alpha Aware Tile Crop`
+  - Crops transparent outer borders from each tile before final atlas packing.
+- `Alpha Aware Tile Crop Guard Pixels`
+  - Extra pixels retained around the alpha-painted bounds during crop.
 - `Double Sided Bake Mode`
   - Controls which planes receive separate back-side atlas tiles.
 - `Bake Base Color Opacity Atlas`
@@ -304,6 +340,7 @@ The tool report includes:
 - packed tile usage
 - front/back tile count
 - painted pixel count
+- alpha-aware cropped plane count
 - readable source texture count
 - alpha policy
 - normal source information

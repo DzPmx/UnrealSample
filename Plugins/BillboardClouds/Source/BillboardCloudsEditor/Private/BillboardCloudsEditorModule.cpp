@@ -9,6 +9,7 @@
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
+#include "IMaterialBakingModule.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionTextureSample.h"
 #include "Materials/MaterialExpressionTextureSampleParameter.h"
@@ -20,9 +21,9 @@
 #include "Misc/PackageName.h"
 #include "Misc/ScopedSlowTask.h"
 #include "MeshDescription.h"
+#include "MaterialBakingStructures.h"
 #include "StaticMeshAttributes.h"
 #include "Subsystems/AssetEditorSubsystem.h"
-#include "TextureResource.h"
 #include "ToolMenus.h"
 
 #define LOCTEXT_NAMESPACE "FBillboardCloudsEditorModule"
@@ -90,6 +91,7 @@ namespace
 		Settings.GodOfWarCandidateSpacingMultiplier = FMath::Clamp(EditorSettings.GodOfWarCandidateSpacingMultiplier, 0.1, 8.0);
 		Settings.TextureTilePaddingPixels = FMath::Clamp(EditorSettings.TextureTilePaddingPixels, 0, 128);
 		Settings.TextureAtlasResolution = FMath::Clamp(EditorSettings.TextureAtlasResolution, 256, 8192);
+		Settings.SourceMaterialBakeResolution = FMath::Clamp(EditorSettings.SourceMaterialBakeResolution, 256, 8192);
 		switch (EditorSettings.DoubleSidedBakeMode)
 		{
 		case EBillboardCloudsDoubleSidedBakeMode::TrunkCardsOnly:
@@ -110,6 +112,9 @@ namespace
 		Settings.ErrorTolerance = FMath::Max(
 			FMath::Max(0.0, EditorSettings.MinimumErrorCm),
 			StaticMesh.GetBounds().SphereRadius * FMath::Max(0.0, EditorSettings.RelativeError));
+		Settings.bBoostTrunkCardAtlasResolution = EditorSettings.bBoostTrunkCardAtlasResolution;
+		Settings.bEnableAlphaAwareTileCrop = EditorSettings.bEnableAlphaAwareTileCrop;
+		Settings.AlphaAwareTileCropGuardPixels = FMath::Clamp(EditorSettings.AlphaAwareTileCropGuardPixels, 0, 16);
 		return Settings;
 	}
 
@@ -354,6 +359,7 @@ namespace
 		int32 Width = 0;
 		int32 Height = 0;
 		ETextureSourceFormat Format = TSF_Invalid;
+		bool bLinearColor = false;
 
 		bool IsValid() const
 		{
@@ -389,7 +395,37 @@ namespace
 
 		FLinearColor Sample(const FVector2f& UV) const
 		{
-			return FLinearColor(SampleRawColor(UV));
+			const FColor RawColor = SampleRawColor(UV);
+			return bLinearColor ? RawColor.ReinterpretAsLinear() : FLinearColor(RawColor);
+		}
+
+		void SetFromColors(const TArray<FColor>& Colors, const FIntPoint& Size, const bool bInLinearColor)
+		{
+			Width = Size.X;
+			Height = Size.Y;
+			Format = TSF_BGRA8;
+			bLinearColor = bInLinearColor;
+			Bytes.Reset();
+
+			const int64 PixelCount = static_cast<int64>(Width) * static_cast<int64>(Height);
+			if (PixelCount <= 0 || Colors.Num() < PixelCount)
+			{
+				Width = 0;
+				Height = 0;
+				Format = TSF_Invalid;
+				return;
+			}
+
+			Bytes.SetNumUninitialized(static_cast<int32>(PixelCount * 4));
+			for (int64 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
+			{
+				const FColor& Color = Colors[PixelIndex];
+				const int64 ByteIndex = PixelIndex * 4;
+				Bytes[ByteIndex + 0] = Color.B;
+				Bytes[ByteIndex + 1] = Color.G;
+				Bytes[ByteIndex + 2] = Color.R;
+				Bytes[ByteIndex + 3] = Color.A;
+			}
 		}
 
 		bool AlphaLooksLikeCutoutMask() const
@@ -489,22 +525,18 @@ namespace
 		FLinearColor BaseColor = FLinearColor::White;
 		FTexturePixels BaseColorTexture;
 		FTexturePixels OpacityMaskTexture;
-		FTexturePixels NormalTexture;
 		FMaterialScalarBakeData AmbientOcclusion;
 		FMaterialScalarBakeData Roughness;
 		FMaterialScalarBakeData Metallic;
 		FMaterialScalarBakeData Emission;
 		bool bHasReadableBaseColorTexture = false;
 		bool bHasReadableOpacityMaskTexture = false;
-		bool bHasReadableNormalTexture = false;
 		bool bUseTextureAlphaAsOpacity = false;
-		bool bFlipNormalGreenChannel = false;
 		bool bTwoSided = false;
 		EBillboardOpacityMaskChannel OpacityMaskChannel = EBillboardOpacityMaskChannel::Alpha;
 		float OpacityMaskClipValue = 0.33333334f;
 		double OpacityMaskTransparentRatio = 0.0;
 		FString OpacityMaskSource;
-		FString NormalTextureSource;
 	};
 
 	struct FAtlasBakeStats
@@ -522,13 +554,13 @@ namespace
 		int32 RasterizedTriangleReferences = 0;
 		int32 CrackReductionTriangleReferences = 0;
 		int32 ReadableMaterialTextures = 0;
-		int32 SourceNormalMapMaterials = 0;
-		int32 SourceNormalMapReferences = 0;
 		int32 SourceMixTextureMaterials = 0;
 		int32 SourceMixTextureReferences = 0;
 		int32 TextureAlphaOpacityMaterials = 0;
 		int32 TextureAlphaOpacityReferences = 0;
 		int32 ForcedOpaqueAlphaReferences = 0;
+		int32 AlphaAwareCroppedPlanes = 0;
+		int32 AlphaAwareTileCropGuardPixels = 0;
 		FString MaterialAlphaPolicyDetails;
 	};
 
@@ -614,6 +646,7 @@ namespace
 		OutPixels.Width = Texture->Source.GetSizeX();
 		OutPixels.Height = Texture->Source.GetSizeY();
 		OutPixels.Format = Format;
+		OutPixels.bLinearColor = !Texture->SRGB;
 		return OutPixels.IsValid();
 	}
 
@@ -661,67 +694,6 @@ namespace
 			if (Texture2D && Texture2D->CompressionSettings != TC_Normalmap)
 			{
 				return Texture2D;
-			}
-		}
-
-		return nullptr;
-	}
-
-	UTexture2D* FindNormalTextureFromParameter(
-		UMaterialInterface* MaterialInterface,
-		const FName ParameterName,
-		FString& OutSource)
-	{
-		if (!MaterialInterface || ParameterName.IsNone())
-		{
-			return nullptr;
-		}
-
-		UTexture* Texture = nullptr;
-		if (MaterialInterface->GetTextureParameterValue(FHashedMaterialParameterInfo(FMaterialParameterInfo(ParameterName)), Texture))
-		{
-			if (UTexture2D* Texture2D = Cast<UTexture2D>(Texture))
-			{
-				OutSource = FString::Printf(TEXT("normal parameter %s -> %s"), *ParameterName.ToString(), *Texture2D->GetName());
-				return Texture2D;
-			}
-		}
-
-		return nullptr;
-	}
-
-	UTexture2D* FindNormalTexture(UMaterialInterface* MaterialInterface, FString& OutSource)
-	{
-		OutSource.Reset();
-		if (!MaterialInterface)
-		{
-			return nullptr;
-		}
-
-		if (UMaterial* Material = MaterialInterface->GetMaterial())
-		{
-			if (FExpressionInput* NormalInput = Material->GetExpressionInputForProperty(MP_Normal))
-			{
-				const FExpressionInput TracedInput = NormalInput->GetTracedInput();
-				if (TracedInput.Expression)
-				{
-					if (const UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(TracedInput.Expression))
-					{
-						if (UTexture2D* Texture2D = FindNormalTextureFromParameter(MaterialInterface, TextureParameter->ParameterName, OutSource))
-						{
-							return Texture2D;
-						}
-					}
-
-					if (const UMaterialExpressionTextureSample* TextureSample = Cast<UMaterialExpressionTextureSample>(TracedInput.Expression))
-					{
-						if (UTexture2D* Texture2D = Cast<UTexture2D>(TextureSample->Texture))
-						{
-							OutSource = FString::Printf(TEXT("normal input texture %s"), *Texture2D->GetName());
-							return Texture2D;
-						}
-					}
-				}
 			}
 		}
 
@@ -1054,9 +1026,215 @@ namespace
 		return BakeData;
 	}
 
+	bool CopyBakedPropertyToTexture(
+		const FBakeOutput& BakeOutput,
+		const EMaterialProperty Property,
+		FTexturePixels& OutTexture)
+	{
+		const TArray<FColor>* PropertyData = BakeOutput.PropertyData.Find(Property);
+		const FIntPoint* PropertySize = BakeOutput.PropertySizes.Find(Property);
+		if (!PropertyData || !PropertySize || PropertyData->IsEmpty() || PropertySize->X <= 0 || PropertySize->Y <= 0)
+		{
+			return false;
+		}
+
+		const bool bLinearColor = BakeOutput.PropertyIsLinearColor.FindRef(Property);
+		OutTexture.SetFromColors(*PropertyData, *PropertySize, bLinearColor);
+		return OutTexture.IsValid();
+	}
+
+	bool ShouldBakeEvaluatedMaterialProperty(
+		UMaterialInterface* MaterialInterface,
+		const EMaterialProperty Property,
+		const bool bMaterialCanUseOpacity)
+	{
+		if (!MaterialInterface)
+		{
+			return false;
+		}
+
+		if (Property == MP_BaseColor)
+		{
+			return true;
+		}
+		if (Property == MP_OpacityMask)
+		{
+			return bMaterialCanUseOpacity && MaterialInterface->IsPropertyActive(Property);
+		}
+		return MaterialInterface->IsPropertyActive(Property);
+	}
+
+	bool ApplyEvaluatedMaterialOutputs(
+		const UStaticMesh& SourceStaticMesh,
+		const int32 MaterialIndex,
+		const TArray<UE::BillboardClouds::FSourceTriangle>& Triangles,
+		UMaterialInterface* MaterialInterface,
+		const FAtlasOutputSelection& OutputSelection,
+		const UE::BillboardClouds::FPlaneCoverSettings& Settings,
+		FMaterialBakeData& InOutBakeData)
+	{
+		if (!MaterialInterface)
+		{
+			return false;
+		}
+
+		const FMeshDescription* SourceMeshDescription = SourceStaticMesh.GetMeshDescription(0);
+		if (!SourceMeshDescription)
+		{
+			return false;
+		}
+
+		const EBlendMode BlendMode = MaterialInterface->GetBlendMode();
+		const bool bMaterialCanUseOpacity = BlendMode != BLEND_Opaque;
+		const FIntPoint BakeSize(
+			FMath::Clamp(Settings.SourceMaterialBakeResolution, 256, 8192),
+			FMath::Clamp(Settings.SourceMaterialBakeResolution, 256, 8192));
+
+		FMaterialData MaterialSettings;
+		MaterialSettings.Material = MaterialInterface;
+		// Bake raw material property values; alpha clipping is applied later when rasterizing the billboard atlas.
+		MaterialSettings.BlendMode = BLEND_Opaque;
+		MaterialSettings.bPerformBorderSmear = true;
+		MaterialSettings.bPerformShrinking = false;
+		MaterialSettings.bTangentSpaceNormal = true;
+		MaterialSettings.BackgroundColor = FColor::Transparent;
+
+		auto AddProperty = [&](const EMaterialProperty Property)
+		{
+			if (ShouldBakeEvaluatedMaterialProperty(MaterialInterface, Property, bMaterialCanUseOpacity))
+			{
+				MaterialSettings.PropertySizes.Add(Property, BakeSize);
+			}
+		};
+
+		if (OutputSelection.bBaseColorOpacity)
+		{
+			AddProperty(MP_BaseColor);
+			AddProperty(MP_OpacityMask);
+		}
+		if (OutputSelection.bMix)
+		{
+			AddProperty(MP_AmbientOcclusion);
+			AddProperty(MP_Roughness);
+			AddProperty(MP_Metallic);
+			AddProperty(MP_EmissiveColor);
+		}
+
+		if (MaterialSettings.PropertySizes.IsEmpty())
+		{
+			return false;
+		}
+
+		FMeshData MeshSettings;
+		MeshSettings.MeshDescription = SourceMeshDescription;
+		MeshSettings.Mesh = &SourceStaticMesh;
+		MeshSettings.MaterialIndices.Add(MaterialIndex);
+		MeshSettings.TextureCoordinateBox = FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
+		MeshSettings.TextureCoordinateIndex = 0;
+		MeshSettings.LightMapIndex = SourceStaticMesh.GetLightMapCoordinateIndex();
+		MeshSettings.PrimitiveData = FPrimitiveData(&SourceStaticMesh);
+
+		TArray<FMaterialData*> MaterialSettingPtrs;
+		MaterialSettingPtrs.Add(&MaterialSettings);
+		TArray<FMeshData*> MeshSettingPtrs;
+		MeshSettingPtrs.Add(&MeshSettings);
+
+		TArray<FBakeOutput> BakeOutputs;
+		IMaterialBakingModule& MaterialBakingModule = FModuleManager::Get().LoadModuleChecked<IMaterialBakingModule>(TEXT("MaterialBaking"));
+		MaterialBakingModule.SetLinearBake(true);
+		MaterialBakingModule.BakeMaterials(MaterialSettingPtrs, MeshSettingPtrs, BakeOutputs);
+		if (BakeOutputs.IsEmpty())
+		{
+			return false;
+		}
+
+		bool bAppliedAnyProperty = false;
+		const FBakeOutput& BakeOutput = BakeOutputs[0];
+		if (CopyBakedPropertyToTexture(BakeOutput, MP_BaseColor, InOutBakeData.BaseColorTexture))
+		{
+			InOutBakeData.BaseColor = FLinearColor::White;
+			InOutBakeData.bHasReadableBaseColorTexture = true;
+			bAppliedAnyProperty = true;
+		}
+		FTexturePixels EvaluatedOpacityMaskTexture;
+		if (CopyBakedPropertyToTexture(BakeOutput, MP_OpacityMask, EvaluatedOpacityMaskTexture))
+		{
+			FMaterialBakeData EvaluatedOpacityMaskData;
+			EvaluatedOpacityMaskData.OpacityMaskTexture = EvaluatedOpacityMaskTexture;
+			EvaluatedOpacityMaskData.bHasReadableOpacityMaskTexture = true;
+			EvaluatedOpacityMaskData.OpacityMaskChannel = EBillboardOpacityMaskChannel::Red;
+			EvaluatedOpacityMaskData.OpacityMaskClipValue = InOutBakeData.OpacityMaskClipValue;
+			const double EvaluatedTransparentRatio = EstimateOpacityMaskTransparentRatio(Triangles, MaterialIndex, EvaluatedOpacityMaskData);
+			const double ExistingTransparentRatio = InOutBakeData.bHasReadableOpacityMaskTexture
+				? EstimateOpacityMaskTransparentRatio(Triangles, MaterialIndex, InOutBakeData)
+				: 0.0;
+			constexpr double MinimumUsefulOpacityMaskTransparentRatio = 0.001;
+			constexpr double MinimumEvaluatedToExistingOpacityRatio = 0.25;
+			const bool bEvaluatedPreservesExistingCutout =
+				ExistingTransparentRatio < MinimumUsefulOpacityMaskTransparentRatio
+				|| EvaluatedTransparentRatio >= ExistingTransparentRatio * MinimumEvaluatedToExistingOpacityRatio;
+			if (EvaluatedTransparentRatio >= MinimumUsefulOpacityMaskTransparentRatio && bEvaluatedPreservesExistingCutout)
+			{
+				InOutBakeData.OpacityMaskTexture = MoveTemp(EvaluatedOpacityMaskTexture);
+				InOutBakeData.bHasReadableOpacityMaskTexture = true;
+				InOutBakeData.bUseTextureAlphaAsOpacity = true;
+				InOutBakeData.OpacityMaskChannel = EBillboardOpacityMaskChannel::Red;
+				InOutBakeData.OpacityMaskSource = FString::Printf(TEXT("evaluated material OpacityMask output %dx%d"), BakeSize.X, BakeSize.Y);
+				bAppliedAnyProperty = true;
+			}
+			else if (InOutBakeData.OpacityMaskSource.IsEmpty())
+			{
+				InOutBakeData.OpacityMaskSource = FString::Printf(
+					TEXT("evaluated material OpacityMask output rejected, transparent %.2f%%, existing %.2f%%"),
+					EvaluatedTransparentRatio * 100.0,
+					ExistingTransparentRatio * 100.0);
+			}
+			else
+			{
+				InOutBakeData.OpacityMaskSource += FString::Printf(
+					TEXT("; evaluated material OpacityMask output rejected, transparent %.2f%%, existing %.2f%%"),
+					EvaluatedTransparentRatio * 100.0,
+					ExistingTransparentRatio * 100.0);
+			}
+		}
+		if (CopyBakedPropertyToTexture(BakeOutput, MP_AmbientOcclusion, InOutBakeData.AmbientOcclusion.Texture))
+		{
+			InOutBakeData.AmbientOcclusion.bHasReadableTexture = true;
+			InOutBakeData.AmbientOcclusion.Channel = EBillboardOpacityMaskChannel::Red;
+			InOutBakeData.AmbientOcclusion.Source = FString::Printf(TEXT("evaluated material AmbientOcclusion output %dx%d"), BakeSize.X, BakeSize.Y);
+			bAppliedAnyProperty = true;
+		}
+		if (CopyBakedPropertyToTexture(BakeOutput, MP_Roughness, InOutBakeData.Roughness.Texture))
+		{
+			InOutBakeData.Roughness.bHasReadableTexture = true;
+			InOutBakeData.Roughness.Channel = EBillboardOpacityMaskChannel::Red;
+			InOutBakeData.Roughness.Source = FString::Printf(TEXT("evaluated material Roughness output %dx%d"), BakeSize.X, BakeSize.Y);
+			bAppliedAnyProperty = true;
+		}
+		if (CopyBakedPropertyToTexture(BakeOutput, MP_Metallic, InOutBakeData.Metallic.Texture))
+		{
+			InOutBakeData.Metallic.bHasReadableTexture = true;
+			InOutBakeData.Metallic.Channel = EBillboardOpacityMaskChannel::Red;
+			InOutBakeData.Metallic.Source = FString::Printf(TEXT("evaluated material Metallic output %dx%d"), BakeSize.X, BakeSize.Y);
+			bAppliedAnyProperty = true;
+		}
+		if (CopyBakedPropertyToTexture(BakeOutput, MP_EmissiveColor, InOutBakeData.Emission.Texture))
+		{
+			InOutBakeData.Emission.bHasReadableTexture = true;
+			InOutBakeData.Emission.Channel = EBillboardOpacityMaskChannel::Red;
+			InOutBakeData.Emission.bUseLuminance = true;
+			InOutBakeData.Emission.Source = FString::Printf(TEXT("evaluated material Emissive output %dx%d"), BakeSize.X, BakeSize.Y);
+			bAppliedAnyProperty = true;
+		}
+
+		return bAppliedAnyProperty;
+	}
+
 	TArray<FMaterialBakeData> BuildMaterialBakeData(
 		const UStaticMesh& SourceStaticMesh,
 		const TArray<UE::BillboardClouds::FSourceTriangle>& Triangles,
+		const FAtlasOutputSelection& OutputSelection,
+		const UE::BillboardClouds::FPlaneCoverSettings& Settings,
 		FAtlasBakeStats& InOutStats)
 	{
 		const TArray<FStaticMaterial>& SourceMaterials = SourceStaticMesh.GetStaticMaterials();
@@ -1123,23 +1301,6 @@ namespace
 				}
 			}
 
-			FString NormalTextureSource;
-			if (UTexture2D* NormalTexture = FindNormalTexture(MaterialInterface, NormalTextureSource))
-			{
-				BakeData.bHasReadableNormalTexture = TryLoadTexturePixels(NormalTexture, BakeData.NormalTexture);
-				if (BakeData.bHasReadableNormalTexture && BakeData.NormalTexture.Format == TSF_BGRA8)
-				{
-					BakeData.bFlipNormalGreenChannel = NormalTexture->bFlipGreenChannel;
-					BakeData.NormalTextureSource = NormalTextureSource;
-					++InOutStats.ReadableMaterialTextures;
-					++InOutStats.SourceNormalMapMaterials;
-				}
-				else
-				{
-					BakeData.bHasReadableNormalTexture = false;
-				}
-			}
-
 			if (bMaterialCanUseOpacity)
 			{
 				EBillboardOpacityMaskChannel OpacityMaskChannel = EBillboardOpacityMaskChannel::Alpha;
@@ -1172,6 +1333,20 @@ namespace
 				BakeData.OpacityMaskSource = TEXT("base color alpha cutout fallback");
 			}
 
+			const bool bHadMixBeforeEvaluatedBake = BakeData.AmbientOcclusion.bHasReadableTexture
+				|| BakeData.Roughness.bHasReadableTexture
+				|| BakeData.Metallic.bHasReadableTexture
+				|| BakeData.Emission.bHasReadableTexture;
+			ApplyEvaluatedMaterialOutputs(SourceStaticMesh, MaterialIndex, Triangles, MaterialInterface, OutputSelection, Settings, BakeData);
+			if (!bHadMixBeforeEvaluatedBake
+				&& (BakeData.AmbientOcclusion.bHasReadableTexture
+					|| BakeData.Roughness.bHasReadableTexture
+					|| BakeData.Metallic.bHasReadableTexture
+					|| BakeData.Emission.bHasReadableTexture))
+			{
+				++InOutStats.SourceMixTextureMaterials;
+			}
+
 			if (BakeData.bUseTextureAlphaAsOpacity)
 			{
 				BakeData.OpacityMaskTransparentRatio = EstimateOpacityMaskTransparentRatio(Triangles, MaterialIndex, BakeData);
@@ -1192,9 +1367,7 @@ namespace
 				? SourceMaterials[MaterialIndex].MaterialSlotName.ToString()
 				: TEXT("None");
 			const FString MaterialName = MaterialInterface ? MaterialInterface->GetName() : TEXT("None");
-			const FString NormalSource = BakeData.bHasReadableNormalTexture
-				? FString::Printf(TEXT("source normal texture %s%s"), *BakeData.NormalTextureSource, BakeData.bFlipNormalGreenChannel ? TEXT(", flip green") : TEXT(""))
-				: TEXT("geometry vertex normals");
+			const FString NormalSource = TEXT("source LOD render normals (VertexTangentZ), two-sided source backfaces flipped");
 			InOutStats.MaterialAlphaPolicyDetails += FString::Printf(
 				TEXT("\n    material=%d, slot=%s, asset=%s, blend=%s, two-sided=%s, alpha=%s, normal=%s"),
 				MaterialIndex,
@@ -1297,29 +1470,13 @@ namespace
 			static_cast<double>(Color.B) / 255.0 * 2.0 - 1.0).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
 	}
 
-	FVector DecodeTangentSpaceNormalSample(const FTexturePixels& NormalTexture, const FVector2f& UV, const bool bFlipGreenChannel)
-	{
-		const FColor Sample = NormalTexture.SampleRawColor(UV);
-		FVector TangentNormal(
-			static_cast<double>(Sample.R) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(Sample.G) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(Sample.B) / 255.0 * 2.0 - 1.0);
-		if (bFlipGreenChannel)
-		{
-			TangentNormal.Y *= -1.0;
-		}
-
-		return TangentNormal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-	}
-
 	FVector ComputeBakedObjectSpaceNormal(
 		const UE::BillboardClouds::FSourceTriangle& Triangle,
 		const FMaterialBakeData& BakeData,
-		const FVector2f& SourceUV,
-		const FVector& CaptureViewVector,
 		const double W0,
 		const double W1,
-		const double W2)
+		const double W2,
+		const FVector& CaptureRayDirection)
 	{
 		FVector ObjectNormal = (Triangle.VertexNormals[0] * W0 + Triangle.VertexNormals[1] * W1 + Triangle.VertexNormals[2] * W2).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Triangle.ShadingNormal);
 		if (ObjectNormal.IsNearlyZero())
@@ -1327,32 +1484,9 @@ namespace
 			ObjectNormal = Triangle.Normal;
 		}
 
-		const double SourceTwoSidedSign = BakeData.bTwoSided && FVector::DotProduct(Triangle.Normal, CaptureViewVector) < 0.0 ? -1.0 : 1.0;
-		if (!Triangle.bHasUVs || !Triangle.bHasSourceTangents || !BakeData.bHasReadableNormalTexture)
-		{
-			return ObjectNormal * SourceTwoSidedSign;
-		}
-
-		FVector ObjectTangent = (Triangle.VertexTangents[0] * W0 + Triangle.VertexTangents[1] * W1 + Triangle.VertexTangents[2] * W2);
-		ObjectTangent = (ObjectTangent - ObjectNormal * FVector::DotProduct(ObjectTangent, ObjectNormal)).GetSafeNormal();
-		if (ObjectTangent.IsNearlyZero())
-		{
-			return ObjectNormal;
-		}
-
-		const double WeightedBinormalSign = static_cast<double>(Triangle.VertexBinormalSigns[0]) * W0
-			+ static_cast<double>(Triangle.VertexBinormalSigns[1]) * W1
-			+ static_cast<double>(Triangle.VertexBinormalSigns[2]) * W2;
-		const double BinormalSign = WeightedBinormalSign >= 0.0 ? 1.0 : -1.0;
-		const FVector ObjectBinormal = FVector::CrossProduct(ObjectNormal, ObjectTangent).GetSafeNormal() * BinormalSign;
-		if (ObjectBinormal.IsNearlyZero())
-		{
-			return ObjectNormal;
-		}
-
-		const FVector TangentNormal = DecodeTangentSpaceNormalSample(BakeData.NormalTexture, SourceUV, BakeData.bFlipNormalGreenChannel);
-		ObjectNormal = (ObjectTangent * TangentNormal.X + ObjectBinormal * TangentNormal.Y + ObjectNormal * TangentNormal.Z).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, ObjectNormal);
-		return ObjectNormal * SourceTwoSidedSign;
+		const bool bFlipSourceBackfaceNormal = BakeData.bTwoSided
+			&& FVector::DotProduct(Triangle.Normal, CaptureRayDirection) > 0.0;
+		return bFlipSourceBackfaceNormal ? -ObjectNormal : ObjectNormal;
 	}
 
 	void NormalizeEncodedNormalAtlas(TArray<FColor>& Pixels)
@@ -1646,6 +1780,152 @@ namespace
 			&& BoundaryDistance <= FMath::Max(BoundaryWidth, Tolerance);
 	}
 
+	bool AccumulateAlphaBoundsForTile(
+		const TArray<FColor>& Pixels,
+		const int32 Width,
+		const int32 Height,
+		const FIntPoint& PixelMin,
+		const FIntPoint& TileSize,
+		const int32 GuardPixels,
+		double& InOutMinUFraction,
+		double& InOutMaxUFraction,
+		double& InOutMinVFraction,
+		double& InOutMaxVFraction)
+	{
+		if (Width <= 0 || Height <= 0 || TileSize.X <= 0 || TileSize.Y <= 0 || Pixels.Num() < Width * Height)
+		{
+			return false;
+		}
+
+		int32 MinLocalX = TNumericLimits<int32>::Max();
+		int32 MaxLocalX = -TNumericLimits<int32>::Max();
+		int32 MinLocalY = TNumericLimits<int32>::Max();
+		int32 MaxLocalY = -TNumericLimits<int32>::Max();
+
+		for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
+		{
+			const int32 Y = PixelMin.Y + LocalY;
+			if (Y < 0 || Y >= Height)
+			{
+				continue;
+			}
+
+			for (int32 LocalX = 0; LocalX < TileSize.X; ++LocalX)
+			{
+				const int32 X = PixelMin.X + LocalX;
+				if (X < 0 || X >= Width)
+				{
+					continue;
+				}
+
+				if (Pixels[Y * Width + X].A == 0)
+				{
+					continue;
+				}
+
+				MinLocalX = FMath::Min(MinLocalX, LocalX);
+				MaxLocalX = FMath::Max(MaxLocalX, LocalX);
+				MinLocalY = FMath::Min(MinLocalY, LocalY);
+				MaxLocalY = FMath::Max(MaxLocalY, LocalY);
+			}
+		}
+
+		if (MaxLocalX < MinLocalX || MaxLocalY < MinLocalY)
+		{
+			return false;
+		}
+
+		const int32 ExpandedMinX = FMath::Clamp(MinLocalX - GuardPixels, 0, TileSize.X - 1);
+		const int32 ExpandedMaxX = FMath::Clamp(MaxLocalX + GuardPixels, 0, TileSize.X - 1);
+		const int32 ExpandedMinY = FMath::Clamp(MinLocalY - GuardPixels, 0, TileSize.Y - 1);
+		const int32 ExpandedMaxY = FMath::Clamp(MaxLocalY + GuardPixels, 0, TileSize.Y - 1);
+
+		InOutMinUFraction = FMath::Min(InOutMinUFraction, static_cast<double>(ExpandedMinX) / static_cast<double>(TileSize.X));
+		InOutMaxUFraction = FMath::Max(InOutMaxUFraction, static_cast<double>(ExpandedMaxX + 1) / static_cast<double>(TileSize.X));
+		InOutMinVFraction = FMath::Min(InOutMinVFraction, static_cast<double>(ExpandedMinY) / static_cast<double>(TileSize.Y));
+		InOutMaxVFraction = FMath::Max(InOutMaxVFraction, static_cast<double>(ExpandedMaxY + 1) / static_cast<double>(TileSize.Y));
+		return true;
+	}
+
+	int32 BuildAlphaAwareTileCrops(
+		const TArray<FColor>& Pixels,
+		const int32 Width,
+		const int32 Height,
+		const TArray<UE::BillboardClouds::FPlaneProxyPlaneInfo>& PlaneInfos,
+		const int32 GuardPixels,
+		TArray<UE::BillboardClouds::FPlaneProxyTileCrop>& OutTileCrops)
+	{
+		OutTileCrops.Reset();
+		OutTileCrops.SetNum(PlaneInfos.Num());
+
+		int32 CroppedPlaneCount = 0;
+		constexpr double CropEpsilon = 1.0e-5;
+		for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
+		{
+			const UE::BillboardClouds::FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
+			double MinUFraction = 1.0;
+			double MaxUFraction = 0.0;
+			double MinVFraction = 1.0;
+			double MaxVFraction = 0.0;
+
+			bool bHasCoverage = AccumulateAlphaBoundsForTile(
+				Pixels,
+				Width,
+				Height,
+				PlaneInfo.AtlasPixelMin,
+				PlaneInfo.AtlasTileSize,
+				GuardPixels,
+				MinUFraction,
+				MaxUFraction,
+				MinVFraction,
+				MaxVFraction);
+
+			if (PlaneInfo.bHasBackFaceAtlas)
+			{
+				bHasCoverage |= AccumulateAlphaBoundsForTile(
+					Pixels,
+					Width,
+					Height,
+					PlaneInfo.BackAtlasPixelMin,
+					PlaneInfo.BackAtlasTileSize,
+					GuardPixels,
+					MinUFraction,
+					MaxUFraction,
+					MinVFraction,
+					MaxVFraction);
+			}
+
+			if (!bHasCoverage)
+			{
+				continue;
+			}
+
+			MinUFraction = FMath::Clamp(MinUFraction, 0.0, 1.0);
+			MaxUFraction = FMath::Clamp(MaxUFraction, 0.0, 1.0);
+			MinVFraction = FMath::Clamp(MinVFraction, 0.0, 1.0);
+			MaxVFraction = FMath::Clamp(MaxVFraction, 0.0, 1.0);
+			const bool bCropsTile =
+				MinUFraction > CropEpsilon
+				|| MaxUFraction < 1.0 - CropEpsilon
+				|| MinVFraction > CropEpsilon
+				|| MaxVFraction < 1.0 - CropEpsilon;
+			if (!bCropsTile || MaxUFraction <= MinUFraction || MaxVFraction <= MinVFraction)
+			{
+				continue;
+			}
+
+			UE::BillboardClouds::FPlaneProxyTileCrop& Crop = OutTileCrops[PlaneIndex];
+			Crop.bEnabled = true;
+			Crop.MinUFraction = MinUFraction;
+			Crop.MaxUFraction = MaxUFraction;
+			Crop.MinVFraction = MinVFraction;
+			Crop.MaxVFraction = MaxVFraction;
+			++CroppedPlaneCount;
+		}
+
+		return CroppedPlaneCount;
+	}
+
 	void RasterizeBillboardAtlas(
 		const UStaticMesh& SourceStaticMesh,
 		const TArray<UE::BillboardClouds::FSourceTriangle>& Triangles,
@@ -1720,7 +2000,7 @@ namespace
 		TBitArray<> AtlasCoverage;
 		AtlasCoverage.Init(false, OutPixels.Num());
 
-		const TArray<FMaterialBakeData> MaterialBakeData = BuildMaterialBakeData(SourceStaticMesh, Triangles, OutStats);
+		const TArray<FMaterialBakeData> MaterialBakeData = BuildMaterialBakeData(SourceStaticMesh, Triangles, OutputSelection, Settings, OutStats);
 
 		for (int32 PlaneInfoIndex = 0; PlaneInfoIndex < PlaneInfos.Num(); ++PlaneInfoIndex)
 		{
@@ -1752,14 +2032,13 @@ namespace
 				const UE::BillboardClouds::FSourceTriangle& Triangle = Triangles[TriangleIndex];
 				const int32 MaterialIndex = MaterialBakeData.IsValidIndex(Triangle.MaterialIndex) ? Triangle.MaterialIndex : 0;
 				const FMaterialBakeData& BakeData = MaterialBakeData[MaterialIndex];
+				const FVector CaptureRayDirection = bBackFace ? PlaneInfo.Normal : -PlaneInfo.Normal;
 				const bool bUseTexture = Triangle.bHasUVs && BakeData.bHasReadableBaseColorTexture;
 				const bool bUseTextureAlphaAsOpacity = Triangle.bHasUVs && BakeData.bUseTextureAlphaAsOpacity && BakeData.bHasReadableOpacityMaskTexture;
-				const bool bUseNormalTexture = Triangle.bHasUVs && Triangle.bHasSourceTangents && BakeData.bHasReadableNormalTexture;
 				const bool bUseMixTexture = BakeData.AmbientOcclusion.bHasReadableTexture || BakeData.Roughness.bHasReadableTexture || BakeData.Metallic.bHasReadableTexture || BakeData.Emission.bHasReadableTexture;
 				OutStats.SourceTexturedTriangles += bUseTexture ? 1 : 0;
 				OutStats.FallbackTriangles += bUseTexture ? 0 : 1;
 				OutStats.TextureAlphaOpacityReferences += bUseTextureAlphaAsOpacity ? 1 : 0;
-				OutStats.SourceNormalMapReferences += OutputSelection.bNormalMask && bUseNormalTexture ? 1 : 0;
 				OutStats.SourceMixTextureReferences += OutputSelection.bMix && bUseMixTexture ? 1 : 0;
 				OutStats.ForcedOpaqueAlphaReferences += bUseTextureAlphaAsOpacity ? 0 : 1;
 				++OutStats.RasterizedTriangleReferences;
@@ -1814,7 +2093,7 @@ namespace
 						}
 
 						const int32 PixelIndex = Y * OutStats.Width + X;
-						const double TextureDepth = bBackFace ? -SignedPlaneDistance : SignedPlaneDistance;
+						const double TextureDepth = -FMath::Abs(SignedPlaneDistance);
 						if (!DepthBuffer.IsValidIndex(PixelIndex) || TextureDepth < DepthBuffer[PixelIndex])
 						{
 							continue;
@@ -1829,7 +2108,7 @@ namespace
 							LinearColor = BakeData.BaseColorTexture.Sample(SourceUV) * BakeData.BaseColor;
 						}
 
-						const float PixelAlpha = 1.0f;
+						float PixelAlpha = 1.0f;
 						if (bUseTextureAlphaAsOpacity)
 						{
 							const float MaskValue = SampleOpacityMaskValue(BakeData.OpacityMaskTexture, SourceUV, BakeData.OpacityMaskChannel);
@@ -1837,18 +2116,15 @@ namespace
 							{
 								continue;
 							}
+							PixelAlpha = FMath::Clamp(MaskValue, 0.0f, 1.0f);
 						}
 
-						LinearColor.R *= PixelAlpha;
-						LinearColor.G *= PixelAlpha;
-						LinearColor.B *= PixelAlpha;
 						OutPixels[PixelIndex] = LinearColor.ToFColorSRGB();
 						OutPixels[PixelIndex].A = static_cast<uint8>(FMath::RoundToInt(PixelAlpha * 255.0f));
 						AtlasCoverage[PixelIndex] = true;
 						if (OutputSelection.bNormalMask && OutNormalPixels.IsValidIndex(PixelIndex))
 						{
-							const FVector CaptureViewVector = bBackFace ? -PlaneInfo.Normal : PlaneInfo.Normal;
-							const FVector ObjectNormal = ComputeBakedObjectSpaceNormal(Triangle, BakeData, SourceUV, CaptureViewVector, W0, W1, W2);
+							const FVector ObjectNormal = ComputeBakedObjectSpaceNormal(Triangle, BakeData, W0, W1, W2, CaptureRayDirection);
 							OutNormalPixels[PixelIndex] = EncodeObjectSpaceNormalToColor(ObjectNormal, OutPixels[PixelIndex].A);
 						}
 						if (OutputSelection.bMix && OutMixPixels.IsValidIndex(PixelIndex))
@@ -2541,7 +2817,7 @@ namespace
 		const UStaticMesh& StaticMesh,
 		const UBillboardCloudsEditorSettings& EditorSettings,
 		const FProxyPlaneCoverBuildData& CoverData,
-		const FProxyMeshBuildData& MeshData,
+		FProxyMeshBuildData& MeshData,
 		FProxyTextureBuildData& OutData,
 		FString& OutError)
 	{
@@ -2550,6 +2826,52 @@ namespace
 		{
 			OutError = TEXT("No atlas outputs selected. Enable at least one of BaseColorOpacity, NormalMask, or Mix in Billboard Clouds settings.");
 			return false;
+		}
+
+		int32 AlphaAwareCroppedPlaneCount = 0;
+		if (CoverData.Settings.bEnableAlphaAwareTileCrop && !MeshData.PlaneInfos.IsEmpty())
+		{
+			FAtlasOutputSelection CropOutputSelection;
+			CropOutputSelection.bBaseColorOpacity = true;
+
+			TArray<FColor> CropAtlasPixels;
+			TArray<FColor> CropNormalPixels;
+			TArray<FColor> CropMixPixels;
+			FAtlasBakeStats CropStats;
+			RasterizeBillboardAtlas(
+				StaticMesh,
+				CoverData.Triangles,
+				MeshData.PlaneInfos,
+				MeshData.Stats,
+				CoverData.Settings,
+				CropOutputSelection,
+				CropAtlasPixels,
+				CropNormalPixels,
+				CropMixPixels,
+				CropStats);
+
+			TArray<UE::BillboardClouds::FPlaneProxyTileCrop> TileCrops;
+			AlphaAwareCroppedPlaneCount = BuildAlphaAwareTileCrops(
+				CropAtlasPixels,
+				CropStats.Width,
+				CropStats.Height,
+				MeshData.PlaneInfos,
+				CoverData.Settings.AlphaAwareTileCropGuardPixels,
+				TileCrops);
+
+			if (AlphaAwareCroppedPlaneCount > 0)
+			{
+				if (!UE::BillboardClouds::ApplyPlaneProxyTileCropsAndRebuildMeshDescription(
+					MeshData.PlaneInfos,
+					TileCrops,
+					CoverData.Settings,
+					MeshData.MeshDescription,
+					MeshData.Stats,
+					OutError))
+				{
+					return false;
+				}
+			}
 		}
 
 		RasterizeBillboardAtlas(
@@ -2563,6 +2885,10 @@ namespace
 			OutData.NormalAtlasPixels,
 			OutData.MixAtlasPixels,
 			OutData.AtlasStats);
+		OutData.AtlasStats.AlphaAwareCroppedPlanes = AlphaAwareCroppedPlaneCount;
+		OutData.AtlasStats.AlphaAwareTileCropGuardPixels = CoverData.Settings.bEnableAlphaAwareTileCrop
+			? CoverData.Settings.AlphaAwareTileCropGuardPixels
+			: 0;
 
 		if (OutData.OutputSelection.bBaseColorOpacity)
 		{
@@ -2667,7 +2993,7 @@ namespace
 			: TEXT("source StaticMesh LOD MeshDescription commit");
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, max padding=%d, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, readable material textures=%d, normal-map materials=%d, mix-texture materials=%d, alpha-mask materials=%d, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, crack-reduction refs=%d, alpha refs texture=%d, normal refs texture=%d, mix refs texture=%d, forced opaque=%d, shooting=%s\n  base/color opacity atlas: %s\n  normal atlas: %s, object-space XYZ, linear vector texture, same UV0/UV1 front/back layout as color atlas\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (copied from settings template; enabled parameters set: ColorOpacity, NormalMask, Mix)\n  normal source triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, distance fields off\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, max padding=%d, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, readable material textures=%d, mix-texture materials=%d, alpha-mask materials=%d, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, crack-reduction refs=%d, alpha refs texture=%d, mix refs texture=%d, forced opaque=%d, shooting=%s, resolve=two-sided slice nearest-plane\n  base/color opacity atlas: %s\n  normal atlas: %s, object-space XYZ from source LOD render normals (VertexTangentZ), source two-sided backfaces flipped, same UV0/UV1 front/back layout as color atlas\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (copied from settings template; enabled parameters set: ColorOpacity, NormalMask, Mix)\n  normal source triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, distance fields off\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
@@ -2682,8 +3008,9 @@ namespace
 			TextureData.AtlasStats.FrontTileCount,
 			TextureData.AtlasStats.BackTileCount,
 			TextureData.AtlasStats.PaintedPixels,
+			TextureData.AtlasStats.AlphaAwareCroppedPlanes,
+			TextureData.AtlasStats.AlphaAwareTileCropGuardPixels,
 			TextureData.AtlasStats.ReadableMaterialTextures,
-			TextureData.AtlasStats.SourceNormalMapMaterials,
 			TextureData.AtlasStats.SourceMixTextureMaterials,
 			TextureData.AtlasStats.TextureAlphaOpacityMaterials,
 			TextureData.AtlasStats.SourceTexturedTriangles,
@@ -2691,7 +3018,6 @@ namespace
 			TextureData.AtlasStats.RasterizedTriangleReferences,
 			TextureData.AtlasStats.CrackReductionTriangleReferences,
 			TextureData.AtlasStats.TextureAlphaOpacityReferences,
-			TextureData.AtlasStats.SourceNormalMapReferences,
 			TextureData.AtlasStats.SourceMixTextureReferences,
 			TextureData.AtlasStats.ForcedOpaqueAlphaReferences,
 			GetTextureShootingMode(CoverData.Settings),
