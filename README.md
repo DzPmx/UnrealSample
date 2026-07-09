@@ -24,8 +24,8 @@ V1.0 focuses on an editor-side, asset-generation workflow:
 - Fixed atlas resolution with automatic tile scaling and rectangle packing.
 - Optional alpha-aware tile crop that removes transparent outer borders before final packing.
 - RGB padding and tile-border padding to reduce dark transparent edges.
-- Unreal material-output baking for source BaseColor, OpacityMask, Occlusion, Roughness, Metallic, and Emission before billboard atlas projection.
-- Render-data normal extraction and object-space normal atlas baking.
+- Unreal material-output baking for source BaseColor, OpacityMask, Normal, Occlusion, Roughness, Metallic, and Emission into billboard atlas tiles.
+- Render-data normal/tangent extraction used as the source tangent basis for material-output normal baking.
 - User-provided material instance workflow. The plugin copies your configured material instance and assigns generated textures to known texture parameters.
 - Mesh output modes:
   - separate proxy Static Mesh asset
@@ -64,10 +64,9 @@ Current implementation includes:
 - minimum-coverage cluster replacement
 - optional crack reduction:
   - `Off`
-  - `Paper Exact - Envelope Intersection`
-  - `Boundary Aware - Envelope Boundary Band`
+  - `Scaled Envelope-Clipped Projection`
 
-For alpha-card vegetation, `Boundary Aware` is usually safer than strict paper-style envelope projection because it limits extra projections to boundary regions.
+`Scaled Envelope-Clipped Projection` clips cross-plane projection fragments against a scaled neighbor envelope before GPU material baking. Lower scale values reduce overfill on alpha-card foliage.
 
 ### God of War - Greedy Card Capture
 
@@ -95,15 +94,15 @@ Settings:
   - `2` = cross card
   - `3` = three-way star
   - `4` = four-way star
-- `Boost Trunk Card Atlas Resolution`
-  - gives trunk cross-card atlas tiles a fixed `2x` resolution weight during packing
-  - disable this to use the same atlas resolution weight as foliage billboard tiles
+- `Trunk Card Atlas Scale`
+  - `1.5x` or `2.0x`
+  - increases trunk cross-card tile weight during packing
 - `Trunk Card Material Keywords`
   - matches material instance names and parent material names
 
 Matched trunk/branch triangles are fully excluded from the Billboard Clouds clustering input. Trunk cards are centered at the source mesh origin rather than only the trunk bounds center.
 
-When `Boost Trunk Card Atlas Resolution` is enabled, trunk card tile resolution is weighted at `2x` during packing. The final atlas resolution remains fixed by `Texture Atlas Resolution`; the packer gives trunk cards more pixels and correspondingly compresses foliage billboard tiles.
+`Trunk Card Atlas Scale` increases trunk card tile resolution weight during packing. The final atlas resolution remains fixed by `Texture Atlas Resolution`; the packer gives trunk cards more pixels and correspondingly compresses foliage billboard tiles.
 
 ## Two-Sided Baking
 
@@ -163,9 +162,10 @@ Default: enabled.
 
 BaseColor/Opacity bake behavior:
 
-- Uses Unreal material baking to evaluate the source material's final `BaseColor` and `OpacityMask` outputs in source UV space when available.
-- This supports material functions, Material Attributes, layered blends, parameter-driven mixes, and other graph logic that cannot be resolved by directly reading source textures.
-- If material-output baking is unavailable, the bake falls back to direct texture/parameter reads.
+- Uses Unreal material baking to evaluate the source material's final `BaseColor` and `OpacityMask` outputs directly into each billboard tile.
+- The temporary bake mesh preserves source UV channels, normals, tangents, and binormal signs, so material functions, Material Attributes, layered blends, parameter-driven mixes, and tangent-space texture sampling are evaluated by the material shader.
+- Atlas merge resolves overlapping projected fragments per card side with a far-to-near painter order plus per-pixel tile depth, so BaseColor/Opacity/Normal/Mix follow the same visible source fragment.
+- If the GPU `OpacityMask` export is not usable for a masked material, opacity falls back to a projected evaluated/direct opacity source.
 
 ### NormalMask
 
@@ -179,12 +179,15 @@ Default: enabled.
 
 Normal bake behavior:
 
-- Uses Static Mesh render-data vertex normals when available.
-- The atlas uses the source Static Mesh LOD render-data normals (`VertexTangentZ`) as ground truth. Normal textures and evaluated material normal output are intentionally ignored.
-- Source render normals are interpolated and written through the same atlas rasterization, opacity clipping, and two-sided slice resolve path as `ColorOpacity`.
-- Atlas outputs use two-sided slice resolve: front and back atlas tiles both allow source fragments from either side of the card plane, then choose the fragment nearest to the card plane inside the clipped slice.
-- For source materials marked two-sided, back-facing source fragments are flipped relative to the current card capture direction before being written to `NormalMask`.
-- The tool intentionally does not use normal textures or Unreal material-output baking for `Normal` in this path; `NormalMask` is a source render-data normal atlas.
+- Uses Unreal material baking to evaluate the source material's final `MP_Normal` output for each billboard tile.
+- The bake requests tangent-space normal output. For materials authored with world-space normals, Unreal's material baker first converts the material normal to tangent space.
+- During atlas write, the plugin rasterizes the same tile triangles into a per-pixel source TBN basis map, then converts the baked tangent-space `MP_Normal` back to object/local-space XYZ before storing `NormalMask`.
+- The temporary bake mesh and the atlas decode use the same side-aware source render-data TBN basis, so trunk cards, billboard cards, tangent-space normal maps, and world-space material normals all go through the same `MP_Normal` path.
+- Normal writes share the same per-pixel tile depth resolve used by `ColorOpacity`, which prevents overlapped trunk/branch fragments from mixing color from one source fragment with normal from another.
+- Front and back atlas tiles are baked with opposite capture rays. Back-side bakes reverse the temporary bake mesh winding so material graphs using `TwoSidedSign` can evaluate the opposite side. For two-sided tangent-space-normal source materials, source backfaces flip the final decoded object-space normal after tangent-to-object conversion, matching Unreal's final normal flip order.
+- Source Static Mesh LOD render-data normals (`VertexTangentZ`), tangents, binormal signs, and UV channels are preserved on the temporary bake mesh so tangent-space normal maps, material functions, Material Attributes, and parameter blends feed into `MP_Normal` normally.
+- If the source material does not connect a Normal input, the baked default tangent normal `(0,0,1)` is converted through the source render-data TBN basis, so `NormalMask` falls back to the source mesh's interpolated render normals instead of a flat purple normal.
+- `NormalMask` is therefore a material-output normal atlas converted to object/local space, not a raw source render-normal atlas.
 
 ### Mix
 
@@ -203,9 +206,9 @@ Default: disabled.
 
 Mix bake behavior:
 
-- Uses Unreal material baking to evaluate source material `AmbientOcclusion`, `Roughness`, `Metallic`, and `EmissiveColor` outputs in source UV space when available.
-- Falls back to directly connected texture samples or common scalar/vector parameters when material-output baking is unavailable.
-- Uses fallback defaults when no readable source is found:
+- Uses Unreal material baking to evaluate source material `AmbientOcclusion`, `Roughness`, `Metallic`, and `EmissiveColor` outputs directly into each billboard tile.
+- Shares the same per-card side projection and per-pixel tile depth resolve as `ColorOpacity` and `NormalMask`.
+- Uses fallback defaults when a property is inactive or unavailable:
   - Occlusion = `1.0`
   - Roughness = `0.5`
   - Metallic = `0.0`
@@ -303,14 +306,14 @@ When replacing an existing LOD, the existing LOD ScreenSize is preserved.
   - Routes matching trunk/branch material triangles into fixed cross-card planes.
 - `Trunk Card Plane Count`
   - Number of trunk planes, from `2` to `4`.
-- `Boost Trunk Card Atlas Resolution`
-  - Gives trunk cross-card atlas tiles a fixed `2x` packing weight.
+- `Trunk Card Atlas Scale`
+  - Gives trunk cross-card atlas tiles a `1.5x` or `2.0x` packing weight.
 - `Trunk Card Material Keywords`
   - Material-name keywords used to identify trunk/branch triangles.
 - `Texture Atlas Resolution`
   - Fixed square atlas resolution.
 - `Source Material Bake Resolution`
-  - Per-material UV-space bake resolution used before projecting evaluated source material outputs into the billboard atlas.
+  - Resolution used by the fallback/evaluation path for source-material UV-space data, mainly opacity fallback and alpha analysis. Final atlas channels are baked per billboard tile.
 - `Texture Tile Padding Pixels`
   - Transparent padding around each tile.
 - `Enable Alpha Aware Tile Crop`
@@ -343,7 +346,7 @@ The tool report includes:
 - alpha-aware cropped plane count
 - readable source texture count
 - alpha policy
-- normal source information
+- normal material-output bake information
 - generated asset paths
 - mesh output target and source LOD index when source mesh LOD output is enabled
 
@@ -352,6 +355,7 @@ For texture packing, prefer `packed tile usage` over `painted pixels` when judgi
 ## Notes
 
 - This is an editor asset-generation plugin, not a runtime generation system.
-- Source material graph evaluation is intentionally limited to explicit texture and common parameter reads. Complex procedural material logic is not fully evaluated.
+- Final atlas channels are generated through Unreal material property baking. Material functions, Material Attributes, parameter blends, tangent-space normal maps, WPO, and Custom nodes are evaluated by the material baker where supported by Unreal's editor baking path.
+- The opacity fallback path can still read direct opacity textures/parameters when the GPU `OpacityMask` export is unusable for a masked material.
 - The generated proxy quality depends on source geometry, UVs, material setup, alpha masks, and the selected technique/settings.
 - The material template is project-owned. The plugin only duplicates it and assigns generated texture parameters.

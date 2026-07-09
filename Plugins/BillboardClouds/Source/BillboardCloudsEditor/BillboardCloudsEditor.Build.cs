@@ -29,6 +29,9 @@ public class BillboardCloudsEditor : ModuleRules
 				"MeshDescription",
 				"StaticMeshDescription",
 				"MaterialBaking",
+				"RenderCore",
+				"RHI",
+				"Renderer",
 			}
 		);
 	}

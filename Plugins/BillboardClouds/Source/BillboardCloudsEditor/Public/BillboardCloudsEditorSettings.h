@@ -19,8 +19,7 @@ UENUM()
 enum class EBillboardCloudsCrackReductionMode : uint8
 {
 	Off UMETA(DisplayName = "Off"),
-	PaperExact UMETA(DisplayName = "Paper Exact - Envelope Intersection"),
-	BoundaryAware UMETA(DisplayName = "Boundary Aware - Envelope Boundary Band")
+	ScaledEnvelopeClip UMETA(DisplayName = "Scaled Envelope-Clipped Projection")
 };
 
 UENUM()
@@ -30,6 +29,13 @@ enum class EBillboardCloudsDoubleSidedBakeMode : uint8
 	TrunkCardsOnly UMETA(DisplayName = "Trunk Cards Only"),
 	BillboardPlanesOnly UMETA(DisplayName = "Billboard Planes Only"),
 	AllPlanes UMETA(DisplayName = "All Planes")
+};
+
+UENUM()
+enum class EBillboardCloudsTrunkCardAtlasScale : uint8
+{
+	OnePointFiveX UMETA(DisplayName = "1.5x"),
+	TwoX UMETA(DisplayName = "2.0x")
 };
 
 UENUM()
@@ -55,10 +61,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Technique", meta = (ToolTip = "Plane-space greedy cover follows the first paper. K-means clustering follows the improved second paper. God of War card capture greedily picks the best card until all faces are claimed."))
 	EBillboardCloudsTechnique Technique = EBillboardCloudsTechnique::PlaneSpaceGreedy;
 
-	UPROPERTY(config, EditAnywhere, Category = "Plane Cover", meta = (ClampMin = "0.0", EditCondition = "Technique == EBillboardCloudsTechnique::PlaneSpaceGreedy || Technique == EBillboardCloudsTechnique::GodOfWarCards", EditConditionHides, ToolTip = "Relative object-space error. The analyzer multiplies this by the selected mesh bounds sphere radius. For God of War cards this is the thick-slice closeness parameter."))
+	UPROPERTY(config, EditAnywhere, Category = "Plane Cover", meta = (ClampMin = "0.0", ToolTip = "Relative object-space error. The analyzer multiplies this by the selected mesh bounds sphere radius. Plane-space and God of War cards use it as the cover/closeness tolerance; K-Means uses it for generated proxy footprint padding and minimum extent."))
 	double RelativeError = 0.01;
 
-	UPROPERTY(config, EditAnywhere, Category = "Plane Cover", meta = (ClampMin = "0.0", EditCondition = "Technique == EBillboardCloudsTechnique::PlaneSpaceGreedy || Technique == EBillboardCloudsTechnique::GodOfWarCards", EditConditionHides, ToolTip = "Minimum object-space error in Unreal centimeters. For God of War cards this is the minimum thick-slice closeness."))
+	UPROPERTY(config, EditAnywhere, Category = "Plane Cover", meta = (ClampMin = "0.0", ToolTip = "Minimum object-space error in Unreal centimeters. This is the lower bound for the derived tolerance used by plane-space cover, God of War card closeness, and K-Means proxy footprint padding."))
 	double MinimumErrorCm = 1.0;
 
 	UPROPERTY(config, EditAnywhere, Category = "Plane Space", meta = (ClampMin = "4", EditCondition = "Technique == EBillboardCloudsTechnique::PlaneSpaceGreedy", EditConditionHides, ToolTip = "Number of azimuth samples used in plane-space normal discretization."))
@@ -79,11 +85,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "K-Means", meta = (ClampMin = "1", ClampMax = "512", EditCondition = "Technique == EBillboardCloudsTechnique::KMeansClustering", EditConditionHides, ToolTip = "Maximum assignment/refit iterations for the second paper's k-means solver."))
 	int32 KMeansMaxIterations = 64;
 
-	UPROPERTY(config, EditAnywhere, Category = "K-Means", meta = (EditCondition = "Technique == EBillboardCloudsTechnique::KMeansClustering", EditConditionHides, ToolTip = "Crack reduction for the second paper. Paper Exact projects intersecting envelope content onto both planes. Boundary Aware limits the extra projection to an envelope-boundary band for alpha-card vegetation."))
+	UPROPERTY(config, EditAnywhere, Category = "K-Means", meta = (EditCondition = "Technique == EBillboardCloudsTechnique::KMeansClustering", EditConditionHides, ToolTip = "Crack reduction for K-Means. Scaled Envelope-Clipped Projection clips cross-plane projection fragments against a scaled neighbor envelope before GPU material baking."))
 	EBillboardCloudsCrackReductionMode KMeansCrackReductionMode = EBillboardCloudsCrackReductionMode::Off;
 
-	UPROPERTY(config, EditAnywhere, Category = "K-Means", meta = (ClampMin = "0.0", ClampMax = "200.0", EditCondition = "Technique == EBillboardCloudsTechnique::KMeansClustering && KMeansCrackReductionMode == EBillboardCloudsCrackReductionMode::BoundaryAware", EditConditionHides, ToolTip = "Object-space width in centimeters for boundary-aware crack reduction. Only pixels near either intersecting envelope boundary are projected onto the neighbor plane."))
-	double KMeansBoundaryCrackReductionWidthCm = 8.0;
+	UPROPERTY(config, EditAnywhere, Category = "K-Means", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Technique == EBillboardCloudsTechnique::KMeansClustering && KMeansCrackReductionMode == EBillboardCloudsCrackReductionMode::ScaledEnvelopeClip", EditConditionHides, ToolTip = "Scale applied to the K-Means crack-reduction envelope before clipping cross-plane projection fragments. 1.0 keeps the full envelope; smaller values reduce overfill on alpha-card foliage."))
+	double KMeansCrackReductionProjectionScale = 1.0;
 
 	UPROPERTY(config, EditAnywhere, Category = "God of War Cards", meta = (ClampMin = "0", ClampMax = "5", EditCondition = "Technique == EBillboardCloudsTechnique::GodOfWarCards", EditConditionHides, ToolTip = "Subdivisions of the geodesic sphere used for half-sphere card directions. Higher values test more directions."))
 	int32 GodOfWarGeodesicSubdivisions = 2;
@@ -97,8 +103,8 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Trunk Cards", meta = (ClampMin = "2", ClampMax = "4", EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Number of vertical trunk cross-card planes. 2 is a cross card, 3 is a three-way star, 4 is a four-way star."))
 	int32 TrunkCardPlaneCount = 4;
 
-	UPROPERTY(config, EditAnywhere, Category = "Trunk Cards", meta = (EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Give trunk cross-card atlas tiles a fixed 2x resolution weight during packing. The atlas resolution stays fixed, so foliage billboard tiles are compressed to make room."))
-	bool bBoostTrunkCardAtlasResolution = true;
+	UPROPERTY(config, EditAnywhere, Category = "Trunk Cards", meta = (EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Resolution weight for trunk cross-card atlas tiles during packing. The atlas resolution stays fixed, so larger trunk tiles reduce space available to foliage billboard tiles."))
+	EBillboardCloudsTrunkCardAtlasScale TrunkCardAtlasScale = EBillboardCloudsTrunkCardAtlasScale::TwoX;
 
 	UPROPERTY(config, EditAnywhere, Category = "Trunk Cards", meta = (EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Material instance or parent material name keywords used to route triangles into fixed vertical trunk cross-card planes instead of the selected Billboard Clouds technique. Empty means no triangles are routed."))
 	TArray<FString> TrunkCardMaterialKeywords;
@@ -112,7 +118,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "256", ClampMax = "8192", ToolTip = "Generated square atlas resolution. Billboard tile sizes are automatically scaled and packed to maximize use of this texture."))
 	int32 TextureAtlasResolution = 4096;
 
-	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "256", ClampMax = "8192", ToolTip = "Resolution used for per-material UV-space baking before projecting evaluated source material outputs into the billboard atlas. Higher values preserve complex material graphs better but increase bake cost per material slot."))
+	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ClampMin = "256", ClampMax = "8192", ToolTip = "Resolution used by the fallback/evaluation path for source-material UV-space data, mainly opacity fallback and alpha analysis. Final atlas channels are baked per billboard tile."))
 	int32 SourceMaterialBakeResolution = 2048;
 
 	UPROPERTY(config, EditAnywhere, Category = "Texture", meta = (ToolTip = "Run a pre-bake alpha pass and crop each billboard tile rectangle to the alpha-painted outer bounds before final packing. This improves per-tile usage by removing transparent outer borders; it does not fill interior alpha holes."))

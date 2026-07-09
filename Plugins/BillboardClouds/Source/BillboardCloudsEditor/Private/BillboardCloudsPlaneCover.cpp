@@ -15,7 +15,6 @@ namespace UE::BillboardClouds
 		constexpr double DegenerateTriangleTolerance = 1.0e-8;
 		constexpr double RhoRangePadding = 1.0e-4;
 		constexpr double PaperPenaltyWeight = 10.0;
-		constexpr double TrunkCardAtlasResolutionScale = 2.0;
 
 		struct FRhoBinAccumulator
 		{
@@ -869,8 +868,8 @@ namespace UE::BillboardClouds
 			double MaxPlaneDimension = 1.0;
 			for (const FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
 			{
-				const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PreparedPlane.bIsTrunkCard
-					? TrunkCardAtlasResolutionScale
+				const double AtlasResolutionScale = PreparedPlane.bIsTrunkCard
+					? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
 					: 1.0;
 				MaxPlaneDimension = FMath::Max(
 					MaxPlaneDimension,
@@ -883,8 +882,8 @@ namespace UE::BillboardClouds
 				for (int32 PlaneIndex = 0; PlaneIndex < PreparedPlanes.Num(); ++PlaneIndex)
 				{
 					FPreparedProxyPlane& PreparedPlane = PreparedPlanes[PlaneIndex];
-					const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PreparedPlane.bIsTrunkCard
-						? TrunkCardAtlasResolutionScale
+					const double AtlasResolutionScale = PreparedPlane.bIsTrunkCard
+						? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
 						: 1.0;
 					const double PlaneWidth = FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, 1.0) * AtlasResolutionScale;
 					const double PlaneHeight = FMath::Max(PreparedPlane.MaxV - PreparedPlane.MinV, 1.0) * AtlasResolutionScale;
@@ -1032,8 +1031,8 @@ namespace UE::BillboardClouds
 			double MaxPlaneDimension = 1.0;
 			for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
 			{
-				const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PlaneInfo.bIsTrunkCard
-					? TrunkCardAtlasResolutionScale
+				const double AtlasResolutionScale = PlaneInfo.bIsTrunkCard
+					? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
 					: 1.0;
 				MaxPlaneDimension = FMath::Max(
 					MaxPlaneDimension,
@@ -1046,8 +1045,8 @@ namespace UE::BillboardClouds
 				for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
 				{
 					FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
-					const double AtlasResolutionScale = Settings.bBoostTrunkCardAtlasResolution && PlaneInfo.bIsTrunkCard
-						? TrunkCardAtlasResolutionScale
+					const double AtlasResolutionScale = PlaneInfo.bIsTrunkCard
+						? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
 						: 1.0;
 					const double PlaneWidth = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, 1.0) * AtlasResolutionScale;
 					const double PlaneHeight = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, 1.0) * AtlasResolutionScale;
@@ -1295,32 +1294,78 @@ namespace UE::BillboardClouds
 			return Area;
 		}
 
-		bool DoesTriangleIntersectPreparedPlaneEnvelope(
+		void GetScaledPreparedPlaneEnvelopeBounds(
+			const FPreparedProxyPlane& Plane,
+			const double EnvelopeScale,
+			double& OutMinU,
+			double& OutMaxU,
+			double& OutMinV,
+			double& OutMaxV,
+			double& OutMinSignedDistance,
+			double& OutMaxSignedDistance)
+		{
+			const double Scale = FMath::Clamp(EnvelopeScale, 0.0, 1.0);
+			auto ScaleRange = [Scale](const double MinValue, const double MaxValue, double& OutMinValue, double& OutMaxValue)
+			{
+				const double Center = (MinValue + MaxValue) * 0.5;
+				const double HalfExtent = FMath::Max(0.0, (MaxValue - MinValue) * 0.5 * Scale);
+				OutMinValue = Center - HalfExtent;
+				OutMaxValue = Center + HalfExtent;
+			};
+
+			ScaleRange(Plane.EnvelopeMinU, Plane.EnvelopeMaxU, OutMinU, OutMaxU);
+			ScaleRange(Plane.EnvelopeMinV, Plane.EnvelopeMaxV, OutMinV, OutMaxV);
+			ScaleRange(Plane.EnvelopeMinSignedDistance, Plane.EnvelopeMaxSignedDistance, OutMinSignedDistance, OutMaxSignedDistance);
+		}
+
+		struct FClippedCrackReductionTriangle
+		{
+			int32 TriangleIndex = INDEX_NONE;
+			TArray<FVector> ClippedPolygon;
+		};
+
+		bool ClipTriangleToPreparedPlaneEnvelope(
 			const TArray<FSourceTriangle>& Triangles,
 			const int32 TriangleIndex,
 			const FPreparedProxyPlane& Plane,
-			const double Tolerance)
+			const double Tolerance,
+			const double EnvelopeScale,
+			TArray<FVector>& OutClippedPolygon)
 		{
+			OutClippedPolygon.Reset();
 			if (!Triangles.IsValidIndex(TriangleIndex))
 			{
 				return false;
 			}
 
 			const FSourceTriangle& Triangle = Triangles[TriangleIndex];
-			TArray<FVector> ClippedPolygon;
-			ClippedPolygon.Reserve(8);
-			ClippedPolygon.Add(Triangle.Vertices[0]);
-			ClippedPolygon.Add(Triangle.Vertices[1]);
-			ClippedPolygon.Add(Triangle.Vertices[2]);
+			OutClippedPolygon.Reserve(8);
+			OutClippedPolygon.Add(Triangle.Vertices[0]);
+			OutClippedPolygon.Add(Triangle.Vertices[1]);
+			OutClippedPolygon.Add(Triangle.Vertices[2]);
 
-			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 0, Plane.EnvelopeMinU, true, Tolerance);
-			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 0, Plane.EnvelopeMaxU, false, Tolerance);
-			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 1, Plane.EnvelopeMinV, true, Tolerance);
-			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 1, Plane.EnvelopeMaxV, false, Tolerance);
-			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 2, Plane.EnvelopeMinSignedDistance, true, Tolerance);
-			ClipPolygonAgainstPreparedPlaneEnvelopeBound(ClippedPolygon, Plane, 2, Plane.EnvelopeMaxSignedDistance, false, Tolerance);
+			double MinU = 0.0;
+			double MaxU = 0.0;
+			double MinV = 0.0;
+			double MaxV = 0.0;
+			double MinSignedDistance = 0.0;
+			double MaxSignedDistance = 0.0;
+			GetScaledPreparedPlaneEnvelopeBounds(Plane, EnvelopeScale, MinU, MaxU, MinV, MaxV, MinSignedDistance, MaxSignedDistance);
 
-			return ComputePolygonArea3D(ClippedPolygon) > UE_SMALL_NUMBER;
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(OutClippedPolygon, Plane, 0, MinU, true, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(OutClippedPolygon, Plane, 0, MaxU, false, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(OutClippedPolygon, Plane, 1, MinV, true, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(OutClippedPolygon, Plane, 1, MaxV, false, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(OutClippedPolygon, Plane, 2, MinSignedDistance, true, Tolerance);
+			ClipPolygonAgainstPreparedPlaneEnvelopeBound(OutClippedPolygon, Plane, 2, MaxSignedDistance, false, Tolerance);
+
+			if (ComputePolygonArea3D(OutClippedPolygon) <= UE_SMALL_NUMBER)
+			{
+				OutClippedPolygon.Reset();
+				return false;
+			}
+
+			return true;
 		}
 
 		void CollectTrianglesIntersectingPreparedPlaneEnvelope(
@@ -1328,14 +1373,17 @@ namespace UE::BillboardClouds
 			const TArray<int32>& TriangleIndices,
 			const FPreparedProxyPlane& Plane,
 			const double Tolerance,
-			TArray<int32>& OutTriangleIndices)
+			const double EnvelopeScale,
+			TArray<FClippedCrackReductionTriangle>& OutTriangles)
 		{
-			OutTriangleIndices.Reset();
+			OutTriangles.Reset();
 			for (const int32 TriangleIndex : TriangleIndices)
 			{
-				if (DoesTriangleIntersectPreparedPlaneEnvelope(Triangles, TriangleIndex, Plane, Tolerance))
+				FClippedCrackReductionTriangle Candidate;
+				if (ClipTriangleToPreparedPlaneEnvelope(Triangles, TriangleIndex, Plane, Tolerance, EnvelopeScale, Candidate.ClippedPolygon))
 				{
-					OutTriangleIndices.Add(TriangleIndex);
+					Candidate.TriangleIndex = TriangleIndex;
+					OutTriangles.Add(MoveTemp(Candidate));
 				}
 			}
 		}
@@ -1352,9 +1400,13 @@ namespace UE::BillboardClouds
 			const TArray<int32>& PrimaryTriangleIndices,
 			const int32 SourcePlaneInfoIndex,
 			const int32 TriangleIndex,
-			const bool bBoundaryAware)
+			const TArray<FVector>& ClippedPolygon)
 		{
 			if (PrimaryTriangleIndices.Contains(TriangleIndex))
+			{
+				return;
+			}
+			if (ClippedPolygon.Num() < 3)
 			{
 				return;
 			}
@@ -1369,7 +1421,7 @@ namespace UE::BillboardClouds
 			FCrackReductionProjection& Projection = CrackProjections.AddDefaulted_GetRef();
 			Projection.TriangleIndex = TriangleIndex;
 			Projection.SourcePlaneInfoIndex = SourcePlaneInfoIndex;
-			Projection.bBoundaryAware = bBoundaryAware;
+			Projection.ClippedPolygon = ClippedPolygon;
 		}
 
 		void ApplyKMeansEnvelopeCrackReduction(
@@ -1384,15 +1436,19 @@ namespace UE::BillboardClouds
 				return;
 			}
 
-			const bool bBoundaryAware = Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::BoundaryAware;
+			const double ProjectionScale = FMath::Clamp(Settings.KMeansCrackReductionProjectionScale, 0.0, 1.0);
+			if (ProjectionScale <= UE_DOUBLE_SMALL_NUMBER)
+			{
+				return;
+			}
 			constexpr double Tolerance = 1.0e-4;
 			TArray<TSet<uint64>> CrackProjectionKeySets;
 			CrackProjectionKeySets.SetNum(PreparedPlanes.Num());
 			TArray<TArray<FCrackReductionProjection>> CrackProjectionLists;
 			CrackProjectionLists.SetNum(PreparedPlanes.Num());
 
-			TArray<int32> TrianglesFromAIntersectingB;
-			TArray<int32> TrianglesFromBIntersectingA;
+			TArray<FClippedCrackReductionTriangle> TrianglesFromAIntersectingB;
+			TArray<FClippedCrackReductionTriangle> TrianglesFromBIntersectingA;
 			for (int32 PlaneAIndex = 0; PlaneAIndex < PreparedPlanes.Num(); ++PlaneAIndex)
 			{
 				for (int32 PlaneBIndex = PlaneAIndex + 1; PlaneBIndex < PreparedPlanes.Num(); ++PlaneBIndex)
@@ -1404,20 +1460,20 @@ namespace UE::BillboardClouds
 						continue;
 					}
 
-					CollectTrianglesIntersectingPreparedPlaneEnvelope(Triangles, PlaneA.TriangleIndices, PlaneB, Tolerance, TrianglesFromAIntersectingB);
-					CollectTrianglesIntersectingPreparedPlaneEnvelope(Triangles, PlaneB.TriangleIndices, PlaneA, Tolerance, TrianglesFromBIntersectingA);
+					CollectTrianglesIntersectingPreparedPlaneEnvelope(Triangles, PlaneA.TriangleIndices, PlaneB, Tolerance, ProjectionScale, TrianglesFromAIntersectingB);
+					CollectTrianglesIntersectingPreparedPlaneEnvelope(Triangles, PlaneB.TriangleIndices, PlaneA, Tolerance, ProjectionScale, TrianglesFromBIntersectingA);
 					if (TrianglesFromAIntersectingB.IsEmpty() || TrianglesFromBIntersectingA.IsEmpty())
 					{
 						continue;
 					}
 
-					for (const int32 TriangleIndex : TrianglesFromAIntersectingB)
+					for (const FClippedCrackReductionTriangle& Triangle : TrianglesFromAIntersectingB)
 					{
-						AddCrackReductionProjection(CrackProjectionKeySets[PlaneBIndex], CrackProjectionLists[PlaneBIndex], PlaneB.TriangleIndices, PlaneAIndex, TriangleIndex, bBoundaryAware);
+						AddCrackReductionProjection(CrackProjectionKeySets[PlaneBIndex], CrackProjectionLists[PlaneBIndex], PlaneB.TriangleIndices, PlaneAIndex, Triangle.TriangleIndex, Triangle.ClippedPolygon);
 					}
-					for (const int32 TriangleIndex : TrianglesFromBIntersectingA)
+					for (const FClippedCrackReductionTriangle& Triangle : TrianglesFromBIntersectingA)
 					{
-						AddCrackReductionProjection(CrackProjectionKeySets[PlaneAIndex], CrackProjectionLists[PlaneAIndex], PlaneA.TriangleIndices, PlaneBIndex, TriangleIndex, bBoundaryAware);
+						AddCrackReductionProjection(CrackProjectionKeySets[PlaneAIndex], CrackProjectionLists[PlaneAIndex], PlaneA.TriangleIndices, PlaneBIndex, Triangle.TriangleIndex, Triangle.ClippedPolygon);
 					}
 				}
 			}
@@ -2408,7 +2464,11 @@ namespace UE::BillboardClouds
 				return false;
 			}
 
-			const bool bHasUVs = StaticMeshVertexBuffer.GetNumTexCoords() > 0;
+			const int32 SourceUVChannelCount = StaticMeshVertexBuffer.GetNumTexCoords();
+			const bool bHasUVs = SourceUVChannelCount > 0;
+			const int32 StoredUVChannelCount = bHasUVs
+				? FMath::Min(SourceUVChannelCount, UE::BillboardClouds::MaxMaterialBakeUVChannels)
+				: 0;
 			OutTriangles.Reserve(Indices.Num() / 3);
 
 			for (const FStaticMeshSection& Section : LODResources.Sections)
@@ -2446,7 +2506,11 @@ namespace UE::BillboardClouds
 						Triangle.Vertices[VertexIndex] = FVector(PositionBuffer.VertexPosition(RenderVertexIndex));
 						if (bHasUVs)
 						{
-							Triangle.UVs[VertexIndex] = StaticMeshVertexBuffer.GetVertexUV(RenderVertexIndex, 0);
+							for (int32 UVChannel = 0; UVChannel < StoredUVChannelCount; ++UVChannel)
+							{
+								Triangle.UVChannels[UVChannel][VertexIndex] = StaticMeshVertexBuffer.GetVertexUV(RenderVertexIndex, UVChannel);
+							}
+							Triangle.UVs[VertexIndex] = Triangle.UVChannels[0][VertexIndex];
 						}
 
 						const FVector4f RenderTangentZ4 = StaticMeshVertexBuffer.VertexTangentZ(RenderVertexIndex);
@@ -2458,6 +2522,27 @@ namespace UE::BillboardClouds
 						}
 
 						Triangle.VertexNormals[VertexIndex] = SourceNormal;
+
+						const FVector4f RenderTangentX4 = StaticMeshVertexBuffer.VertexTangentX(RenderVertexIndex);
+						FVector SourceTangent(RenderTangentX4.X, RenderTangentX4.Y, RenderTangentX4.Z);
+						SourceTangent = SourceTangent.GetSafeNormal();
+						if (SourceTangent.IsNearlyZero())
+						{
+							// Derive a fallback tangent perpendicular to the normal
+							const FVector ReferenceAxis = FMath::Abs(SourceNormal.Z) < 0.95 ? FVector::UpVector : FVector::ForwardVector;
+							SourceTangent = FVector::CrossProduct(ReferenceAxis, SourceNormal).GetSafeNormal();
+							if (SourceTangent.IsNearlyZero())
+							{
+								SourceTangent = FVector::ForwardVector;
+							}
+						}
+						Triangle.VertexTangents[VertexIndex] = SourceTangent;
+
+						// Derive binormal sign from render TangentY
+						const FVector4f RenderTangentY4 = StaticMeshVertexBuffer.VertexTangentY(RenderVertexIndex);
+						const FVector RenderTangentY(RenderTangentY4.X, RenderTangentY4.Y, RenderTangentY4.Z);
+						const FVector DerivedBinormal = FVector::CrossProduct(SourceNormal, SourceTangent);
+						Triangle.BinormalSigns[VertexIndex] = FVector::DotProduct(DerivedBinormal, RenderTangentY) >= 0.0 ? 1.0f : -1.0f;
 					}
 
 					const FVector Edge01 = Triangle.Vertices[1] - Triangle.Vertices[0];
@@ -2473,8 +2558,10 @@ namespace UE::BillboardClouds
 					Triangle.ShadingNormal = (Triangle.VertexNormals[0] + Triangle.VertexNormals[1] + Triangle.VertexNormals[2]).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Triangle.Normal);
 					Triangle.Area = 0.5 * DoubleArea;
 					Triangle.MaterialIndex = Section.MaterialIndex;
+					Triangle.NumUVChannels = StoredUVChannelCount;
 					Triangle.bHasUVs = bHasUVs;
 					Triangle.bHasSourceShadingNormal = true;
+					Triangle.bHasTangents = true;
 					OutTriangles.Add(Triangle);
 				}
 			}
@@ -2509,12 +2596,24 @@ namespace UE::BillboardClouds
 		const TVertexAttributesConstRef<FVector3f> VertexPositions = MeshDescription->GetVertexPositions();
 		const FStaticMeshConstAttributes MeshAttributes(*MeshDescription);
 		const bool bHasVertexInstanceNormals = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Normal);
+		const bool bHasVertexInstanceTangents = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Tangent);
+		const bool bHasVertexInstanceBinormalSigns = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::BinormalSign);
 		const bool bHasVertexInstanceUVs = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::TextureCoordinate);
 		const bool bHasPolygonGroupMaterialSlots = MeshDescription->PolygonGroupAttributes().HasAttribute(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
 		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceNormals;
 		if (bHasVertexInstanceNormals)
 		{
 			VertexInstanceNormals = MeshAttributes.GetVertexInstanceNormals();
+		}
+		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceTangents;
+		if (bHasVertexInstanceTangents)
+		{
+			VertexInstanceTangents = MeshAttributes.GetVertexInstanceTangents();
+		}
+		TVertexInstanceAttributesConstRef<float> VertexInstanceBinormalSigns;
+		if (bHasVertexInstanceBinormalSigns)
+		{
+			VertexInstanceBinormalSigns = MeshAttributes.GetVertexInstanceBinormalSigns();
 		}
 		TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs;
 		if (bHasVertexInstanceUVs)
@@ -2580,14 +2679,54 @@ namespace UE::BillboardClouds
 					}
 				}
 			}
+			if (bHasVertexInstanceTangents)
+			{
+				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				if (TriangleVertexInstanceIDs.Num() == 3)
+				{
+					bool bAnyTangentValid = false;
+					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+					{
+						FVector SourceTangent = FVector(VertexInstanceTangents[TriangleVertexInstanceIDs[VertexIndex]]).GetSafeNormal();
+						if (SourceTangent.IsNearlyZero())
+						{
+							const FVector& VertexNormal = Triangle.VertexNormals[VertexIndex];
+							const FVector ReferenceAxis = FMath::Abs(VertexNormal.Z) < 0.95 ? FVector::UpVector : FVector::ForwardVector;
+							SourceTangent = FVector::CrossProduct(ReferenceAxis, VertexNormal).GetSafeNormal();
+							if (SourceTangent.IsNearlyZero())
+							{
+								SourceTangent = FVector::ForwardVector;
+							}
+						}
+						else
+						{
+							bAnyTangentValid = true;
+						}
+						Triangle.VertexTangents[VertexIndex] = SourceTangent;
+						Triangle.BinormalSigns[VertexIndex] = bHasVertexInstanceBinormalSigns
+							? (VertexInstanceBinormalSigns[TriangleVertexInstanceIDs[VertexIndex]] >= 0.0f ? 1.0f : -1.0f)
+							: 1.0f;
+					}
+					Triangle.bHasTangents = bAnyTangentValid;
+				}
+			}
 			if (bHasVertexInstanceUVs && VertexInstanceUVs.GetNumChannels() > 0)
 			{
 				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
 				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
-					Triangle.UVs[0] = VertexInstanceUVs.Get(TriangleVertexInstanceIDs[0], 0);
-					Triangle.UVs[1] = VertexInstanceUVs.Get(TriangleVertexInstanceIDs[1], 0);
-					Triangle.UVs[2] = VertexInstanceUVs.Get(TriangleVertexInstanceIDs[2], 0);
+					const int32 StoredUVChannelCount = FMath::Min(VertexInstanceUVs.GetNumChannels(), UE::BillboardClouds::MaxMaterialBakeUVChannels);
+					for (int32 UVChannel = 0; UVChannel < StoredUVChannelCount; ++UVChannel)
+					{
+						for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+						{
+							Triangle.UVChannels[UVChannel][VertexIndex] = VertexInstanceUVs.Get(TriangleVertexInstanceIDs[VertexIndex], UVChannel);
+						}
+					}
+					Triangle.UVs[0] = Triangle.UVChannels[0][0];
+					Triangle.UVs[1] = Triangle.UVChannels[0][1];
+					Triangle.UVs[2] = Triangle.UVChannels[0][2];
+					Triangle.NumUVChannels = StoredUVChannelCount;
 					Triangle.bHasUVs = true;
 				}
 			}
@@ -4568,15 +4707,11 @@ namespace UE::BillboardClouds
 		const FString MetricSummary = FString::Printf(TEXT("object-space, epsilon=%.2f cm"), Settings.ErrorTolerance);
 		const FString PenaltySummary = FString::Printf(TEXT("on, weight=%.2f, directional missed set"), PaperPenaltyWeight);
 		FString KMeansCrackReductionSummary = TEXT("off");
-		if (Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::PaperExact)
-		{
-			KMeansCrackReductionSummary = TEXT("paper-exact envelope-intersection stencil");
-		}
-		else if (Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::BoundaryAware)
+		if (Settings.KMeansCrackReductionMode == EKMeansCrackReductionMode::ScaledEnvelopeClip)
 		{
 			KMeansCrackReductionSummary = FString::Printf(
-				TEXT("boundary-aware envelope-intersection band, width=%.2f cm"),
-				Settings.KMeansBoundaryCrackReductionWidth);
+				TEXT("scaled envelope-clipped projections, scale=%.2f"),
+				Settings.KMeansCrackReductionProjectionScale);
 		}
 		FString TextureSummary;
 		const TCHAR* DoubleSidedBakeSummary = TEXT("off");

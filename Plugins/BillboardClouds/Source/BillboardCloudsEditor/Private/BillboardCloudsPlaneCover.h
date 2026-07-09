@@ -7,6 +7,8 @@ struct FMeshDescription;
 
 namespace UE::BillboardClouds
 {
+	constexpr int32 MaxMaterialBakeUVChannels = 6;
+
 	enum class EPlaneCoverTechnique : uint8
 	{
 		PlaneSpaceGreedy,
@@ -17,8 +19,7 @@ namespace UE::BillboardClouds
 	enum class EKMeansCrackReductionMode : uint8
 	{
 		Off,
-		PaperExact,
-		BoundaryAware
+		ScaledEnvelopeClip
 	};
 
 	enum class EDoubleSidedBakeMode : uint8
@@ -33,13 +34,18 @@ namespace UE::BillboardClouds
 	{
 		FVector Vertices[3] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 		FVector2f UVs[3] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
+		FVector2f UVChannels[MaxMaterialBakeUVChannels][3] = {};
 		FVector VertexNormals[3] = { FVector::UpVector, FVector::UpVector, FVector::UpVector };
+		FVector VertexTangents[3] = { FVector::ForwardVector, FVector::ForwardVector, FVector::ForwardVector };
+		float BinormalSigns[3] = { 1.0f, 1.0f, 1.0f };
 		FVector Normal = FVector::UpVector;
 		FVector ShadingNormal = FVector::UpVector;
 		double Area = 0.0;
 		int32 MaterialIndex = INDEX_NONE;
+		int32 NumUVChannels = 0;
 		bool bHasUVs = false;
 		bool bHasSourceShadingNormal = false;
+		bool bHasTangents = false;
 		bool bTrunkCardOnly = false;
 	};
 
@@ -71,7 +77,7 @@ namespace UE::BillboardClouds
 		int32 KMeansPlaneCount = 150;
 		int32 KMeansMaxIterations = 64;
 		EKMeansCrackReductionMode KMeansCrackReductionMode = EKMeansCrackReductionMode::Off;
-		double KMeansBoundaryCrackReductionWidth = 8.0;
+		double KMeansCrackReductionProjectionScale = 1.0;
 		int32 GodOfWarGeodesicSubdivisions = 2;
 		double GodOfWarCandidateSpacingMultiplier = 1.0;
 		int32 NormalThetaSteps = 16;
@@ -82,7 +88,7 @@ namespace UE::BillboardClouds
 		int32 TextureAtlasResolution = 4096;
 		int32 SourceMaterialBakeResolution = 2048;
 		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;
-		bool bBoostTrunkCardAtlasResolution = true;
+		double TrunkCardAtlasScale = 2.0;
 		bool bEnableAlphaAwareTileCrop = false;
 		int32 AlphaAwareTileCropGuardPixels = 2;
 	};
@@ -126,7 +132,7 @@ namespace UE::BillboardClouds
 	{
 		int32 TriangleIndex = INDEX_NONE;
 		int32 SourcePlaneInfoIndex = INDEX_NONE;
-		bool bBoundaryAware = false;
+		TArray<FVector> ClippedPolygon;
 	};
 
 	struct FPlaneProxyPlaneInfo
