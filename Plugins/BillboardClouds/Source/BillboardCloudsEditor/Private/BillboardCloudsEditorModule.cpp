@@ -3957,6 +3957,12 @@ namespace
 		UMaterialInstanceConstant* Material = nullptr;
 	};
 
+	struct FProxyBatchBuildResult
+	{
+		FString Report;
+		TArray<UObject*> CreatedAssets;
+	};
+
 	FProxyAssetBuildResult MakeProxyBuildFailure(const UStaticMesh& StaticMesh, const FString& Error)
 	{
 		FProxyAssetBuildResult Result;
@@ -4372,6 +4378,65 @@ namespace
 			OutCreatedAssets.Add(BuildResult.Material);
 		}
 	}
+
+	FProxyBatchBuildResult BuildBillboardCloudProxyAssetsForSelection(
+		const TArray<UStaticMesh*>& StaticMeshes,
+		const UBillboardCloudsEditorSettings& EditorSettings)
+	{
+		FProxyBatchBuildResult BatchResult;
+
+		FScopedSlowTask SlowTask(StaticMeshes.Num(), LOCTEXT("CreatePlaneProxyMeshesSlowTask", "Creating Billboard Clouds plane proxy meshes..."));
+		SlowTask.MakeDialog();
+
+		for (UStaticMesh* StaticMesh : StaticMeshes)
+		{
+			if (!StaticMesh)
+			{
+				continue;
+			}
+
+			SlowTask.EnterProgressFrame(1.0f, FText::FromString(StaticMesh->GetName()));
+
+			const FProxyAssetBuildResult BuildResult = BuildBillboardCloudProxyAsset(*StaticMesh, EditorSettings);
+			BatchResult.Report += BuildResult.Report + TEXT("\n\n");
+			if (BuildResult.bSucceeded)
+			{
+				AppendProxyCreatedAssets(BuildResult, BatchResult.CreatedAssets);
+			}
+		}
+
+		return BatchResult;
+	}
+
+	void SyncCreatedProxyAssetsToContentBrowser(const TArray<UObject*>& CreatedAssets)
+	{
+		if (!CreatedAssets.IsEmpty() && GEditor)
+		{
+			GEditor->SyncBrowserToObjects(CreatedAssets);
+		}
+	}
+
+	void ShowNoStaticMeshSelectionMessage()
+	{
+		FMessageDialog::Open(
+			EAppMsgType::Ok,
+			LOCTEXT("NoStaticMeshSelectionForProxy", "Select one or more Static Mesh assets in the Content Browser, then run Tools > Billboard Clouds > Create Plane Proxy Meshes.")
+		);
+	}
+
+	void ShowProxyBuildReport(const FString& Report)
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Report));
+	}
+
+	void RunCreatePlaneProxyMeshes(
+		const TArray<UStaticMesh*>& StaticMeshes,
+		const UBillboardCloudsEditorSettings& EditorSettings)
+	{
+		const FProxyBatchBuildResult BatchResult = BuildBillboardCloudProxyAssetsForSelection(StaticMeshes, EditorSettings);
+		SyncCreatedProxyAssetsToContentBrowser(BatchResult.CreatedAssets);
+		ShowProxyBuildReport(BatchResult.Report);
+	}
 }
 
 void FBillboardCloudsEditorModule::StartupModule()
@@ -4411,41 +4476,14 @@ void FBillboardCloudsEditorModule::ExecuteCreatePlaneProxyMeshes(const FToolMenu
 	(void)MenuContext;
 
 	const TArray<UStaticMesh*> StaticMeshes = GetSelectedStaticMeshes();
-
 	if (StaticMeshes.IsEmpty())
 	{
-		FMessageDialog::Open(
-			EAppMsgType::Ok,
-			LOCTEXT("NoStaticMeshSelectionForProxy", "Select one or more Static Mesh assets in the Content Browser, then run Tools > Billboard Clouds > Create Plane Proxy Meshes.")
-		);
+		ShowNoStaticMeshSelectionMessage();
 		return;
 	}
 
 	const UBillboardCloudsEditorSettings* EditorSettings = GetDefault<UBillboardCloudsEditorSettings>();
-	FScopedSlowTask SlowTask(StaticMeshes.Num(), LOCTEXT("CreatePlaneProxyMeshesSlowTask", "Creating Billboard Clouds plane proxy meshes..."));
-	SlowTask.MakeDialog();
-
-	FString Report;
-	TArray<UObject*> CreatedAssets;
-
-	for (UStaticMesh* StaticMesh : StaticMeshes)
-	{
-		SlowTask.EnterProgressFrame(1.0f, FText::FromString(StaticMesh->GetName()));
-
-		const FProxyAssetBuildResult BuildResult = BuildBillboardCloudProxyAsset(*StaticMesh, *EditorSettings);
-		Report += BuildResult.Report + TEXT("\n\n");
-		if (BuildResult.bSucceeded)
-		{
-			AppendProxyCreatedAssets(BuildResult, CreatedAssets);
-		}
-	}
-
-	if (!CreatedAssets.IsEmpty() && GEditor)
-	{
-		GEditor->SyncBrowserToObjects(CreatedAssets);
-	}
-
-	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Report));
+	RunCreatePlaneProxyMeshes(StaticMeshes, *EditorSettings);
 }
 
 #undef LOCTEXT_NAMESPACE
