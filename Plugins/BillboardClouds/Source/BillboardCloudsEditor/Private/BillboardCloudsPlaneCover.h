@@ -37,6 +37,12 @@ namespace UE::BillboardClouds
 		FVector2f UVChannels[MaxMaterialBakeUVChannels][3] = {};
 		FVector VertexNormals[3] = { FVector::UpVector, FVector::UpVector, FVector::UpVector };
 		FVector VertexTangents[3] = { FVector::ForwardVector, FVector::ForwardVector, FVector::ForwardVector };
+		FVector4f VertexColors[3] =
+		{
+			FVector4f(1.0f, 1.0f, 1.0f, 1.0f),
+			FVector4f(1.0f, 1.0f, 1.0f, 1.0f),
+			FVector4f(1.0f, 1.0f, 1.0f, 1.0f)
+		};
 		float BinormalSigns[3] = { 1.0f, 1.0f, 1.0f };
 		FVector Normal = FVector::UpVector;
 		FVector ShadingNormal = FVector::UpVector;
@@ -46,6 +52,7 @@ namespace UE::BillboardClouds
 		bool bHasUVs = false;
 		bool bHasSourceShadingNormal = false;
 		bool bHasTangents = false;
+		bool bHasVertexColors = false;
 		bool bTrunkCardOnly = false;
 	};
 

@@ -131,7 +131,7 @@ V1.0 does not generate a material graph.
 
 Instead, configure your own material instance in:
 
-`Project Settings > Plugins > Billboard Clouds > Billboard Material Template`
+`Tools > Billboard Clouds > BillboardCloudsTools > Material > Billboard Material Template`
 
 The plugin duplicates that material instance for every generated proxy and assigns the enabled atlas textures to these texture parameters:
 
@@ -145,7 +145,7 @@ The template material is responsible for sampling those parameters correctly. Th
 
 Atlas output is controlled from:
 
-`Project Settings > Plugins > Billboard Clouds > Texture | Atlas Outputs`
+`Tools > Billboard Clouds > BillboardCloudsTools > Texture > Atlas Outputs`
 
 ### BaseColorOpacity
 
@@ -163,7 +163,7 @@ Default: enabled.
 BaseColor/Opacity bake behavior:
 
 - Uses Unreal material baking to evaluate the source material's final `BaseColor` and `OpacityMask` outputs directly into each billboard tile.
-- The temporary bake mesh preserves source UV channels, normals, tangents, and binormal signs, so material functions, Material Attributes, layered blends, parameter-driven mixes, and tangent-space texture sampling are evaluated by the material shader.
+- The temporary bake mesh preserves source UV channels, render-data vertex colors, normals, tangents, and binormal signs, so material functions, Material Attributes, layered blends, parameter-driven mixes, vertex-color masks, and tangent-space texture sampling are evaluated by the material shader.
 - Atlas merge resolves overlapping projected fragments per card side with a far-to-near painter order plus per-pixel tile depth, so BaseColor/Opacity/Normal/Mix follow the same visible source fragment.
 - If the GPU `OpacityMask` export is not usable for a masked material, opacity falls back to a projected evaluated/direct opacity source.
 
@@ -230,34 +230,43 @@ This improves per-tile usage when a tile has transparent outer borders. It does 
 ## Usage
 
 1. Enable the `BillboardClouds` plugin.
-2. Create or select a material instance template.
-3. Configure the template in:
+2. Run `Tools > Billboard Clouds > BillboardCloudsTools` to open the editor tool panel.
+3. Add source meshes through the panel's `Source Static Meshes` array, or select meshes in the Content Browser and click `Add Content Browser Selection`.
+4. Configure the material template, generation technique, mesh output, and atlas outputs directly in the panel.
+5. Click `Bake`.
 
-   `Project Settings > Plugins > Billboard Clouds > Billboard Material Template`
+Generated textures and material instances use the configurable `Asset` paths and naming rules. Paths are relative to the parent of the source mesh folder, and the Content Browser syncs to the generated or modified assets after generation.
 
-4. Configure the generation technique and atlas outputs.
-5. Select one or more `Static Mesh` assets in the Content Browser.
-6. Run:
+For a source mesh at `/Game/Trees/StaticMeshes/SM_Tree`, the default outputs are:
 
-   `Tools > Billboard Clouds > Create Plane Proxy Meshes`
-
-Generated textures and material instances are created next to the source mesh and the Content Browser syncs to the generated or modified assets after generation.
-
-Typical outputs:
-
-- `*_BillboardCloudProxy` when `Mesh Output Mode` is `Create Separate Mesh Asset`
-- `*_BillboardCloudAtlas`
-- `*_BillboardCloudNormalAtlas`
-- `*_BillboardCloudMixAtlas`
-- `*_BillboardCloudMaterialInstance`
+- `/Game/Trees/StaticMeshes/SM_Tree_BillboardCloudProxy` when `Mesh Output Mode` is `Create Separate Mesh Asset`
+- `/Game/Trees/Textures/T_SM_Tree_DA`
+- `/Game/Trees/Textures/T_SM_Tree_NR`
+- `/Game/Trees/Textures/T_SM_Tree_M`
+- `/Game/Trees/Materials/MI_SM_Tree`
 
 Only enabled atlas outputs are generated.
+
+Generated atlases use streamed mip chains rather than `NoMipmaps`. `ColorOpacity`, `NormalMask`, and `Mix` use the `World`, `WorldNormalMap`, and `WorldSpecular` texture groups respectively. All three atlases use BC7 compression; `ColorOpacity` remains sRGB while `NormalMask` and `Mix` remain linear. For masked proxy templates, the `ColorOpacity` alpha mip chain preserves coverage using the template material's opacity-mask clip value.
+
+Asset output is staged as one operation. Textures, the copied material instance, and a separate proxy mesh are registered only after the complete bundle succeeds. If texture/material/mesh creation fails, staged assets are removed; a failed source-LOD append also restores the original source-model count and package dirty state.
+
+## Asset Output
+
+The `Asset` category in `BillboardCloudsTools` configures:
+
+- texture and material output folders relative to the parent of the source mesh folder
+- texture prefix
+- BaseColor/Opacity, Normal, and Mix suffixes
+- material instance prefix and optional suffix
+
+Folder values may contain nested relative paths. Invalid package paths stop the bake with an explicit error instead of falling back to the source mesh directory.
 
 ## Mesh Output
 
 Mesh output is controlled from:
 
-`Project Settings > Plugins > Billboard Clouds > Mesh Output`
+`Tools > Billboard Clouds > BillboardCloudsTools > Mesh Output`
 
 ### Create Separate Mesh Asset
 
@@ -284,6 +293,12 @@ When replacing an existing LOD, the existing LOD ScreenSize is preserved.
 
 ## Important Settings
 
+- `Texture Output Folder Name` / `Material Output Folder Name`
+  - Relative output paths under the parent of the source mesh folder.
+- `Texture Name Prefix` and texture suffix settings
+  - Configure `T_`, `_DA`, `_NR`, and `_M` naming.
+- `Material Instance Name Prefix` / `Material Instance Name Suffix`
+  - Configure generated material instance naming; the defaults produce `MI_<MeshName>`.
 - `Technique`
   - Selects Paper 1, Paper 2, or God of War path.
 - `Mesh Output Mode`

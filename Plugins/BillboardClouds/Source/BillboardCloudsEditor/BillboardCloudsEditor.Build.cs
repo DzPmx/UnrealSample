@@ -10,14 +10,13 @@ public class BillboardCloudsEditor : ModuleRules
 			new string[]
 			{
 				"Core",
-				"DeveloperSettings",
+				"CoreUObject",
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"CoreUObject",
 				"Engine",
 				"Slate",
 				"SlateCore",
@@ -26,6 +25,7 @@ public class BillboardCloudsEditor : ModuleRules
 				"AssetTools",
 				"AssetRegistry",
 				"ContentBrowser",
+				"PropertyEditor",
 				"MeshDescription",
 				"StaticMeshDescription",
 				"MaterialBaking",

@@ -6,9 +6,13 @@
 #include "AssetToolsModule.h"
 #include "BillboardCloudsEditorSettings.h"
 #include "BillboardCloudsPlaneCover.h"
+#include "DetailsViewArgs.h"
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Docking/TabManager.h"
+#include "IDetailsView.h"
 #include "IMaterialBakingModule.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
@@ -24,9 +28,19 @@
 #include "Misc/ScopedSlowTask.h"
 #include "MeshDescription.h"
 #include "MaterialBakingStructures.h"
+#include "ObjectTools.h"
+#include "PropertyEditorModule.h"
 #include "StaticMeshAttributes.h"
+#include "Styling/AppStyle.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "ToolMenus.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "FBillboardCloudsEditorModule"
 
@@ -35,6 +49,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogBillboardCloudsEditor, Log, All);
 namespace
 {
 	const FName BillboardProxyMaterialSlotName(TEXT("BillboardProxy"));
+	const FName BillboardCloudsToolTabName(TEXT("BillboardCloudsTools"));
 
 	TArray<UStaticMesh*> GetSelectedStaticMeshes()
 	{
@@ -2033,7 +2048,7 @@ namespace
 	//
 	// This path supports real material features such as tangent-space normal maps,
 	// WPO, Custom nodes, Layered Materials, and parameter-driven material graphs.
-	// Source vertex colors are not preserved yet; they are filled with white below.
+	// Source render-data vertex colors are preserved and barycentrically interpolated.
 	// ----------------------------------------------------------------------------
 
 	// Build a per-plane MeshDescription that will drive the material baker.
@@ -2052,9 +2067,8 @@ namespace
 	//   * The baker's RT is sized to the tile interior. Atlas padding is filled
 	//     afterwards by atlas-side dilation and tile-border copy passes.
 	//
-	// Also fills VertexColors from an all-white default (source vertex colors
-	// aren't captured by FSourceTriangle today; if a project needs them, extend
-	// FSourceTriangle and copy them through here).
+	// Vertex colors follow the same source-triangle barycentric interpolation as
+	// UVs and the normal basis, so material graphs see the source render colors.
 	bool BuildPerPlaneBakeMeshDescription(
 		const TArray<UE::BillboardClouds::FSourceTriangle>& Triangles,
 		const TArray<int32>& TriangleIndices,
@@ -2159,7 +2173,9 @@ namespace
 				VertexInstanceNormals[VertexInstanceIDs[Corner]] = FVector3f(Basis.Normal);
 				VertexInstanceTangents[VertexInstanceIDs[Corner]] = FVector3f(Basis.Tangent);
 				VertexInstanceBinormalSigns[VertexInstanceIDs[Corner]] = Basis.BinormalSign;
-				VertexInstanceColors[VertexInstanceIDs[Corner]] = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+				VertexInstanceColors[VertexInstanceIDs[Corner]] = Tri.bHasVertexColors
+					? Tri.VertexColors[0] * W0f + Tri.VertexColors[1] * W1f + Tri.VertexColors[2] * W2f
+					: FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
 
 				// CustomTextureCoordinates: one entry per vertex-instance in
 				// triangle-emission order (see MaterialRenderItem.cpp line 259:
@@ -3131,21 +3147,21 @@ namespace
 				const TArray<FColor>* RoughData = BakeOutput.PropertyData.Find(MP_Roughness);
 				const TArray<FColor>* MetallicData = BakeOutput.PropertyData.Find(MP_Metallic);
 				const TArray<FColor>* EmissionData = BakeOutput.PropertyData.Find(MP_EmissiveColor);
+				// Uniform zero and one masks are both valid. Only missing raster coverage
+				// indicates that the GPU property export cannot be used for this tile.
 				auto IsOpacityBakeUsableForBaseCoverage = [&](
 					const TArray<FColor>* CandidateOpacityData) -> bool
 				{
 					if (!BaseColorData || BaseColorData->IsEmpty()
-						|| !CandidateOpacityData || CandidateOpacityData->IsEmpty())
+						|| !CandidateOpacityData || CandidateOpacityData->IsEmpty()
+						|| CandidateOpacityData->Num() != BaseColorData->Num())
 					{
 						return false;
 					}
 
-					const uint8 ClipByte = UnitFloatToByte(SourceOpacityMaskClipValue);
-					const int32 NumSamples = FMath::Min(BaseColorData->Num(), CandidateOpacityData->Num());
 					int64 BaseCoveredPixels = 0;
-					int64 KeptOpacityPixels = 0;
-					int64 RejectedOpacityPixels = 0;
-					for (int32 SampleIndex = 0; SampleIndex < NumSamples; ++SampleIndex)
+					int64 OpacityCoveredPixels = 0;
+					for (int32 SampleIndex = 0; SampleIndex < BaseColorData->Num(); ++SampleIndex)
 					{
 						if (IsBakerBackgroundPixel((*BaseColorData)[SampleIndex], BakeBackground))
 						{
@@ -3153,19 +3169,12 @@ namespace
 						}
 						++BaseCoveredPixels;
 						const FColor& OpacitySample = (*CandidateOpacityData)[SampleIndex];
-						if (!IsBakerBackgroundPixel(OpacitySample, BakeBackground)
-							&& OpacitySample.R >= ClipByte)
+						if (!IsBakerBackgroundPixel(OpacitySample, BakeBackground))
 						{
-							++KeptOpacityPixels;
-						}
-						else
-						{
-							++RejectedOpacityPixels;
+							++OpacityCoveredPixels;
 						}
 					}
-					return BaseCoveredPixels > 0
-						&& KeptOpacityPixels > 0
-						&& RejectedOpacityPixels > 0;
+					return BaseCoveredPixels > 0 && OpacityCoveredPixels > 0;
 				};
 				const bool bOpacityMaskBakeSucceeded = bWantsOpacity && IsOpacityBakeUsableForBaseCoverage(OpacityData);
 				const FMaterialBakeData* FallbackOpacityBakeData = MaterialBakeData.IsValidIndex(MaterialIndex)
@@ -3474,13 +3483,117 @@ namespace
 		}
 	}
 
+	bool BuildGeneratedAssetBasePath(
+		const UStaticMesh& SourceStaticMesh,
+		const FString& ConfiguredOutputFolder,
+		const FString& AssetNamePrefix,
+		const FString& AssetNameSuffix,
+		FString& OutBasePackageName,
+		FString& OutBaseAssetName,
+		FString& OutError)
+	{
+		const FString SourcePackageName = SourceStaticMesh.GetOutermost()->GetName();
+		const FString SourceFolderPath = FPackageName::GetLongPackagePath(SourcePackageName);
+		FString ParentFolderPath = SourceFolderPath;
+		int32 LastSeparatorIndex = INDEX_NONE;
+		if (SourceFolderPath.FindLastChar(TEXT('/'), LastSeparatorIndex) && LastSeparatorIndex > 0)
+		{
+			ParentFolderPath = SourceFolderPath.Left(LastSeparatorIndex);
+		}
+
+		FString RelativeOutputFolder = ConfiguredOutputFolder;
+		RelativeOutputFolder.TrimStartAndEndInline();
+		RelativeOutputFolder.ReplaceInline(TEXT("\\"), TEXT("/"));
+		while (RelativeOutputFolder.RemoveFromStart(TEXT("/")))
+		{
+		}
+		while (RelativeOutputFolder.RemoveFromEnd(TEXT("/")))
+		{
+		}
+
+		const FString OutputFolderPath = RelativeOutputFolder.IsEmpty()
+			? ParentFolderPath
+			: ParentFolderPath / RelativeOutputFolder;
+		OutBaseAssetName = ObjectTools::SanitizeObjectName(AssetNamePrefix + SourceStaticMesh.GetName() + AssetNameSuffix);
+		OutBasePackageName = OutputFolderPath / OutBaseAssetName;
+
+		FText InvalidNameReason;
+		if (OutBaseAssetName.IsEmpty()
+			|| !FName(*OutBaseAssetName).IsValidObjectName(InvalidNameReason)
+			|| !FPackageName::IsValidLongPackageName(OutBasePackageName, false, &InvalidNameReason))
+		{
+			OutError = FString::Printf(
+				TEXT("Invalid generated asset path '%s': %s"),
+				*OutBasePackageName,
+				*InvalidNameReason.ToString());
+			return false;
+		}
+		return true;
+	}
+
+	class FGeneratedAssetTransaction
+	{
+	public:
+		~FGeneratedAssetTransaction()
+		{
+			Rollback();
+		}
+
+		void Track(UObject* Asset)
+		{
+			if (Asset)
+			{
+				Assets.AddUnique(Asset);
+			}
+		}
+
+		void Commit()
+		{
+			for (UObject* Asset : Assets)
+			{
+				Asset->MarkPackageDirty();
+				FAssetRegistryModule::AssetCreated(Asset);
+			}
+			Assets.Reset();
+		}
+
+	private:
+		void Rollback()
+		{
+			if (Assets.IsEmpty())
+			{
+				return;
+			}
+
+			const int32 ExpectedDeleteCount = Assets.Num();
+			const int32 DeletedCount = ObjectTools::DeleteObjectsUnchecked(Assets);
+			if (DeletedCount != ExpectedDeleteCount)
+			{
+				UE_LOG(
+					LogBillboardCloudsEditor,
+					Warning,
+					TEXT("Billboard Clouds rollback deleted %d of %d staged assets."),
+					DeletedCount,
+					ExpectedDeleteCount);
+			}
+			Assets.Reset();
+		}
+
+		TArray<UObject*> Assets;
+	};
+
 	UTexture2D* CreateBillboardTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
+		FGeneratedAssetTransaction& AssetTransaction,
+		const FString& OutputFolderName,
+		const FString& AssetNamePrefix,
 		const FString& AssetNameSuffix,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TextureCompressionSettings CompressionSettings,
+		const TextureGroup LODGroup,
 		const bool bSRGB,
+		const float AlphaCoverageThreshold,
 		const FString& EmptyPixelsError,
 		FString& OutError)
 	{
@@ -3491,10 +3604,19 @@ namespace
 			return nullptr;
 		}
 
-		const FString SourcePackageName = SourceStaticMesh.GetOutermost()->GetName();
-		const FString PackagePath = FPackageName::GetLongPackagePath(SourcePackageName);
-		const FString BaseAssetName = SourceStaticMesh.GetName() + AssetNameSuffix;
-		const FString BasePackageName = FString::Printf(TEXT("%s/%s"), *PackagePath, *BaseAssetName);
+		FString BasePackageName;
+		FString BaseAssetName;
+		if (!BuildGeneratedAssetBasePath(
+			SourceStaticMesh,
+			OutputFolderName,
+			AssetNamePrefix,
+			AssetNameSuffix,
+			BasePackageName,
+			BaseAssetName,
+			OutError))
+		{
+			return nullptr;
+		}
 
 		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
 		FString UniquePackageName;
@@ -3515,62 +3637,103 @@ namespace
 			OutError = FString::Printf(TEXT("Could not create Texture2D %s."), *UniqueAssetName);
 			return nullptr;
 		}
+		AssetTransaction.Track(Texture);
 
 		Texture->PreEditChange(nullptr);
 		Texture->Source.Init(AtlasStats.Width, AtlasStats.Height, 1, 1, TSF_BGRA8, reinterpret_cast<const uint8*>(Pixels.GetData()));
 		Texture->CompressionSettings = CompressionSettings;
-		Texture->MipGenSettings = TMGS_NoMipmaps;
+		Texture->LODGroup = LODGroup;
+		Texture->MipGenSettings = TMGS_FromTextureGroup;
 		Texture->SRGB = bSRGB;
+		Texture->bUseNewMipFilter = true;
+		if (AlphaCoverageThreshold > 0.0f)
+		{
+			Texture->bDoScaleMipsForAlphaCoverage = true;
+			Texture->AlphaCoverageThresholds = FVector4(0.0, 0.0, 0.0, FMath::Clamp(AlphaCoverageThreshold, 0.01f, 0.99f));
+		}
 		Texture->AddressX = TA_Clamp;
 		Texture->AddressY = TA_Clamp;
 		Texture->PostEditChange();
-		Texture->MarkPackageDirty();
-
-		FAssetRegistryModule::AssetCreated(Texture);
 		return Texture;
 	}
 
-	UTexture2D* CreateAtlasTextureAsset(const UStaticMesh& SourceStaticMesh, const TArray<FColor>& Pixels, const FAtlasBakeStats& AtlasStats, FString& OutError)
+	UTexture2D* CreateAtlasTextureAsset(
+		const UStaticMesh& SourceStaticMesh,
+		FGeneratedAssetTransaction& AssetTransaction,
+		const UBillboardCloudsEditorSettings& EditorSettings,
+		const TArray<FColor>& Pixels,
+		const FAtlasBakeStats& AtlasStats,
+		const float AlphaCoverageThreshold,
+		FString& OutError)
 	{
 		return CreateBillboardTextureAsset(
 			SourceStaticMesh,
-			TEXT("_BillboardCloudAtlas"),
+			AssetTransaction,
+			EditorSettings.TextureOutputFolderName,
+			EditorSettings.TextureNamePrefix,
+			EditorSettings.BaseColorOpacityTextureSuffix,
 			Pixels,
 			AtlasStats,
-			TC_Default,
+			TC_BC7,
+			TEXTUREGROUP_World,
 			true,
+			AlphaCoverageThreshold,
 			TEXT("No atlas pixels were generated."),
 			OutError);
 	}
 
-	UTexture2D* CreateNormalAtlasTextureAsset(const UStaticMesh& SourceStaticMesh, const TArray<FColor>& Pixels, const FAtlasBakeStats& AtlasStats, FString& OutError)
+	UTexture2D* CreateNormalAtlasTextureAsset(
+		const UStaticMesh& SourceStaticMesh,
+		FGeneratedAssetTransaction& AssetTransaction,
+		const UBillboardCloudsEditorSettings& EditorSettings,
+		const TArray<FColor>& Pixels,
+		const FAtlasBakeStats& AtlasStats,
+		FString& OutError)
 	{
 		return CreateBillboardTextureAsset(
 			SourceStaticMesh,
-			TEXT("_BillboardCloudNormalAtlas"),
+			AssetTransaction,
+			EditorSettings.TextureOutputFolderName,
+			EditorSettings.TextureNamePrefix,
+			EditorSettings.NormalTextureSuffix,
 			Pixels,
 			AtlasStats,
-			TC_VectorDisplacementmap,
+			TC_BC7,
+			TEXTUREGROUP_WorldNormalMap,
 			false,
+			0.0f,
 			TEXT("No normal atlas pixels were generated."),
 			OutError);
 	}
 
-	UTexture2D* CreateMixAtlasTextureAsset(const UStaticMesh& SourceStaticMesh, const TArray<FColor>& Pixels, const FAtlasBakeStats& AtlasStats, FString& OutError)
+	UTexture2D* CreateMixAtlasTextureAsset(
+		const UStaticMesh& SourceStaticMesh,
+		FGeneratedAssetTransaction& AssetTransaction,
+		const UBillboardCloudsEditorSettings& EditorSettings,
+		const TArray<FColor>& Pixels,
+		const FAtlasBakeStats& AtlasStats,
+		FString& OutError)
 	{
 		return CreateBillboardTextureAsset(
 			SourceStaticMesh,
-			TEXT("_BillboardCloudMixAtlas"),
+			AssetTransaction,
+			EditorSettings.TextureOutputFolderName,
+			EditorSettings.TextureNamePrefix,
+			EditorSettings.MixTextureSuffix,
 			Pixels,
 			AtlasStats,
-			TC_Masks,
+			TC_BC7,
+			TEXTUREGROUP_WorldSpecular,
 			false,
+			0.0f,
 			TEXT("No mix atlas pixels were generated."),
 			OutError);
 	}
 
 	UMaterialInstanceConstant* CreateBillboardMaterialInstanceAsset(
 		const UStaticMesh& SourceStaticMesh,
+		FGeneratedAssetTransaction& AssetTransaction,
+		const UBillboardCloudsEditorSettings& EditorSettings,
 		UMaterialInstanceConstant* TemplateMaterialInstance,
 		UTexture2D* AtlasTexture,
 		UTexture2D* NormalAtlasTexture,
@@ -3580,13 +3743,22 @@ namespace
 		OutError.Reset();
 		if (!TemplateMaterialInstance)
 		{
-			OutError = TEXT("Billboard material template instance is not set. Configure Billboard Material Template in Billboard Clouds settings.");
+			OutError = TEXT("Billboard material template instance is not set. Configure Billboard Material Template in the Billboard Clouds tool panel.");
 			return nullptr;
 		}
-		const FString SourcePackageName = SourceStaticMesh.GetOutermost()->GetName();
-		const FString PackagePath = FPackageName::GetLongPackagePath(SourcePackageName);
-		const FString BaseAssetName = SourceStaticMesh.GetName() + TEXT("_BillboardCloudMaterialInstance");
-		const FString BasePackageName = FString::Printf(TEXT("%s/%s"), *PackagePath, *BaseAssetName);
+		FString BasePackageName;
+		FString BaseAssetName;
+		if (!BuildGeneratedAssetBasePath(
+			SourceStaticMesh,
+			EditorSettings.MaterialOutputFolderName,
+			EditorSettings.MaterialInstanceNamePrefix,
+			EditorSettings.MaterialInstanceNameSuffix,
+			BasePackageName,
+			BaseAssetName,
+			OutError))
+		{
+			return nullptr;
+		}
 
 		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
 		FString UniquePackageName;
@@ -3607,6 +3779,7 @@ namespace
 			OutError = FString::Printf(TEXT("Could not duplicate material instance %s."), *TemplateMaterialInstance->GetPathName());
 			return nullptr;
 		}
+		AssetTransaction.Track(MaterialInstance);
 
 		MaterialInstance->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
 		MaterialInstance->ClearFlags(RF_Transient);
@@ -3624,9 +3797,6 @@ namespace
 			MaterialInstance->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(FName(TEXT("Mix"))), MixAtlasTexture);
 		}
 		MaterialInstance->PostEditChange();
-		MaterialInstance->MarkPackageDirty();
-
-		FAssetRegistryModule::AssetCreated(MaterialInstance);
 		return MaterialInstance;
 	}
 
@@ -3690,9 +3860,16 @@ namespace
 		}
 	}
 
-	void KeepOnlyUvChannels(UStaticMesh& StaticMesh, const int32 LODIndex, const int32 DesiredChannelCount)
+	void KeepOnlyUvChannels(
+		UStaticMesh& StaticMesh,
+		const int32 LODIndex,
+		const int32 DesiredChannelCount,
+		const bool bSetGlobalLightMapCoordinateIndex)
 	{
-		StaticMesh.SetLightMapCoordinateIndex(0);
+		if (bSetGlobalLightMapCoordinateIndex)
+		{
+			StaticMesh.SetLightMapCoordinateIndex(0);
+		}
 		const int32 ClampedDesiredChannelCount = FMath::Clamp(DesiredChannelCount, 1, 8);
 
 		if (StaticMesh.IsSourceModelValid(LODIndex))
@@ -3722,15 +3899,23 @@ namespace
 			}
 		}
 
-		StaticMesh.SetLightMapCoordinateIndex(0);
+		if (bSetGlobalLightMapCoordinateIndex)
+		{
+			StaticMesh.SetLightMapCoordinateIndex(0);
+		}
 	}
 
 	void KeepOnlyUvChannels(UStaticMesh& StaticMesh, const int32 DesiredChannelCount)
 	{
-		KeepOnlyUvChannels(StaticMesh, 0, DesiredChannelCount);
+		KeepOnlyUvChannels(StaticMesh, 0, DesiredChannelCount, true);
 	}
 
-	UStaticMesh* CreateStaticMeshAssetFromDescription(const UStaticMesh& SourceStaticMesh, const FMeshDescription& MeshDescription, UMaterialInterface* ProxyMaterial, FString& OutError)
+	UStaticMesh* CreateStaticMeshAssetFromDescription(
+		const UStaticMesh& SourceStaticMesh,
+		FGeneratedAssetTransaction& AssetTransaction,
+		const FMeshDescription& MeshDescription,
+		UMaterialInterface* ProxyMaterial,
+		FString& OutError)
 	{
 		OutError.Reset();
 
@@ -3759,6 +3944,7 @@ namespace
 			OutError = FString::Printf(TEXT("Could not create StaticMesh %s."), *UniqueAssetName);
 			return nullptr;
 		}
+		AssetTransaction.Track(ProxyMesh);
 
 		ProxyMesh->InitResources();
 		ProxyMesh->SetLightingGuid();
@@ -3782,9 +3968,6 @@ namespace
 
 		KeepOnlyUvChannels(*ProxyMesh, 3);
 		ProxyMesh->PostEditChange();
-		ProxyMesh->MarkPackageDirty();
-
-		FAssetRegistryModule::AssetCreated(ProxyMesh);
 		return ProxyMesh;
 	}
 
@@ -3828,6 +4011,8 @@ namespace
 	{
 		OutLODIndex = INDEX_NONE;
 		OutError.Reset();
+		const bool bSourcePackageWasDirty = SourceStaticMesh.GetOutermost()->IsDirty();
+		const int32 OriginalSourceModelCount = SourceStaticMesh.GetNumSourceModels();
 
 		if (OutputMode == EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD)
 		{
@@ -3868,29 +4053,42 @@ namespace
 
 		SourceStaticMesh.Modify();
 		SourceStaticMesh.PreEditChange(nullptr);
+		bool bAddedSourceModel = false;
+		auto RollbackFailedInstall = [&]()
+		{
+			while (bAddedSourceModel && SourceStaticMesh.GetNumSourceModels() > OriginalSourceModelCount)
+			{
+				SourceStaticMesh.RemoveSourceModel(SourceStaticMesh.GetNumSourceModels() - 1);
+			}
+			SourceStaticMesh.PostEditChange();
+			SourceStaticMesh.GetOutermost()->SetDirtyFlag(bSourcePackageWasDirty);
+			OutLODIndex = INDEX_NONE;
+			ReopenSourceMeshEditor();
+		};
 
 		if (OutputMode == EBillboardCloudsMeshOutputMode::AddToSourceMeshLOD)
 		{
 			SourceStaticMesh.AddSourceModel();
+			bAddedSourceModel = true;
 		}
 
 		if (!SourceStaticMesh.IsSourceModelValid(OutLODIndex))
 		{
 			OutError = FString::Printf(TEXT("Could not allocate source LOD %d on %s."), OutLODIndex, *SourceStaticMesh.GetName());
-			ReopenSourceMeshEditor();
+			RollbackFailedInstall();
 			return false;
 		}
-
-		const int32 MaterialIndex = EnsureBillboardProxyMaterialSlot(SourceStaticMesh, ProxyMaterial);
-		ClearSectionInfoForLOD(SourceStaticMesh, OutLODIndex);
 
 		FMeshDescription MeshDescriptionCopy = MeshDescription;
 		if (!SourceStaticMesh.CreateMeshDescription(OutLODIndex, MoveTemp(MeshDescriptionCopy)))
 		{
 			OutError = FString::Printf(TEXT("Could not create MeshDescription for source LOD %d on %s."), OutLODIndex, *SourceStaticMesh.GetName());
-			ReopenSourceMeshEditor();
+			RollbackFailedInstall();
 			return false;
 		}
+
+		const int32 MaterialIndex = EnsureBillboardProxyMaterialSlot(SourceStaticMesh, ProxyMaterial);
+		ClearSectionInfoForLOD(SourceStaticMesh, OutLODIndex);
 
 		UStaticMesh::FCommitMeshDescriptionParams CommitParams;
 		CommitParams.bMarkPackageDirty = true;
@@ -3898,13 +4096,12 @@ namespace
 		SourceStaticMesh.CommitMeshDescription(OutLODIndex, CommitParams);
 
 		ConfigureBillboardProxySourceModel(SourceStaticMesh, OutLODIndex, OutputMode == EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD);
-		KeepOnlyUvChannels(SourceStaticMesh, OutLODIndex, 3);
+		KeepOnlyUvChannels(SourceStaticMesh, OutLODIndex, 3, false);
 
 		FMeshSectionInfo SectionInfo;
 		SectionInfo.MaterialIndex = MaterialIndex;
 		SourceStaticMesh.GetSectionInfoMap().Set(OutLODIndex, 0, SectionInfo);
 		SourceStaticMesh.GetOriginalSectionInfoMap().Set(OutLODIndex, 0, SectionInfo);
-		SourceStaticMesh.SetLightMapCoordinateIndex(0);
 		SourceStaticMesh.SetImportVersion(EImportStaticMeshVersion::LastVersion);
 		SourceStaticMesh.PostEditChange();
 		SourceStaticMesh.MarkPackageDirty();
@@ -4068,6 +4265,7 @@ namespace
 	bool BuildProxyTextureData(
 		const UStaticMesh& StaticMesh,
 		const UBillboardCloudsEditorSettings& EditorSettings,
+		FGeneratedAssetTransaction& AssetTransaction,
 		const FProxyPlaneCoverBuildData& CoverData,
 		FProxyMeshBuildData& MeshData,
 		FProxyTextureBuildData& OutData,
@@ -4076,7 +4274,13 @@ namespace
 		OutData.OutputSelection = BuildAtlasOutputSelection(EditorSettings);
 		if (!OutData.OutputSelection.HasAnyOutput())
 		{
-			OutError = TEXT("No atlas outputs selected. Enable at least one of BaseColorOpacity, NormalMask, or Mix in Billboard Clouds settings.");
+			OutError = TEXT("No atlas outputs selected. Enable at least one of BaseColorOpacity, NormalMask, or Mix in the Billboard Clouds tool panel.");
+			return false;
+		}
+		UMaterialInstanceConstant* TemplateMaterialInstance = EditorSettings.BillboardMaterialTemplate.LoadSynchronous();
+		if (!TemplateMaterialInstance)
+		{
+			OutError = TEXT("Billboard material template instance is not set. Configure Billboard Material Template in the Billboard Clouds tool panel.");
 			return false;
 		}
 
@@ -4144,7 +4348,17 @@ namespace
 
 		if (OutData.OutputSelection.bBaseColorOpacity)
 		{
-			OutData.AtlasTexture = CreateAtlasTextureAsset(StaticMesh, OutData.AtlasPixels, OutData.AtlasStats, OutError);
+			const float AlphaCoverageThreshold = TemplateMaterialInstance->GetBlendMode() == BLEND_Masked
+				? TemplateMaterialInstance->GetOpacityMaskClipValue()
+				: 0.0f;
+			OutData.AtlasTexture = CreateAtlasTextureAsset(
+				StaticMesh,
+				AssetTransaction,
+				EditorSettings,
+				OutData.AtlasPixels,
+				OutData.AtlasStats,
+				AlphaCoverageThreshold,
+				OutError);
 			if (!OutData.AtlasTexture)
 			{
 				return false;
@@ -4153,7 +4367,13 @@ namespace
 
 		if (OutData.OutputSelection.bNormalMask)
 		{
-			OutData.NormalAtlasTexture = CreateNormalAtlasTextureAsset(StaticMesh, OutData.NormalAtlasPixels, OutData.AtlasStats, OutError);
+			OutData.NormalAtlasTexture = CreateNormalAtlasTextureAsset(
+				StaticMesh,
+				AssetTransaction,
+				EditorSettings,
+				OutData.NormalAtlasPixels,
+				OutData.AtlasStats,
+				OutError);
 			if (!OutData.NormalAtlasTexture)
 			{
 				return false;
@@ -4162,7 +4382,13 @@ namespace
 
 		if (OutData.OutputSelection.bMix)
 		{
-			OutData.MixAtlasTexture = CreateMixAtlasTextureAsset(StaticMesh, OutData.MixAtlasPixels, OutData.AtlasStats, OutError);
+			OutData.MixAtlasTexture = CreateMixAtlasTextureAsset(
+				StaticMesh,
+				AssetTransaction,
+				EditorSettings,
+				OutData.MixAtlasPixels,
+				OutData.AtlasStats,
+				OutError);
 			if (!OutData.MixAtlasTexture)
 			{
 				return false;
@@ -4171,7 +4397,9 @@ namespace
 
 		OutData.Material = CreateBillboardMaterialInstanceAsset(
 			StaticMesh,
-			EditorSettings.BillboardMaterialTemplate.LoadSynchronous(),
+			AssetTransaction,
+			EditorSettings,
+			TemplateMaterialInstance,
 			OutData.AtlasTexture,
 			OutData.NormalAtlasTexture,
 			OutData.MixAtlasTexture,
@@ -4182,6 +4410,7 @@ namespace
 	bool CreateProxyMeshAssetBundle(
 		UStaticMesh& StaticMesh,
 		const UBillboardCloudsEditorSettings& EditorSettings,
+		FGeneratedAssetTransaction& AssetTransaction,
 		const FProxyMeshBuildData& MeshData,
 		const FProxyTextureBuildData& TextureData,
 		FProxyAssetBuildResult& OutResult,
@@ -4191,7 +4420,7 @@ namespace
 
 		if (EditorSettings.MeshOutputMode == EBillboardCloudsMeshOutputMode::SeparateMeshAsset)
 		{
-			OutResult.ProxyMesh = CreateStaticMeshAssetFromDescription(StaticMesh, MeshData.MeshDescription, TextureData.Material, OutError);
+			OutResult.ProxyMesh = CreateStaticMeshAssetFromDescription(StaticMesh, AssetTransaction, MeshData.MeshDescription, TextureData.Material, OutError);
 			if (!OutResult.ProxyMesh)
 			{
 				return false;
@@ -4338,16 +4567,18 @@ namespace
 		}
 
 		FProxyTextureBuildData TextureData;
-		if (!BuildProxyTextureData(StaticMesh, EditorSettings, CoverData, MeshData, TextureData, Error))
+		FGeneratedAssetTransaction AssetTransaction;
+		if (!BuildProxyTextureData(StaticMesh, EditorSettings, AssetTransaction, CoverData, MeshData, TextureData, Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
 
 		FProxyAssetBuildResult Result;
-		if (!CreateProxyMeshAssetBundle(StaticMesh, EditorSettings, MeshData, TextureData, Result, Error))
+		if (!CreateProxyMeshAssetBundle(StaticMesh, EditorSettings, AssetTransaction, MeshData, TextureData, Result, Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
+		AssetTransaction.Commit();
 
 		Result.bSucceeded = true;
 		Result.Report = BuildProxySuccessReport(StaticMesh, CoverData, MeshData, TextureData, Result);
@@ -4420,7 +4651,7 @@ namespace
 	{
 		FMessageDialog::Open(
 			EAppMsgType::Ok,
-			LOCTEXT("NoStaticMeshSelectionForProxy", "Select one or more Static Mesh assets in the Content Browser, then run Tools > Billboard Clouds > Create Plane Proxy Meshes.")
+			LOCTEXT("NoStaticMeshSelectionForProxy", "Add one or more Static Mesh assets to the Billboard Clouds tool panel before clicking Bake.")
 		);
 	}
 
@@ -4441,6 +4672,14 @@ namespace
 
 void FBillboardCloudsEditorModule::StartupModule()
 {
+	EnsureToolSettings();
+	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
+		BillboardCloudsToolTabName,
+		FOnSpawnTab::CreateRaw(this, &FBillboardCloudsEditorModule::SpawnBillboardCloudsToolTab))
+		.SetDisplayName(LOCTEXT("BillboardCloudsToolTabTitle", "BillboardCloudsTools"))
+		.SetTooltipText(LOCTEXT("BillboardCloudsToolTabTooltip", "Configure and bake Billboard Clouds proxy meshes."))
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"))
+		.SetMenuType(ETabSpawnerMenuType::Hidden);
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FBillboardCloudsEditorModule::RegisterMenus));
 }
 
@@ -4448,6 +4687,16 @@ void FBillboardCloudsEditorModule::ShutdownModule()
 {
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
+	if (FSlateApplication::IsInitialized())
+	{
+		if (TSharedPtr<SDockTab> LiveTab = FGlobalTabmanager::Get()->FindExistingLiveTab(BillboardCloudsToolTabName))
+		{
+			LiveTab->RequestCloseTab();
+		}
+		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(BillboardCloudsToolTabName);
+	}
+	SettingsDetailsView.Reset();
+	ToolSettings.Reset();
 }
 
 void FBillboardCloudsEditorModule::RegisterMenus()
@@ -4463,27 +4712,207 @@ void FBillboardCloudsEditorModule::RegisterMenus()
 	FToolMenuSection& Section = ToolsMenu->FindOrAddSection("BillboardClouds");
 	Section.Label = LOCTEXT("BillboardCloudsSection", "Billboard Clouds");
 	Section.AddMenuEntry(
-		"BillboardCloudsCreatePlaneProxyMeshes",
-		LOCTEXT("CreatePlaneProxyMeshesLabel", "Create Plane Proxy Meshes"),
-		LOCTEXT("CreatePlaneProxyMeshesTooltip", "Create or install Static Mesh proxy geometry from the selected Billboard Clouds plane cover."),
-		FSlateIcon(),
+		"BillboardCloudsTools",
+		LOCTEXT("CreatePlaneProxyMeshesLabel", "BillboardCloudsTools"),
+		LOCTEXT("CreatePlaneProxyMeshesTooltip", "Open the Billboard Clouds tool panel to configure and bake Static Mesh proxy geometry."),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"),
 		FToolMenuExecuteAction::CreateRaw(this, &FBillboardCloudsEditorModule::ExecuteCreatePlaneProxyMeshes)
 	);
 }
 
-void FBillboardCloudsEditorModule::ExecuteCreatePlaneProxyMeshes(const FToolMenuContext& MenuContext) const
+void FBillboardCloudsEditorModule::EnsureToolSettings()
 {
-	(void)MenuContext;
-
-	const TArray<UStaticMesh*> StaticMeshes = GetSelectedStaticMeshes();
-	if (StaticMeshes.IsEmpty())
+	if (!ToolSettings.IsValid())
 	{
-		ShowNoStaticMeshSelectionMessage();
+		ToolSettings.Reset(NewObject<UBillboardCloudsEditorSettings>(GetTransientPackage(), NAME_None, RF_Transactional));
+	}
+}
+
+void FBillboardCloudsEditorModule::AddContentBrowserSelectionToTool()
+{
+	EnsureToolSettings();
+	const TArray<UStaticMesh*> SelectedStaticMeshes = GetSelectedStaticMeshes();
+	if (SelectedStaticMeshes.IsEmpty())
+	{
 		return;
 	}
 
-	const UBillboardCloudsEditorSettings* EditorSettings = GetDefault<UBillboardCloudsEditorSettings>();
-	RunCreatePlaneProxyMeshes(StaticMeshes, *EditorSettings);
+	ToolSettings->Modify();
+	for (UStaticMesh* StaticMesh : SelectedStaticMeshes)
+	{
+		ToolSettings->SourceStaticMeshes.AddUnique(StaticMesh);
+	}
+	ToolSettings->PostEditChange();
+	if (SettingsDetailsView.IsValid())
+	{
+		SettingsDetailsView->ForceRefresh();
+	}
+}
+
+TSharedRef<SDockTab> FBillboardCloudsEditorModule::SpawnBillboardCloudsToolTab(const FSpawnTabArgs& SpawnTabArgs)
+{
+	(void)SpawnTabArgs;
+	EnsureToolSettings();
+
+	FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.bAllowSearch = true;
+	DetailsViewArgs.bHideSelectionTip = true;
+	DetailsViewArgs.bLockable = false;
+	DetailsViewArgs.bShowOptions = false;
+	DetailsViewArgs.bShowPropertyMatrixButton = false;
+	DetailsViewArgs.bUpdatesFromSelection = false;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	SettingsDetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
+	SettingsDetailsView->SetObject(ToolSettings.Get());
+
+	return SNew(SDockTab)
+		.TabRole(ETabRole::NomadTab)
+		[
+			SNew(SVerticalBox)
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(8.0f, 8.0f, 8.0f, 4.0f)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(8.0f)
+				[
+					SNew(SHorizontalBox)
+
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text_Raw(this, &FBillboardCloudsEditorModule::GetSourceMeshCountText)
+					]
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(4.0f, 0.0f)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("AddSelectedMeshesButton", "Add Content Browser Selection"))
+						.ToolTipText(LOCTEXT("AddSelectedMeshesTooltip", "Add selected Static Mesh assets without removing meshes already queued."))
+						.OnClicked_Raw(this, &FBillboardCloudsEditorModule::HandleAddSelectedMeshes)
+					]
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("ClearMeshesButton", "Clear"))
+						.ToolTipText(LOCTEXT("ClearMeshesTooltip", "Remove all queued Static Mesh assets."))
+						.OnClicked_Raw(this, &FBillboardCloudsEditorModule::HandleClearMeshes)
+					]
+				]
+			]
+
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			.Padding(8.0f, 4.0f)
+			[
+				SettingsDetailsView.ToSharedRef()
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(SSeparator)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(8.0f)
+			.HAlign(HAlign_Right)
+			[
+				SNew(SBox)
+				.MinDesiredWidth(120.0f)
+				[
+					SNew(SButton)
+					.HAlign(HAlign_Center)
+					.Text(LOCTEXT("BakeBillboardCloudsButton", "Bake"))
+					.ToolTipText(LOCTEXT("BakeBillboardCloudsTooltip", "Bake Billboard Clouds assets for every queued Static Mesh."))
+					.IsEnabled_Raw(this, &FBillboardCloudsEditorModule::CanBake)
+					.OnClicked_Raw(this, &FBillboardCloudsEditorModule::HandleBake)
+				]
+			]
+		];
+}
+
+FReply FBillboardCloudsEditorModule::HandleAddSelectedMeshes()
+{
+	AddContentBrowserSelectionToTool();
+	return FReply::Handled();
+}
+
+FReply FBillboardCloudsEditorModule::HandleClearMeshes()
+{
+	EnsureToolSettings();
+	ToolSettings->Modify();
+	ToolSettings->SourceStaticMeshes.Reset();
+	ToolSettings->PostEditChange();
+	if (SettingsDetailsView.IsValid())
+	{
+		SettingsDetailsView->ForceRefresh();
+	}
+	return FReply::Handled();
+}
+
+bool FBillboardCloudsEditorModule::CanBake() const
+{
+	if (!ToolSettings.IsValid())
+	{
+		return false;
+	}
+	return ToolSettings->SourceStaticMeshes.ContainsByPredicate([](const TObjectPtr<UStaticMesh>& StaticMesh)
+	{
+		return StaticMesh != nullptr;
+	});
+}
+
+FText FBillboardCloudsEditorModule::GetSourceMeshCountText() const
+{
+	int32 ValidMeshCount = 0;
+	if (ToolSettings.IsValid())
+	{
+		for (const UStaticMesh* StaticMesh : ToolSettings->SourceStaticMeshes)
+		{
+			ValidMeshCount += StaticMesh != nullptr ? 1 : 0;
+		}
+	}
+	return FText::Format(LOCTEXT("QueuedStaticMeshCount", "Static Meshes queued: {0}"), FText::AsNumber(ValidMeshCount));
+}
+
+FReply FBillboardCloudsEditorModule::HandleBake()
+{
+	EnsureToolSettings();
+	TArray<UStaticMesh*> StaticMeshes;
+	for (UStaticMesh* StaticMesh : ToolSettings->SourceStaticMeshes)
+	{
+		if (StaticMesh)
+		{
+			StaticMeshes.AddUnique(StaticMesh);
+		}
+	}
+
+	if (StaticMeshes.IsEmpty())
+	{
+		ShowNoStaticMeshSelectionMessage();
+		return FReply::Handled();
+	}
+
+	RunCreatePlaneProxyMeshes(StaticMeshes, *ToolSettings);
+	return FReply::Handled();
+}
+
+void FBillboardCloudsEditorModule::ExecuteCreatePlaneProxyMeshes(const FToolMenuContext& MenuContext)
+{
+	(void)MenuContext;
+	AddContentBrowserSelectionToTool();
+	FGlobalTabmanager::Get()->TryInvokeTab(BillboardCloudsToolTabName);
 }
 
 #undef LOCTEXT_NAMESPACE

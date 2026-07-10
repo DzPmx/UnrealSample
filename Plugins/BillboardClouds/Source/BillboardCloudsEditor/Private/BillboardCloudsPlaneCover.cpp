@@ -5,6 +5,7 @@
 #include "HAL/PlatformTime.h"
 #include "MeshDescription.h"
 #include "RawIndexBuffer.h"
+#include "Rendering/ColorVertexBuffer.h"
 #include "StaticMeshAttributes.h"
 #include "StaticMeshResources.h"
 
@@ -2458,6 +2459,7 @@ namespace UE::BillboardClouds
 			const FStaticMeshLODResources& LODResources = StaticMesh->GetRenderData()->LODResources[LODIndex];
 			const FPositionVertexBuffer& PositionBuffer = LODResources.VertexBuffers.PositionVertexBuffer;
 			const FStaticMeshVertexBuffer& StaticMeshVertexBuffer = LODResources.VertexBuffers.StaticMeshVertexBuffer;
+			const FColorVertexBuffer& ColorVertexBuffer = LODResources.VertexBuffers.ColorVertexBuffer;
 			const FIndexArrayView Indices = LODResources.IndexBuffer.GetArrayView();
 			if (PositionBuffer.GetNumVertices() == 0 || StaticMeshVertexBuffer.GetNumVertices() == 0 || Indices.Num() < 3)
 			{
@@ -2466,6 +2468,7 @@ namespace UE::BillboardClouds
 
 			const int32 SourceUVChannelCount = StaticMeshVertexBuffer.GetNumTexCoords();
 			const bool bHasUVs = SourceUVChannelCount > 0;
+			const bool bHasVertexColors = ColorVertexBuffer.GetNumVertices() == PositionBuffer.GetNumVertices();
 			const int32 StoredUVChannelCount = bHasUVs
 				? FMath::Min(SourceUVChannelCount, UE::BillboardClouds::MaxMaterialBakeUVChannels)
 				: 0;
@@ -2538,6 +2541,12 @@ namespace UE::BillboardClouds
 						}
 						Triangle.VertexTangents[VertexIndex] = SourceTangent;
 
+						if (bHasVertexColors)
+						{
+							const FLinearColor SourceColor = ColorVertexBuffer.VertexColor(RenderVertexIndex).ReinterpretAsLinear();
+							Triangle.VertexColors[VertexIndex] = FVector4f(SourceColor.R, SourceColor.G, SourceColor.B, SourceColor.A);
+						}
+
 						// Derive binormal sign from render TangentY
 						const FVector4f RenderTangentY4 = StaticMeshVertexBuffer.VertexTangentY(RenderVertexIndex);
 						const FVector RenderTangentY(RenderTangentY4.X, RenderTangentY4.Y, RenderTangentY4.Z);
@@ -2562,6 +2571,7 @@ namespace UE::BillboardClouds
 					Triangle.bHasUVs = bHasUVs;
 					Triangle.bHasSourceShadingNormal = true;
 					Triangle.bHasTangents = true;
+					Triangle.bHasVertexColors = bHasVertexColors;
 					OutTriangles.Add(Triangle);
 				}
 			}
@@ -2599,6 +2609,7 @@ namespace UE::BillboardClouds
 		const bool bHasVertexInstanceTangents = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Tangent);
 		const bool bHasVertexInstanceBinormalSigns = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::BinormalSign);
 		const bool bHasVertexInstanceUVs = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::TextureCoordinate);
+		const bool bHasVertexInstanceColors = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Color);
 		const bool bHasPolygonGroupMaterialSlots = MeshDescription->PolygonGroupAttributes().HasAttribute(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
 		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceNormals;
 		if (bHasVertexInstanceNormals)
@@ -2619,6 +2630,11 @@ namespace UE::BillboardClouds
 		if (bHasVertexInstanceUVs)
 		{
 			VertexInstanceUVs = MeshAttributes.GetVertexInstanceUVs();
+		}
+		TVertexInstanceAttributesConstRef<FVector4f> VertexInstanceColors;
+		if (bHasVertexInstanceColors)
+		{
+			VertexInstanceColors = MeshAttributes.GetVertexInstanceColors();
 		}
 		TPolygonGroupAttributesConstRef<FName> PolygonGroupMaterialSlotNames;
 		if (bHasPolygonGroupMaterialSlots)
@@ -2728,6 +2744,18 @@ namespace UE::BillboardClouds
 					Triangle.UVs[2] = Triangle.UVChannels[0][2];
 					Triangle.NumUVChannels = StoredUVChannelCount;
 					Triangle.bHasUVs = true;
+				}
+			}
+			if (bHasVertexInstanceColors)
+			{
+				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				if (TriangleVertexInstanceIDs.Num() == 3)
+				{
+					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+					{
+						Triangle.VertexColors[VertexIndex] = VertexInstanceColors[TriangleVertexInstanceIDs[VertexIndex]];
+					}
+					Triangle.bHasVertexColors = true;
 				}
 			}
 			if (bHasPolygonGroupMaterialSlots)
@@ -3073,13 +3101,27 @@ namespace UE::BillboardClouds
 		}
 	}
 
-	void AssignTrianglesToKMeansClusters(const TArray<FSourceTriangle>& Triangles, TArray<FKMeansCluster>& Clusters)
+	bool AssignTrianglesToKMeansClusters(const TArray<FSourceTriangle>& Triangles, TArray<FKMeansCluster>& Clusters)
 	{
+		TArray<int32> PreviousClusterByTriangle;
+		PreviousClusterByTriangle.Init(INDEX_NONE, Triangles.Num());
+		for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+		{
+			for (const int32 TriangleIndex : Clusters[ClusterIndex].TriangleIndices)
+			{
+				if (PreviousClusterByTriangle.IsValidIndex(TriangleIndex))
+				{
+					PreviousClusterByTriangle[TriangleIndex] = ClusterIndex;
+				}
+			}
+		}
+
 		for (FKMeansCluster& Cluster : Clusters)
 		{
 			Cluster.TriangleIndices.Reset();
 		}
 
+		bool bAssignmentsChanged = false;
 		for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
 		{
 			int32 BestClusterIndex = INDEX_NONE;
@@ -3098,8 +3140,11 @@ namespace UE::BillboardClouds
 			if (Clusters.IsValidIndex(BestClusterIndex))
 			{
 				Clusters[BestClusterIndex].TriangleIndices.Add(TriangleIndex);
+				bAssignmentsChanged |= PreviousClusterByTriangle[TriangleIndex] != BestClusterIndex;
 			}
 		}
+
+		return bAssignmentsChanged;
 	}
 
 	void FitKMeansClusters(const TArray<FSourceTriangle>& Triangles, TArray<FKMeansCluster>& Clusters)
@@ -3129,27 +3174,14 @@ namespace UE::BillboardClouds
 		return TotalDistance;
 	}
 
-	double ComputeKMeansClusterCentroidDistance(const TArray<FSourceTriangle>& Triangles, const FKMeansCluster& Cluster)
+	double ComputeKMeansTotalDistance(const TArray<FSourceTriangle>& Triangles, const TArray<FKMeansCluster>& Clusters)
 	{
 		double TotalDistance = 0.0;
-		const FVector SafeNormal = Cluster.Normal.GetSafeNormal();
-		for (const int32 TriangleIndex : Cluster.TriangleIndices)
-		{
-			if (Triangles.IsValidIndex(TriangleIndex))
-			{
-				TotalDistance += FMath::Abs(FVector::DotProduct(SafeNormal, ComputeTriangleCentroid(Triangles[TriangleIndex])) - Cluster.Rho);
-			}
-		}
-		return TotalDistance;
-	}
-
-	void ComputeKMeansClusterCentroidDistances(const TArray<FSourceTriangle>& Triangles, const TArray<FKMeansCluster>& Clusters, TArray<double>& OutDistances)
-	{
-		OutDistances.Reset(Clusters.Num());
 		for (const FKMeansCluster& Cluster : Clusters)
 		{
-			OutDistances.Add(ComputeKMeansClusterCentroidDistance(Triangles, Cluster));
+			TotalDistance += ComputeKMeansClusterDistance(Triangles, Cluster);
 		}
+		return TotalDistance;
 	}
 
 	FVector ComputeClusterCoverageCentroid(const TArray<FSourceTriangle>& Triangles, const FKMeansCluster& Cluster)
@@ -3403,13 +3435,12 @@ namespace UE::BillboardClouds
 			return;
 		}
 
-		TArray<double> PreviousRadii;
-		PreviousRadii.Init(TNumericLimits<double>::Max(), Clusters.Num());
-		bool bFirstLoop = true;
+		double PreviousRadiusVariance = ComputeClusterRadiusVariance(Triangles, Clusters);
 		const int32 MaxIterations = FMath::Clamp(Settings.KMeansMaxIterations, 1, 512);
 
 		for (int32 Iteration = 0; Iteration < MaxIterations; ++Iteration)
 		{
+			TArray<FKMeansCluster> PreviousClusters = Clusters;
 			int32 SmallestClusterIndex = INDEX_NONE;
 			int32 SmallestTriangleCount = TNumericLimits<int32>::Max();
 			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
@@ -3483,36 +3514,16 @@ namespace UE::BillboardClouds
 			Clusters.Add(NewCluster);
 			FitKMeansClusters(Triangles, Clusters);
 
-			TArray<double> CurrentRadii;
-			ComputeClusterRadiusVariance(Triangles, Clusters, nullptr, &CurrentRadii);
-
-			bool bStop = true;
-			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			const double CurrentRadiusVariance = ComputeClusterRadiusVariance(Triangles, Clusters);
+			const double VarianceTolerance = FMath::Max(1.0, FMath::Abs(PreviousRadiusVariance)) * 1.0e-6;
+			if (!FMath::IsFinite(CurrentRadiusVariance)
+				|| CurrentRadiusVariance >= PreviousRadiusVariance - VarianceTolerance)
 			{
-				if (!PreviousRadii.IsValidIndex(ClusterIndex))
-				{
-					PreviousRadii.Add(TNumericLimits<double>::Max());
-				}
-				if (CurrentRadii.IsValidIndex(ClusterIndex) && CurrentRadii[ClusterIndex] > PreviousRadii[ClusterIndex])
-				{
-					bStop = false;
-				}
-				if (CurrentRadii.IsValidIndex(ClusterIndex))
-				{
-					PreviousRadii[ClusterIndex] = CurrentRadii[ClusterIndex];
-				}
-			}
-
-			if (bFirstLoop)
-			{
-				bStop = false;
-				bFirstLoop = false;
-			}
-
-			if (bStop)
-			{
+				Clusters = MoveTemp(PreviousClusters);
 				break;
 			}
+
+			PreviousRadiusVariance = CurrentRadiusVariance;
 		}
 	}
 
@@ -3546,53 +3557,39 @@ namespace UE::BillboardClouds
 		InitializeKMeansClustersFromPaper(Triangles, Settings, Clusters);
 		Result.DensityBuildSeconds = FPlatformTime::Seconds() - InitializationStartSeconds;
 
-		TArray<double> PreviousClusterDistances;
-		PreviousClusterDistances.Init(TNumericLimits<double>::Max(), Clusters.Num());
-		bool bFirstLoop = true;
+		double PreviousTotalDistance = ComputeKMeansTotalDistance(Triangles, Clusters);
 		int32 IterationCount = 0;
 		const int32 MaxIterations = FMath::Clamp(Settings.KMeansMaxIterations, 1, 512);
 
 		for (int32 Iteration = 0; Iteration < MaxIterations; ++Iteration)
 		{
+			TArray<FKMeansCluster> PreviousClusters = Clusters;
 			const double AssignmentStartSeconds = FPlatformTime::Seconds();
-			AssignTrianglesToKMeansClusters(Triangles, Clusters);
+			const bool bAssignmentsChanged = AssignTrianglesToKMeansClusters(Triangles, Clusters);
 			Result.CandidateSearchSeconds += FPlatformTime::Seconds() - AssignmentStartSeconds;
 
 			const double FitStartSeconds = FPlatformTime::Seconds();
 			FitKMeansClusters(Triangles, Clusters);
 			Result.CandidatePlaneBuildSeconds += FPlatformTime::Seconds() - FitStartSeconds;
 
-			TArray<double> CurrentClusterDistances;
-			ComputeKMeansClusterCentroidDistances(Triangles, Clusters, CurrentClusterDistances);
+			const double CurrentTotalDistance = ComputeKMeansTotalDistance(Triangles, Clusters);
 			++IterationCount;
 
-			bool bStop = true;
-			for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
+			const double DistanceTolerance = FMath::Max(1.0, FMath::Abs(PreviousTotalDistance)) * 1.0e-6;
+			if (!FMath::IsFinite(CurrentTotalDistance)
+				|| CurrentTotalDistance > PreviousTotalDistance + DistanceTolerance)
 			{
-				if (!PreviousClusterDistances.IsValidIndex(ClusterIndex))
-				{
-					PreviousClusterDistances.Add(TNumericLimits<double>::Max());
-				}
-				if (CurrentClusterDistances.IsValidIndex(ClusterIndex) && CurrentClusterDistances[ClusterIndex] > PreviousClusterDistances[ClusterIndex])
-				{
-					bStop = false;
-				}
-				if (CurrentClusterDistances.IsValidIndex(ClusterIndex))
-				{
-					PreviousClusterDistances[ClusterIndex] = CurrentClusterDistances[ClusterIndex];
-				}
+				Clusters = MoveTemp(PreviousClusters);
+				break;
 			}
 
-			if (bFirstLoop)
-			{
-				bStop = false;
-				bFirstLoop = false;
-			}
-
-			if (bStop)
+			const double DistanceImprovement = PreviousTotalDistance - CurrentTotalDistance;
+			if (!bAssignmentsChanged || DistanceImprovement <= DistanceTolerance)
 			{
 				break;
 			}
+
+			PreviousTotalDistance = CurrentTotalDistance;
 		}
 
 		Result.GreedyIterationCount = IterationCount;
