@@ -1,0 +1,30 @@
+#pragma once
+
+#include "Modules/ModuleManager.h"
+
+class SDockTab;
+class SWidget;
+class SWidgetSwitcher;
+class FSpawnTabArgs;
+struct FToolMenuContext;
+
+class FFoliageBakerEditorModule final : public IModuleInterface
+{
+public:
+	virtual void StartupModule() override;
+	virtual void ShutdownModule() override;
+
+private:
+	void RegisterMenus();
+	void ExecuteOpenTool(const FToolMenuContext& MenuContext);
+	TSharedRef<SDockTab> SpawnToolTab(const FSpawnTabArgs& SpawnTabArgs);
+	TSharedRef<SWidget> CreateImpostorPlaceholder() const;
+	FText GetActiveFeatureTitle() const;
+	FText GetActiveFeatureDescription() const;
+	FText GetActiveFeatureMetadata() const;
+	int32 GetActiveFeatureIndex() const;
+	void HandleFeatureChanged(int32 NewFeatureIndex);
+
+	int32 ActiveFeatureIndex = 0;
+	TSharedPtr<SWidgetSwitcher> FeatureSwitcher;
+};

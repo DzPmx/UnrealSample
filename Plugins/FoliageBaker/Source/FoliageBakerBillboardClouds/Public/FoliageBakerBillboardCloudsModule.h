@@ -6,15 +6,19 @@
 class FReply;
 class IDetailsView;
 class SDockTab;
-class UBillboardCloudsEditorSettings;
+class SWidget;
+class UFoliageBakerBillboardCloudsSettings;
 class FSpawnTabArgs;
 struct FToolMenuContext;
 
-class FBillboardCloudsEditorModule : public IModuleInterface
+class FOLIAGEBAKERBILLBOARDCLOUDS_API FFoliageBakerBillboardCloudsModule final : public IModuleInterface
 {
 public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
+
+
+	TSharedRef<SWidget> CreateFeaturePanel();
 
 private:
 	void RegisterMenus();
@@ -28,6 +32,6 @@ private:
 	bool CanBake() const;
 	FText GetSourceMeshCountText() const;
 
-	TStrongObjectPtr<UBillboardCloudsEditorSettings> ToolSettings;
+	TStrongObjectPtr<UFoliageBakerBillboardCloudsSettings> ToolSettings;
 	TSharedPtr<IDetailsView> SettingsDetailsView;
 };

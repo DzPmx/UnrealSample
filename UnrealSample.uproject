@@ -23,7 +23,7 @@
 			"Enabled": true
 		},
 		{
-			"Name": "BillboardClouds",
+			"Name": "FoliageBaker",
 			"Enabled": true,
 			"TargetAllowList": [
 				"Editor"

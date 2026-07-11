@@ -1,8 +1,8 @@
 using UnrealBuildTool;
 
-public class BillboardCloudsEditor : ModuleRules
+public class FoliageBakerEditor : ModuleRules
 {
-	public BillboardCloudsEditor(ReadOnlyTargetRules Target) : base(Target)
+	public FoliageBakerEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
@@ -22,16 +22,8 @@ public class BillboardCloudsEditor : ModuleRules
 				"SlateCore",
 				"UnrealEd",
 				"ToolMenus",
-				"AssetTools",
-				"AssetRegistry",
-				"ContentBrowser",
-				"PropertyEditor",
-				"MeshDescription",
-				"StaticMeshDescription",
-				"MaterialBaking",
-				"RenderCore",
-				"RHI",
-				"Renderer",
+				"FoliageBakerCards",
+				"FoliageBakerBillboardClouds",
 			}
 		);
 	}

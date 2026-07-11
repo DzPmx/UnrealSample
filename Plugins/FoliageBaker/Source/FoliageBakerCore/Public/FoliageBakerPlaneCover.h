@@ -5,18 +5,11 @@
 class UStaticMesh;
 struct FMeshDescription;
 
-namespace UE::BillboardClouds
+namespace UE::FoliageBaker::PlaneCover
 {
 	constexpr int32 MaxMaterialBakeUVChannels = 6;
 
-	enum class EPlaneCoverTechnique : uint8
-	{
-		PlaneSpaceGreedy,
-		KMeansClustering,
-		GodOfWarCards
-	};
-
-	enum class EKMeansCrackReductionMode : uint8
+	enum class EPlaneProxyCrackReductionMode : uint8
 	{
 		Off,
 		ScaledEnvelopeClip
@@ -30,7 +23,17 @@ namespace UE::BillboardClouds
 		AllPlanes
 	};
 
-	struct FSourceTriangle
+
+	enum class EAtlasVConvention : uint8
+	{
+
+		GeometryMinVToTextureMinV,
+
+
+		GeometryMinVToTextureMaxV
+	};
+
+	struct FOLIAGEBAKERCORE_API FSourceTriangle
 	{
 		FVector Vertices[3] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 		FVector2f UVs[3] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
@@ -56,14 +59,7 @@ namespace UE::BillboardClouds
 		bool bTrunkCardOnly = false;
 	};
 
-	struct FCandidatePlane
-	{
-		FVector Normal = FVector::UpVector;
-		double Rho = 0.0;
-		double EstimatedDensity = 0.0;
-	};
-
-	struct FPlaneCoverPlane
+	struct FOLIAGEBAKERCORE_API FPlaneProxyInput
 	{
 		FVector Normal = FVector::UpVector;
 		double Rho = 0.0;
@@ -76,51 +72,30 @@ namespace UE::BillboardClouds
 		FVector FixedAxisV = FVector::UpVector;
 	};
 
-	struct FPlaneCoverSettings
+	struct FOLIAGEBAKERCORE_API FPlaneProxySettings
 	{
-		EPlaneCoverTechnique Technique = EPlaneCoverTechnique::PlaneSpaceGreedy;
 		double ErrorTolerance = 1.0;
-		double TextureCompactnessWeight = 0.25;
-		int32 KMeansPlaneCount = 150;
-		int32 KMeansMaxIterations = 64;
-		EKMeansCrackReductionMode KMeansCrackReductionMode = EKMeansCrackReductionMode::Off;
-		double KMeansCrackReductionProjectionScale = 1.0;
-		int32 GodOfWarGeodesicSubdivisions = 2;
-		double GodOfWarCandidateSpacingMultiplier = 1.0;
-		int32 NormalThetaSteps = 16;
-		int32 NormalPhiSteps = 9;
-		int32 RhoBinCount = 256;
-		int32 AdaptiveRefinementDepth = 10;
-		int32 TextureTilePaddingPixels = 2;
+		EPlaneProxyCrackReductionMode CrackReductionMode = EPlaneProxyCrackReductionMode::Off;
+		double CrackReductionProjectionScale = 1.0;
 		int32 TextureAtlasResolution = 4096;
 		int32 SourceMaterialBakeResolution = 2048;
 		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;
+		EAtlasVConvention AtlasVConvention = EAtlasVConvention::GeometryMinVToTextureMinV;
 		double TrunkCardAtlasScale = 2.0;
 		bool bEnableAlphaAwareTileCrop = false;
 		int32 AlphaAwareTileCropGuardPixels = 2;
 	};
 
-	struct FPlaneCoverResult
+	struct FOLIAGEBAKERCORE_API FPlaneProxySet
 	{
 		int32 SourceTriangleCount = 0;
-		int32 CandidatePlaneCount = 0;
-		int32 MaxIterationCandidatePlaneCount = 0;
-		int32 TotalCandidatePlaneCount = 0;
-		int32 GreedyIterationCount = 0;
 		int32 CoveredTriangleCount = 0;
-		int32 FinalReassignedTriangleCount = 0;
 		double SourceArea = 0.0;
 		double CoveredArea = 0.0;
-		double TotalSeconds = 0.0;
-		double DensityBuildSeconds = 0.0;
-		double CandidateSearchSeconds = 0.0;
-		double CandidatePlaneBuildSeconds = 0.0;
-		double CandidatePrepareSeconds = 0.0;
-		double DensityUpdateSeconds = 0.0;
-		TArray<FPlaneCoverPlane> Planes;
+		TArray<FPlaneProxyInput> Planes;
 	};
 
-	struct FPlaneProxyMeshStats
+	struct FOLIAGEBAKERCORE_API FPlaneProxyMeshStats
 	{
 		int32 PlaneCount = 0;
 		int32 QuadCount = 0;
@@ -135,14 +110,14 @@ namespace UE::BillboardClouds
 		double AveragePlaneToShadingNormalAngleDegrees = 0.0;
 	};
 
-	struct FCrackReductionProjection
+	struct FOLIAGEBAKERCORE_API FCrackReductionProjection
 	{
 		int32 TriangleIndex = INDEX_NONE;
 		int32 SourcePlaneInfoIndex = INDEX_NONE;
 		TArray<FVector> ClippedPolygon;
 	};
 
-	struct FPlaneProxyPlaneInfo
+	struct FOLIAGEBAKERCORE_API FPlaneProxyPlaneInfo
 	{
 		int32 SourcePlaneIndex = INDEX_NONE;
 		bool bIsTrunkCard = false;
@@ -177,7 +152,7 @@ namespace UE::BillboardClouds
 		TArray<FCrackReductionProjection> CrackReductionProjections;
 	};
 
-	struct FPlaneProxyTileCrop
+	struct FOLIAGEBAKERCORE_API FPlaneProxyTileCrop
 	{
 		bool bEnabled = false;
 		double MinUFraction = 0.0;
@@ -186,15 +161,8 @@ namespace UE::BillboardClouds
 		double MaxVFraction = 1.0;
 	};
 
-	bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError);
-	FVector ProjectPointToPlane(const FVector& Point, const FVector& PlaneNormal, double PlaneRho);
-	bool IsPointWithinPlaneError(const FVector& Point, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
-	bool IsTriangleValidForPlane(const FSourceTriangle& Triangle, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
-	bool DoesTriangleIntersectPlaneValidZone(const FSourceTriangle& Triangle, const FVector& PlaneNormal, double PlaneRho, const FPlaneCoverSettings& Settings);
-	FPlaneCoverResult BuildGreedyPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
-	FPlaneCoverResult BuildKMeansPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
-	FPlaneCoverResult BuildPlaneCover(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverSettings& Settings);
-	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneCoverResult& Result, const FPlaneCoverSettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
-	bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const TArray<FPlaneProxyTileCrop>& TileCrops, const FPlaneCoverSettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);
-	FString SummarizePlaneCover(const FString& MeshName, const FPlaneCoverSettings& Settings, const FPlaneCoverResult& Result);
+	FOLIAGEBAKERCORE_API bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError);
+	FOLIAGEBAKERCORE_API FVector ProjectPointToPlane(const FVector& Point, const FVector& PlaneNormal, double PlaneRho);
+	FOLIAGEBAKERCORE_API bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneProxySet& Result, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
+	FOLIAGEBAKERCORE_API bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const TArray<FPlaneProxyTileCrop>& TileCrops, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);
 }

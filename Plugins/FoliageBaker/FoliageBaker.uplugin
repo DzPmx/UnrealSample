@@ -1,0 +1,51 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Foliage Baker",
+	"Description": "Extensible editor-side foliage baking tools with shared core services and feature modules.",
+	"Category": "Rendering",
+	"CreatedBy": "Codex",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"EnabledByDefault": true,
+	"Modules": [
+		{
+			"Name": "FoliageBakerCore",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "FoliageBakerCards",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"FoliageBakerCore"
+			]
+		},
+		{
+			"Name": "FoliageBakerBillboardClouds",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"FoliageBakerCore"
+			]
+		},
+		{
+			"Name": "FoliageBakerEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"FoliageBakerCore",
+				"FoliageBakerCards",
+				"FoliageBakerBillboardClouds"
+			]
+		}
+	]
+}
