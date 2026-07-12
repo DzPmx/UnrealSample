@@ -18,7 +18,6 @@ private:
 	void RegisterMenus();
 	void ExecuteOpenTool(const FToolMenuContext& MenuContext);
 	TSharedRef<SDockTab> SpawnToolTab(const FSpawnTabArgs& SpawnTabArgs);
-	TSharedRef<SWidget> CreateImpostorPlaceholder() const;
 	FText GetActiveFeatureTitle() const;
 	FText GetActiveFeatureDescription() const;
 	FText GetActiveFeatureMetadata() const;

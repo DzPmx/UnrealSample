@@ -38,12 +38,21 @@
 			]
 		},
 		{
+			"Name": "FoliageBakerImpostor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"FoliageBakerCore"
+			]
+		},
+		{
 			"Name": "FoliageBakerEditor",
 			"Type": "Editor",
 			"LoadingPhase": "Default",
 			"AdditionalDependencies": [
 				"FoliageBakerCore",
 				"FoliageBakerCards",
+				"FoliageBakerImpostor",
 				"FoliageBakerBillboardClouds"
 			]
 		}

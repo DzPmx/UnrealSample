@@ -3,6 +3,7 @@
 #include "FoliageBakerBillboardCloudsModule.h"
 #include "FoliageBakerCardsModule.h"
 #include "FoliageBakerCardsSettings.h"
+#include "FoliageBakerImpostorModule.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "Styling/AppStyle.h"
@@ -84,6 +85,8 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 		FModuleManager::LoadModuleChecked<FFoliageBakerBillboardCloudsModule>(TEXT("FoliageBakerBillboardClouds"));
 	FFoliageBakerCardsModule& CardsModule =
 		FModuleManager::LoadModuleChecked<FFoliageBakerCardsModule>(TEXT("FoliageBakerCards"));
+	FFoliageBakerImpostorModule& ImpostorModule =
+		FModuleManager::LoadModuleChecked<FFoliageBakerImpostorModule>(TEXT("FoliageBakerImpostor"));
 
 	TSharedRef<SSegmentedControl<int32>> FeatureTabs =
 		SNew(SSegmentedControl<int32>)
@@ -217,7 +220,7 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 					]
 					+ SWidgetSwitcher::Slot()
 					[
-						CreateImpostorPlaceholder()
+						ImpostorModule.CreateFeaturePanel()
 					]
 					+ SWidgetSwitcher::Slot()
 					[
@@ -229,34 +232,6 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 
 	FeatureSwitcher->SetActiveWidgetIndex(ActiveFeatureIndex);
 	return ToolTab;
-}
-
-TSharedRef<SWidget> FFoliageBakerEditorModule::CreateImpostorPlaceholder() const
-{
-	return SNew(SBorder)
-		.BorderImage(FAppStyle::GetBrush("NoBorder"))
-		.Padding(40.0f)
-		.VAlign(VAlign_Center)
-		[
-			SNew(SVerticalBox)
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("ImpostorDeferredTitle", "Impostor baking is reserved"))
-				.TextStyle(FAppStyle::Get(), "LargeText")
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			.Padding(0.0f, 12.0f, 0.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("ImpostorDeferredBody", "The interface is ready for the future hemisphere and full-sphere workflow. Baking remains disabled until the remaining requirements are confirmed."))
-				.AutoWrapText(true)
-			]
-		];
 }
 
 FText FFoliageBakerEditorModule::GetActiveFeatureTitle() const
@@ -282,7 +257,7 @@ FText FFoliageBakerEditorModule::GetActiveFeatureDescription() const
 	case CrossCardsFeatureIndex:
 		return LOCTEXT("CrossCardsFeatureDescription", "Bake 2-5 equally spaced vertical cards. Every angle is cropped independently and captures both front and back.");
 	case ImpostorFeatureIndex:
-		return LOCTEXT("ImpostorFeatureDescription", "Reserved for the future hemisphere and full-sphere impostor workflow.");
+		return LOCTEXT("ImpostorFeatureDescription", "Bake a fixed-grid upper-hemisphere or full-sphere view atlas and an octahedral proxy.");
 	case BillboardCloudsFeatureIndex:
 		return LOCTEXT("BillboardCloudsFeatureDescription", "Generate an adaptive cloud of planes using the existing BillboardClouds workflow.");
 	case SingleBillboardFeatureIndex:
@@ -298,7 +273,7 @@ FText FFoliageBakerEditorModule::GetActiveFeatureMetadata() const
 	case CrossCardsFeatureIndex:
 		return LOCTEXT("CrossCardsFeatureMetadata", "Selectable source LOD  |  2-5 planes  |  front + back  |  2048 default");
 	case ImpostorFeatureIndex:
-		return LOCTEXT("ImpostorFeatureMetadata", "Deferred  |  no assets are generated from this tab");
+		return LOCTEXT("ImpostorFeatureMetadata", "Selectable source LOD  |  per-view fitted projection  |  shared depth range");
 	case BillboardCloudsFeatureIndex:
 		return LOCTEXT("BillboardCloudsFeatureMetadata", "Selectable source LOD  |  adaptive plane cloud  |  existing output workflow");
 	case SingleBillboardFeatureIndex:

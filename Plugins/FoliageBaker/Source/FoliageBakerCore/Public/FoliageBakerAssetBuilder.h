@@ -101,6 +101,9 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerStaticMeshAssetParams
 	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
 	int32 DesiredUVChannelCount = 2;
 	FName MaterialSlotName = FName(TEXT("BillboardProxy"));
+	bool bRecomputeNormals = false;
+	bool bRecomputeTangents = false;
+	int32 BaseLODModel = INDEX_NONE;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerSourceLODAssetParams
@@ -110,6 +113,9 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerSourceLODAssetParams
 	int32 SourceLODIndex = 0;
 	int32 DesiredUVChannelCount = 2;
 	FName MaterialSlotName = FName(TEXT("BillboardProxy"));
+	bool bRecomputeNormals = false;
+	bool bRecomputeTangents = false;
+	int32 BaseLODModel = INDEX_NONE;
 
 	FName RebuildLODMetadataKey = NAME_None;
 };

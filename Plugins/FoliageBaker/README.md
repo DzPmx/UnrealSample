@@ -10,7 +10,7 @@ FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LO
 | --- | --- | --- |
 | Single Billboard | 可用 | 从 `+X`、`-X`、`+Y` 或 `-Y` 方向进行一次正交拍摄，生成一个穿过资产 Pivot 的垂直平面，只烘焙一个面 |
 | Cross Cards | 可用 | 生成 2–5 个在 180° 内等角度分布的垂直相交平面，每个角度独立裁切并烘焙正反面 |
-| Impostor | 未实现 | 工具中仅保留标签和占位界面，不生成资产 |
+| Impostor | 可用 | 使用 3×3–8×8 八面体方向网格采样上半球或完整球面，生成固定 Atlas 和单张自动裁边 Sprite 代理 |
 | BillboardClouds | 可用 | 使用 K-Means 生成自适应平面云，可选独立的树干 Cross Cards |
 
 ## 输入与拍摄规则
@@ -20,22 +20,23 @@ FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LO
 - Single Billboard 和 Cross Cards 使用所选 Source LOD 的全部三角形进行固定视角正交投影。
 - Single Billboard 和 Cross Cards 的平面穿过 Static Mesh 本地原点，也就是资产 Pivot。
 - Cross Cards 的每个角度分别计算投影范围、可见关系和 Alpha 裁切。
+- Impostor 使用固定 N×N 八面体方向网格。上半球采用半八面体映射，完整球面采用带下半球折叠的完整八面体映射；虚拟八面体只负责方向编码，不作为最终代理几何。所有视角使用所选 LOD Sphere Radius 构成的共享正方形投影范围，并共享同一深度范围，以匹配 UE Impostor 材质的单一 `Default Mesh Size` 语义。代理初始生成在本地 XY 平面，正面朝向 +Z，再由父材质的 WPO 在运行时朝向观察方向。
 - BillboardClouds 只保留 K-Means 技术路径。
 - 已实现的烘焙路径读取未执行顶点变形的 Source LOD，并通过 Unreal MaterialBaking 导出材质属性；WPO 和 Displacement 在导出代理中为 0。
 - 材质图中与颜色、透明度或其他属性直接相关的时间和风参数不会被统一禁用，只有顶点位移不参与烘焙。
 
 ## 纹理输出
 
-纹理分辨率范围为 256–4096，硬上限为 4K。Single Billboard 默认 1024，Cross Cards 和 BillboardClouds 默认 2048。
+纹理分辨率范围为 256–4096，硬上限为 4K。Single Billboard 默认 1024，Cross Cards、Impostor 和 BillboardClouds 默认 2048。
 
 ### BaseColor / Auxiliary
 
 - RGB 保存 Base Color。
-- Single Billboard 和 Cross Cards 的 A 通道保存由最终可见覆盖生成的整株 Union SDF：外部为 `0`，轮廓为 `0.5`，内部为 `1`。
+- Single Billboard、Cross Cards 和 Impostor 的 A 通道保存由最终可见覆盖生成的整株 Union SDF：外部为 `0`，轮廓为 `0.5`，内部为 `1`。
 - `Opacity SDF Range` 控制从轮廓到完全内部或外部的像素距离，默认 16 px。SDF 不增加 Padding，也不扩大平面、UV 或 Atlas Tile。
 - BillboardClouds 的 A 通道保存源 Opacity Mask，树干与叶片分类保存在代理网格 UV2 中。
 
-Single Billboard 和 Cross Cards 可以直接使用 BaseColor A 计算覆盖：
+Single Billboard、Cross Cards 和 Impostor 可以直接使用 BaseColor A 计算覆盖：
 
 ```hlsl
 float Coverage = smoothstep(AlphaThreshold - EdgeWidth, AlphaThreshold + EdgeWidth, UnionSDF);
@@ -46,6 +47,7 @@ float Coverage = smoothstep(AlphaThreshold - EdgeWidth, AlphaThreshold + EdgeWid
 - RGB 保存 object/local-space Normal。
 - Single Billboard 和 Cross Cards 的 A 通道保存可见源材质分类：背景为 `0`、树干为 `0.5`、树叶为 `1`。
 - 树干分类使用材质实例名称或父材质名称关键字，默认关键字为 `Trunk`。
+- Impostor 的 A 通道保存所有采样视角共享范围的线性深度：最近点为 `0`、最远点为 `1`、未覆盖像素为 `1`。
 - BillboardClouds 的 A 通道继续保存所有视角共享范围的线性深度：全局最近点为 `0`、全局最远点为 `1`、未覆盖像素为 `1`。
 
 Single Billboard 和 Cross Cards 的分类 Mask：
@@ -68,6 +70,7 @@ Mix 输出为可选项，RGBA 分别保存：
 
 - Single Billboard 和 Cross Cards 始终按每个视角的原始有效覆盖范围裁切，`Per-View Alpha Crop Guard` 单独控制额外保留边界。`Opacity SDF Range` 不增加 Padding，也不扩大平面、UV 或 Atlas Tile。
 - Single Billboard 默认开启 `Trim Unused Atlas Space`；Cross Cards 可按需开启。启用后允许输出块对齐的矩形纹理。
+- Impostor 使用固定的 N×N 正方形 Tile 网格。所有视角使用相同的正方形拍摄范围；方向帧、代理网格和运行时重建共用同一个尺寸。
 - BillboardClouds 可以在最终打包前按每个平面的 Alpha 外边界裁切。
 - Atlas Tile 内未覆盖区域使用最近的有效像素向外填充 RGB，不依赖固定 Padding Pixel 参数，也不会改变代理 UV 的有效占用范围。
 
@@ -79,15 +82,31 @@ Mix 输出为可选项，RGBA 分别保存：
 
 - Single Billboard：`/FoliageBaker/Materials/MR_Foliage_Billboard`
 - Cross Cards：`/FoliageBaker/Materials/MR_Foliage_Cross`
+- Impostor：`/FoliageBaker/Materials/MR_Foliage_Impostor`
 - BillboardClouds：`/FoliageBaker/Materials/MR_Foliage_BillboardClouds`
 
 默认纹理参数名称：
 
 - `ColorOpacity`
 - `NormalMask`
-- `Mix`
+- `PackedMasks_1`
 
 这些名称都可以在 Material 分类中修改。
+
+Impostor 默认附加运行时参数：
+
+- `FramesXY`：正方形 Atlas 共用的行列数标量。UE 原函数链将它同时用于 X/Y 帧寻址，因此当前只支持 N×N，不支持不等行列。
+- `Default Mesh Size`：所选 LOD Sphere Radius 的两倍，也是所有视角共用的正方形拍摄边长。
+- `Pivot Offset`：所选 LOD 本地 Bounds Center 相对于源资产 Pivot 的偏移。
+- `UpperHemisphereOnlyImpostor`：上半球模式启用，完整球面模式关闭。
+
+`NormalMask.A` 默认作为深度输入，因为迁移后的父材质保持 `UseDepthTexture` 关闭。启用 Mix 输出时，`PackedMasks_1` 的 R/G/B 分别通过父材质静态开关连接到 Ambient Occlusion、Roughness 和 Metallic；A 仍保存 Emission，但 UE 原 `Impostor_ChannelPackMask_Switches` 不负责把该通道路由到 Emissive。
+
+Impostor 材质保持 `ColorOpacity` 为 Color 采样，`NormalMask` 和 `PackedMasks_1` 为 Linear Color 采样。`FrameBlendWeights_TextureObject` 使用 `Linear Sampling` Static Bool 在编译期选择三帧 Color 或 Linear Color 采样路径：Base Color 调用关闭，Normal/Depth 与 Packed Masks 调用开启，不产生运行时分支。`NormalMask` 纹理保持 `sRGB=false`，不会在烘焙端进行预编码；未覆盖参数分别使用线性的 `T_Default_NormalMask` 和 `T_Default_BlackLinear` 作为默认纹理。
+
+运行时材质先把当前观察方向编码到八面体网格，确定虚拟网格中的三角形并取得三个相邻帧及重心权重。三个帧分别建立自己的投影平面和 UV，不共用投影结果；Normal A 先用于一次深度反投影，再以修正 UV 混合 BaseColor、SDF、Normal 和 Depth。最终代理是一张锁定当前观察方向的 Sprite，ISM/HISM 使用 Instance & Particle Space 计算后再转换为 World Space。
+
+Normal A 的深度沿相机到模型的拍摄射线映射，使用 `lerp(-SphereRadius, SphereRadius, Depth)` 解码。
 
 ## 网格输出
 
@@ -97,10 +116,11 @@ Mix 输出为可选项，RGBA 分别保存：
 2. 追加到源 Static Mesh 的 LOD。
 3. 替换源 Static Mesh 的指定 LOD。
 
-在追加模式下，三个已实现功能使用独立 Metadata Key 记录各自上次生成的目标 LOD：
+在追加模式下，四个已实现功能使用独立 Metadata Key 记录各自上次生成的目标 LOD：
 
 - `FoliageBaker.SingleBillboardLOD`
 - `FoliageBaker.CrossCardsLOD`
+- `FoliageBaker.ImpostorLOD`
 - `FoliageBaker.BillboardCloudsLOD`
 
 重新烘焙同一功能时会更新记录的 LOD；只有记录不存在或对应 LOD 已失效时才追加新的 LOD。
@@ -113,6 +133,7 @@ Mix 输出为可选项，RGBA 分别保存：
 - 不生成 Lightmap UV。
 - 使用完整编辑器网格构建流程生成距离场派生数据。
 - 保留源 Static Mesh 的本地坐标系和 Pivot 语义。
+- Impostor 按 UE ImpostorBaker 的 MeshCutout 契约，将每个视角的覆盖面积下采样到 16×16，再跨视角加法合并并以 `0.25` 阈值追踪四个象限，固定生成 1 个中心点、8 个轮廓点和 8 个三角形。代理位置缩放为所选 LOD Sphere Radius 的 1/10；UV0 使用相同的 0.001/0.995 inset，并除以 `FramesXY × 10`，由运行时材质恢复完整尺寸。几何保留源资产 Pivot，独立代理复用所选 LOD 的局部 Bounds，保持与追加到源模型 LOD 时相同的 WPO 剔除范围。
 
 ## 资产位置与重新烘焙
 
@@ -120,14 +141,14 @@ Mix 输出为可选项，RGBA 分别保存：
 - Texture 和 Material 文件夹相对于源 Static Mesh 目录的父目录计算。
 - 默认 Texture 文件夹为 `Textures`，Material 文件夹为 `Materials`。
 - 纹理、材质实例和代理网格名称的前缀与后缀都可以配置。
-- 创建独立资产时，三个已实现功能都会复用并更新同路径、同名称、同类型的现有 Texture2D、Material Instance Constant 和 Static Mesh；不会创建带编号的副本。同名对象类型不匹配时停止烘焙并报错。
+- 创建独立资产时，四个已实现功能都会复用并更新同路径、同名称、同类型的现有 Texture2D、Material Instance Constant 和 Static Mesh；不会创建带编号的副本。同名对象类型不匹配时停止烘焙并报错。
 - 批量烘焙按每个 Static Mesh 独立执行。
 - 每个 Static Mesh 的资产写入使用事务式快照：失败时恢复本次修改前的已有资产，并删除本次创建但未提交的资产。
 
 ## 使用方法
 
 1. 在 Unreal Editor 主菜单中打开 `Tools > Foliage Baker`。
-2. 选择 `Single Billboard`、`Cross Cards` 或 `BillboardClouds` 标签。
+2. 选择 `Single Billboard`、`Cross Cards`、`Impostor` 或 `BillboardClouds` 标签。
 3. 在 Content Browser 中选择一个或多个 Static Mesh，然后点击 `Add Content Browser Selection`，也可以直接在 Mesh 列表中指定资产。
 4. 设置 Source LOD、网格输出方式和功能参数。
 5. 选择 Material Instance Constant 模板并确认纹理参数名称。
@@ -137,12 +158,12 @@ Mix 输出为可选项，RGBA 分别保存：
 
 - `FoliageBakerCore`：公共网格、Atlas、源材质解析与属性烘焙、原子资产写入服务。
 - `FoliageBakerCards`：Single Billboard 与 Cross Cards 的设置、界面和请求组装。
+- `FoliageBakerImpostor`：半球/全球八面体方向采样、固定网格 Atlas、单 Sprite 代理与资产组装。
 - `FoliageBakerBillboardClouds`：K-Means BillboardClouds 功能。
-- `FoliageBakerEditor`：统一工具窗口、功能标签和 Impostor 占位界面。
+- `FoliageBakerEditor`：统一工具窗口和四种功能标签。
 
 ## 当前限制
 
-- Impostor 尚未实现。
 - 不接受 Skeletal Mesh 或其他非 Static Mesh 输入。
 - 不生成材质图。
 - 不生成碰撞和 Lightmap UV。

@@ -93,7 +93,13 @@ namespace
 		return StaticMaterials.Add(FStaticMaterial(Material, MaterialSlotName, MaterialSlotName));
 	}
 
-	void ConfigureProxySourceModel(UStaticMesh& StaticMesh, const int32 LODIndex, const bool bPreserveExistingScreenSize)
+	void ConfigureProxySourceModel(
+		UStaticMesh& StaticMesh,
+		const int32 LODIndex,
+		const bool bPreserveExistingScreenSize,
+		const bool bRecomputeNormals,
+		const bool bRecomputeTangents,
+		const int32 BaseLODModel)
 	{
 		if (!StaticMesh.IsSourceModelValid(LODIndex))
 		{
@@ -102,8 +108,12 @@ namespace
 
 		FStaticMeshSourceModel& SourceModel = StaticMesh.GetSourceModel(LODIndex);
 		const float ExistingScreenSize = SourceModel.ScreenSize.Default;
-		SourceModel.BuildSettings.bRecomputeNormals = false;
-		SourceModel.BuildSettings.bRecomputeTangents = false;
+		SourceModel.BuildSettings.bRecomputeNormals = bRecomputeNormals;
+		SourceModel.BuildSettings.bRecomputeTangents = bRecomputeTangents;
+		if (bRecomputeTangents)
+		{
+			SourceModel.BuildSettings.bUseMikkTSpace = true;
+		}
 		SourceModel.BuildSettings.bRemoveDegenerates = false;
 		SourceModel.BuildSettings.bGenerateLightmapUVs = false;
 		SourceModel.BuildSettings.SrcLightmapIndex = 0;
@@ -112,7 +122,9 @@ namespace
 		SourceModel.BuildSettings.DistanceFieldResolutionScale = 1.0f;
 		SourceModel.ReductionSettings.PercentTriangles = 1.0f;
 		SourceModel.ReductionSettings.PercentVertices = 1.0f;
-		SourceModel.ReductionSettings.BaseLODModel = LODIndex;
+		SourceModel.ReductionSettings.BaseLODModel = BaseLODModel == INDEX_NONE
+			? LODIndex
+			: BaseLODModel;
 
 		if (bPreserveExistingScreenSize)
 		{
@@ -766,7 +778,13 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 	{
 		BodySetup->RemoveSimpleCollision();
 	}
-	ConfigureProxySourceModel(*ProxyMesh, 0, false);
+	ConfigureProxySourceModel(
+		*ProxyMesh,
+		0,
+		false,
+		Params.bRecomputeNormals,
+		Params.bRecomputeTangents,
+		Params.BaseLODModel);
 	KeepOnlyUVChannels(*ProxyMesh, 0, Params.DesiredUVChannelCount, true);
 	ProxyMesh->PostEditChange();
 	ProxyMesh->MarkPackageDirty();
@@ -870,7 +888,10 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	ConfigureProxySourceModel(
 		SourceStaticMesh,
 		OutLODIndex,
-		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD || bReusingGeneratedLOD);
+		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD || bReusingGeneratedLOD,
+		Params.bRecomputeNormals,
+		Params.bRecomputeTangents,
+		Params.BaseLODModel);
 	KeepOnlyUVChannels(SourceStaticMesh, OutLODIndex, Params.DesiredUVChannelCount, false);
 
 	FMeshSectionInfo SectionInfo;

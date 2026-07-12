@@ -1,8 +1,8 @@
 using UnrealBuildTool;
 
-public class FoliageBakerEditor : ModuleRules
+public class FoliageBakerImpostor : ModuleRules
 {
-	public FoliageBakerEditor(ReadOnlyTargetRules Target) : base(Target)
+	public FoliageBakerImpostor(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
@@ -11,6 +11,7 @@ public class FoliageBakerEditor : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
+				"FoliageBakerCore",
 			}
 		);
 
@@ -21,10 +22,11 @@ public class FoliageBakerEditor : ModuleRules
 				"Slate",
 				"SlateCore",
 				"UnrealEd",
-				"ToolMenus",
-				"FoliageBakerCards",
-				"FoliageBakerImpostor",
-				"FoliageBakerBillboardClouds",
+				"AssetRegistry",
+				"ContentBrowser",
+				"PropertyEditor",
+				"MeshDescription",
+				"StaticMeshDescription",
 			}
 		);
 	}
