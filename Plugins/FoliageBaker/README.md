@@ -1,6 +1,6 @@
 # FoliageBaker
 
-FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LOD 烘焙远景植被代理。插件使用统一工具窗口承载不同烘焙方式，并由公共 Core 模块负责网格提取、材质属性烘焙、Atlas 处理和资产写入。
+FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LOD 烘焙远景植被代理。插件使用统一工具窗口承载不同烘焙方式，并由公共 Core 模块负责网格提取、源材质解析与属性烘焙、Atlas 处理和资产写入。
 
 当前版本为实验性编辑器工具，不包含运行时模块。
 
@@ -84,6 +84,14 @@ Mix 输出为可选项，RGBA 分别保存：
 2. 追加到源 Static Mesh 的 LOD。
 3. 替换源 Static Mesh 的指定 LOD。
 
+在追加模式下，三个已实现功能使用独立 Metadata Key 记录各自上次生成的目标 LOD：
+
+- `FoliageBaker.SingleBillboardLOD`
+- `FoliageBaker.CrossCardsLOD`
+- `FoliageBaker.BillboardCloudsLOD`
+
+重新烘焙同一功能时会更新记录的 LOD；只有记录不存在或对应 LOD 已失效时才追加新的 LOD。
+
 替换模式下，目标 LOD 不能与 Source LOD 相同，以便保留重新烘焙所需的输入几何。
 
 生成的代理网格：
@@ -99,6 +107,7 @@ Mix 输出为可选项，RGBA 分别保存：
 - Texture 和 Material 文件夹相对于源 Static Mesh 目录的父目录计算。
 - 默认 Texture 文件夹为 `Textures`，Material 文件夹为 `Materials`。
 - 纹理、材质实例和代理网格名称的前缀与后缀都可以配置。
+- 创建独立资产时，三个已实现功能都会复用并更新同路径、同名称、同类型的现有 Texture2D、Material Instance Constant 和 Static Mesh；不会创建带编号的副本。同名对象类型不匹配时停止烘焙并报错。
 - 批量烘焙按每个 Static Mesh 独立执行。
 - 每个 Static Mesh 的资产写入使用事务式快照：失败时恢复本次修改前的已有资产，并删除本次创建但未提交的资产。
 
@@ -113,7 +122,7 @@ Mix 输出为可选项，RGBA 分别保存：
 
 ## 模块结构
 
-- `FoliageBakerCore`：公共网格、Atlas、材质烘焙和原子资产写入服务。
+- `FoliageBakerCore`：公共网格、Atlas、源材质解析与属性烘焙、原子资产写入服务。
 - `FoliageBakerCards`：Single Billboard 与 Cross Cards 的设置、界面和请求组装。
 - `FoliageBakerBillboardClouds`：K-Means BillboardClouds 功能。
 - `FoliageBakerEditor`：统一工具窗口、功能标签和 Impostor 占位界面。

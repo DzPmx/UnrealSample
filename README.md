@@ -71,6 +71,10 @@ FoliageBaker 是一个 Unreal Editor 植被远景代理烘焙插件，用于从 
 2. 追加到源 Static Mesh 的 LOD。
 3. 替换源 Static Mesh 的指定 LOD。
 
+在创建独立资产模式下，Single Billboard、Cross Cards 和 BillboardClouds 会复用并更新同路径、同名称、同类型的现有纹理、材质实例和代理网格，不生成编号副本。
+
+在追加模式下，Single Billboard、Cross Cards 和 BillboardClouds 会分别记录自己上次生成的目标 LOD；重新烘焙同一功能时更新该 LOD，而不是继续追加新 LOD。
+
 替换目标不能与 Source LOD 相同。生成网格不创建碰撞和 Lightmap UV，并使用完整编辑器构建流程生成距离场派生数据。
 
 纹理、材质实例和代理网格支持可配置命名。单个 Static Mesh 的资产写入使用事务式快照；烘焙失败时会恢复已有资产并删除本次未提交的新资产。
@@ -86,7 +90,7 @@ FoliageBaker 是一个 Unreal Editor 植被远景代理烘焙插件，用于从 
 
 ## 模块结构
 
-- `FoliageBakerCore`：公共网格、Atlas、材质烘焙和原子资产写入。
+- `FoliageBakerCore`：公共网格、Atlas、源材质解析与属性烘焙、原子资产写入。
 - `FoliageBakerCards`：Single Billboard 与 Cross Cards。
 - `FoliageBakerBillboardClouds`：K-Means BillboardClouds。
 - `FoliageBakerEditor`：统一工具窗口和功能标签。
