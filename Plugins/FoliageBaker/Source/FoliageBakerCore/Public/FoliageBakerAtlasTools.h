@@ -17,6 +17,14 @@ namespace UE::FoliageBaker::Atlas
 		const TBitArray<>* CoverageMask = nullptr,
 		bool bFillAlpha = false);
 
+	FOLIAGEBAKERCORE_API void WriteUnionSdfToAlpha(
+		TArray<FColor>& Pixels,
+		int32 Width,
+		int32 Height,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
+		const TBitArray<>& CoverageMask,
+		int32 SdfRangePixels);
+
 
 	FOLIAGEBAKERCORE_API int32 BuildAlphaAwareTileCrops(
 		const TArray<FColor>& Pixels,

@@ -45,6 +45,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	int32 TextureResolution = 1024;
 	int32 SourceMaterialBakeResolution = 2048;
 	int32 AlphaCropGuardPixels = 2;
+	int32 OpacitySdfRangePixels = 16;
 	bool bTrimUnusedAtlasSpace = false;
 	bool bBakeBaseColorOpacity = true;
 	bool bBakeNormalDepth = true;

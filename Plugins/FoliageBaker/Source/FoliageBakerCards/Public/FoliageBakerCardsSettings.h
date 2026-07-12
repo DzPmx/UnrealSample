@@ -43,7 +43,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets baked from the selected Source LOD. Add assets directly or use Add Content Browser Selection."))
 	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
 
-	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for geometry extraction, projected bounds, material baking, and shared depth encoding. Every queued mesh must contain this LOD."))
+	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for geometry extraction, projected bounds, material baking, SDF generation, and trunk/leaf classification. Every queued mesh must contain this LOD."))
 	int32 SourceLODIndex = 0;
 
 
@@ -77,13 +77,16 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "0", ClampMax = "16", DisplayName = "Per-View Alpha Crop Guard", ToolTip = "Extra pixels retained around the automatically detected visible-alpha bounds. Per-view alpha cropping is always enabled for Single Billboard and Cross Cards."))
 	int32 AlphaCropGuardPixels = 2;
 
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Opacity SDF Range", Suffix = "px", ToolTip = "Pixel distance from the 0.5 contour to fully inside or outside in the BaseColor Alpha Union SDF. It does not add padding or expand the cropped tile."))
+	int32 OpacitySdfRangePixels = 16;
+
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Optimization", meta = (DisplayName = "Trim Unused Atlas Space", ToolTip = "After all Single Billboard or Cross Cards tiles are packed, remove completely unused outer atlas rows and columns. Output dimensions remain block-aligned and can become rectangular. Per-view alpha bounds are always cropped independently of this option."))
 	bool bTrimUnusedAtlasSpace = false;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGB stores base color. After source opacity clipping, A stores 0 for transparent background, 0.5 for trunk, and 1 for leaf using the BillboardClouds material-keyword classification rule."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / SDF", ToolTip = "RGB stores base color. A stores one continuous whole-vegetation Union SDF: outside 0, contour 0.5, inside 1."))
 	bool bBakeBaseColorOpacity = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGB stores object/local-space normal. A stores linear depth using one Min/Max range shared by all capture views: the globally nearest selected-LOD geometry point maps to 0 and the globally farthest maps to 1."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Trunk Leaf Mask", ToolTip = "RGB stores object/local-space normal. A stores the visible trunk/leaf classification after source opacity clipping: background 0, trunk 0.5, leaf 1."))
 	bool bBakeNormalDepth = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission. The destination material texture parameter is configured in Material."))
@@ -98,10 +101,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString TextureNamePrefix = TEXT("T_");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset")
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Base Color / SDF Texture Suffix"))
 	FString BaseColorOpacityTextureSuffix = TEXT("_DA");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset")
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Normal / Mask Texture Suffix"))
 	FString NormalDepthTextureSuffix = TEXT("_NR");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
@@ -116,10 +119,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ToolTip = "Material Instance Constant template duplicated for every generated proxy. The baker assigns the generated textures to the configured texture parameter names without creating or editing a material graph."))
 	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Opacity Parameter", ToolTip = "Texture parameter receiving the generated BaseColor/Opacity texture when that output is enabled."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and the whole-vegetation Union SDF in A."))
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Depth Parameter", ToolTip = "Texture parameter receiving object/local-space Normal RGB and the globally shared linear Depth mapping in A."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Trunk Leaf Mask Parameter", ToolTip = "Texture parameter receiving object/local-space Normal RGB and the trunk/leaf classification in A."))
 	FName NormalDepthTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission texture when that output is enabled."))

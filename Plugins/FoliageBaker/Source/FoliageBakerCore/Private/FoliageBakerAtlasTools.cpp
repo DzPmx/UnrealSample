@@ -4,6 +4,8 @@ namespace UE::FoliageBaker::Atlas
 {
 	namespace
 	{
+		constexpr float DistanceInfinity = 1.0e20f;
+
 		FColor NormalizeEncodedObjectSpaceNormal(const FColor& Pixel)
 		{
 			const FVector Normal(
@@ -76,6 +78,202 @@ namespace UE::FoliageBaker::Atlas
 			InOutMaxVFraction = FMath::Max(InOutMaxVFraction, static_cast<double>(ExpandedMaxY + 1) / TileSize.Y);
 			return true;
 		}
+
+		bool BuildNearestSourceMap(
+			const TBitArray<>& SourceMask,
+			const int32 Width,
+			const int32 Height,
+			TArray<int32>& OutNearestSource)
+		{
+			const int32 PixelCount = Width * Height;
+			OutNearestSource.Init(INDEX_NONE, PixelCount);
+			bool bHasAnySource = false;
+			for (int32 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
+			{
+				if (SourceMask.IsValidIndex(PixelIndex) && SourceMask[PixelIndex])
+				{
+					OutNearestSource[PixelIndex] = PixelIndex;
+					bHasAnySource = true;
+				}
+			}
+			if (!bHasAnySource)
+			{
+				return false;
+			}
+
+			auto TryAdoptNearestSource = [&](const int32 TargetX, const int32 TargetY, const int32 CandidateX, const int32 CandidateY)
+			{
+				if (CandidateX < 0 || CandidateX >= Width || CandidateY < 0 || CandidateY >= Height)
+				{
+					return;
+				}
+				const int32 TargetIndex = TargetY * Width + TargetX;
+				const int32 CandidateSourceIndex = OutNearestSource[CandidateY * Width + CandidateX];
+				if (CandidateSourceIndex == INDEX_NONE)
+				{
+					return;
+				}
+				const int32 CandidateDeltaX = TargetX - CandidateSourceIndex % Width;
+				const int32 CandidateDeltaY = TargetY - CandidateSourceIndex / Width;
+				const int32 CandidateDistanceSquared = CandidateDeltaX * CandidateDeltaX + CandidateDeltaY * CandidateDeltaY;
+				int32 CurrentDistanceSquared = MAX_int32;
+				const int32 CurrentSourceIndex = OutNearestSource[TargetIndex];
+				if (CurrentSourceIndex != INDEX_NONE)
+				{
+					const int32 CurrentDeltaX = TargetX - CurrentSourceIndex % Width;
+					const int32 CurrentDeltaY = TargetY - CurrentSourceIndex / Width;
+					CurrentDistanceSquared = CurrentDeltaX * CurrentDeltaX + CurrentDeltaY * CurrentDeltaY;
+				}
+				if (CandidateDistanceSquared < CurrentDistanceSquared)
+				{
+					OutNearestSource[TargetIndex] = CandidateSourceIndex;
+				}
+			};
+
+			auto RelaxPass = [&](const bool bTopToBottom, const bool bLeftToRight)
+			{
+				const int32 YStart = bTopToBottom ? 0 : Height - 1;
+				const int32 YEnd = bTopToBottom ? Height : -1;
+				const int32 YStep = bTopToBottom ? 1 : -1;
+				const int32 XStart = bLeftToRight ? 0 : Width - 1;
+				const int32 XEnd = bLeftToRight ? Width : -1;
+				const int32 XStep = bLeftToRight ? 1 : -1;
+				for (int32 Y = YStart; Y != YEnd; Y += YStep)
+				{
+					for (int32 X = XStart; X != XEnd; X += XStep)
+					{
+						TryAdoptNearestSource(X, Y, X - XStep, Y);
+						const int32 PreviousY = Y - YStep;
+						TryAdoptNearestSource(X, Y, X - 1, PreviousY);
+						TryAdoptNearestSource(X, Y, X, PreviousY);
+						TryAdoptNearestSource(X, Y, X + 1, PreviousY);
+					}
+				}
+			};
+
+			RelaxPass(true, true);
+			RelaxPass(true, false);
+			RelaxPass(false, true);
+			RelaxPass(false, false);
+			return true;
+		}
+
+		void BuildSquaredDistanceLine(
+			const TArray<float>& Source,
+			TArray<float>& OutDistances,
+			TArray<int32>& ParabolaLocations,
+			TArray<float>& Intersections)
+		{
+			const int32 Count = Source.Num();
+			OutDistances.Init(DistanceInfinity, Count);
+			ParabolaLocations.SetNumUninitialized(Count);
+			Intersections.SetNumUninitialized(Count + 1);
+
+			int32 FirstFiniteIndex = INDEX_NONE;
+			for (int32 Index = 0; Index < Count; ++Index)
+			{
+				if (Source[Index] < DistanceInfinity * 0.5f)
+				{
+					FirstFiniteIndex = Index;
+					break;
+				}
+			}
+			if (FirstFiniteIndex == INDEX_NONE)
+			{
+				return;
+			}
+
+			int32 ParabolaCount = 0;
+			ParabolaLocations[0] = FirstFiniteIndex;
+			Intersections[0] = -DistanceInfinity;
+			Intersections[1] = DistanceInfinity;
+			for (int32 Location = FirstFiniteIndex + 1; Location < Count; ++Location)
+			{
+				if (Source[Location] >= DistanceInfinity * 0.5f)
+				{
+					continue;
+				}
+
+				float Intersection = 0.0f;
+				while (true)
+				{
+					const int32 PreviousLocation = ParabolaLocations[ParabolaCount];
+					Intersection = static_cast<float>(
+						((static_cast<double>(Source[Location]) + static_cast<double>(Location) * Location)
+							- (static_cast<double>(Source[PreviousLocation]) + static_cast<double>(PreviousLocation) * PreviousLocation))
+						/ (2.0 * (Location - PreviousLocation)));
+					if (Intersection > Intersections[ParabolaCount] || ParabolaCount == 0)
+					{
+						break;
+					}
+					--ParabolaCount;
+				}
+				++ParabolaCount;
+				ParabolaLocations[ParabolaCount] = Location;
+				Intersections[ParabolaCount] = Intersection;
+				Intersections[ParabolaCount + 1] = DistanceInfinity;
+			}
+
+			int32 ActiveParabola = 0;
+			for (int32 Location = 0; Location < Count; ++Location)
+			{
+				while (Intersections[ActiveParabola + 1] < Location)
+				{
+					++ActiveParabola;
+				}
+				const int32 SourceLocation = ParabolaLocations[ActiveParabola];
+				const float Delta = static_cast<float>(Location - SourceLocation);
+				OutDistances[Location] = Delta * Delta + Source[SourceLocation];
+			}
+		}
+
+		void BuildSquaredDistanceField(
+			const TBitArray<>& Mask,
+			const int32 Width,
+			const int32 Height,
+			const bool bFeatureValue,
+			TArray<float>& OutDistances)
+		{
+			const int32 PixelCount = Width * Height;
+			TArray<float> Intermediate;
+			Intermediate.SetNumUninitialized(PixelCount);
+			TArray<float> LineSource;
+			TArray<float> LineDistances;
+			TArray<int32> ParabolaLocations;
+			TArray<float> Intersections;
+
+			LineSource.SetNumUninitialized(Width);
+			for (int32 Y = 0; Y < Height; ++Y)
+			{
+				for (int32 X = 0; X < Width; ++X)
+				{
+					const int32 PixelIndex = Y * Width + X;
+					LineSource[X] = Mask.IsValidIndex(PixelIndex) && Mask[PixelIndex] == bFeatureValue
+						? 0.0f
+						: DistanceInfinity;
+				}
+				BuildSquaredDistanceLine(LineSource, LineDistances, ParabolaLocations, Intersections);
+				for (int32 X = 0; X < Width; ++X)
+				{
+					Intermediate[Y * Width + X] = LineDistances[X];
+				}
+			}
+
+			OutDistances.SetNumUninitialized(PixelCount);
+			LineSource.SetNumUninitialized(Height);
+			for (int32 X = 0; X < Width; ++X)
+			{
+				for (int32 Y = 0; Y < Height; ++Y)
+				{
+					LineSource[Y] = Intermediate[Y * Width + X];
+				}
+				BuildSquaredDistanceLine(LineSource, LineDistances, ParabolaLocations, Intersections);
+				for (int32 Y = 0; Y < Height; ++Y)
+				{
+					OutDistances[Y * Width + X] = LineDistances[Y];
+				}
+			}
+		}
 	}
 
 	void NormalizeEncodedObjectSpaceNormals(TArray<FColor>& Pixels)
@@ -117,14 +315,13 @@ namespace UE::FoliageBaker::Atlas
 				return;
 			}
 
-			TArray<int32> NearestSource;
-			NearestSource.Init(INDEX_NONE, RegionWidth * RegionHeight);
+			TBitArray<> SourceMask;
+			SourceMask.Init(false, RegionWidth * RegionHeight);
 			auto ToLocalIndex = [MinX, MinY, RegionWidth](const int32 X, const int32 Y)
 			{
 				return (Y - MinY) * RegionWidth + (X - MinX);
 			};
 
-			bool bHasAnySource = false;
 			for (int32 Y = MinY; Y <= MaxY; ++Y)
 			{
 				for (int32 X = MinX; X <= MaxX; ++X)
@@ -132,72 +329,16 @@ namespace UE::FoliageBaker::Atlas
 					const int32 AtlasIndex = Y * Width + X;
 					if (bUseCoverageMask ? (*CoverageMask)[AtlasIndex] : Pixels[AtlasIndex].A > 0)
 					{
-						const int32 LocalIndex = ToLocalIndex(X, Y);
-						NearestSource[LocalIndex] = LocalIndex;
-						bHasAnySource = true;
+						SourceMask[ToLocalIndex(X, Y)] = true;
 					}
 				}
 			}
-			if (!bHasAnySource)
+
+			TArray<int32> NearestSource;
+			if (!BuildNearestSourceMap(SourceMask, RegionWidth, RegionHeight, NearestSource))
 			{
 				return;
 			}
-
-			auto TryAdoptNearestSource = [&](const int32 TargetX, const int32 TargetY, const int32 CandidateX, const int32 CandidateY)
-			{
-				if (CandidateX < MinX || CandidateX > MaxX || CandidateY < MinY || CandidateY > MaxY)
-				{
-					return;
-				}
-				const int32 TargetIndex = ToLocalIndex(TargetX, TargetY);
-				const int32 CandidateSourceIndex = NearestSource[ToLocalIndex(CandidateX, CandidateY)];
-				if (CandidateSourceIndex == INDEX_NONE)
-				{
-					return;
-				}
-				const int32 TargetLocalX = TargetX - MinX;
-				const int32 TargetLocalY = TargetY - MinY;
-				const int32 CandidateDeltaX = TargetLocalX - CandidateSourceIndex % RegionWidth;
-				const int32 CandidateDeltaY = TargetLocalY - CandidateSourceIndex / RegionWidth;
-				const int32 CandidateDistanceSquared = CandidateDeltaX * CandidateDeltaX + CandidateDeltaY * CandidateDeltaY;
-				int32 CurrentDistanceSquared = MAX_int32;
-				const int32 CurrentSourceIndex = NearestSource[TargetIndex];
-				if (CurrentSourceIndex != INDEX_NONE)
-				{
-					const int32 CurrentDeltaX = TargetLocalX - CurrentSourceIndex % RegionWidth;
-					const int32 CurrentDeltaY = TargetLocalY - CurrentSourceIndex / RegionWidth;
-					CurrentDistanceSquared = CurrentDeltaX * CurrentDeltaX + CurrentDeltaY * CurrentDeltaY;
-				}
-				if (CandidateDistanceSquared < CurrentDistanceSquared)
-				{
-					NearestSource[TargetIndex] = CandidateSourceIndex;
-				}
-			};
-
-			auto RelaxPass = [&](const bool bTopToBottom, const bool bLeftToRight)
-			{
-				const int32 YStart = bTopToBottom ? MinY : MaxY;
-				const int32 YEnd = bTopToBottom ? MaxY + 1 : MinY - 1;
-				const int32 YStep = bTopToBottom ? 1 : -1;
-				const int32 XStart = bLeftToRight ? MinX : MaxX;
-				const int32 XEnd = bLeftToRight ? MaxX + 1 : MinX - 1;
-				const int32 XStep = bLeftToRight ? 1 : -1;
-				for (int32 Y = YStart; Y != YEnd; Y += YStep)
-				{
-					for (int32 X = XStart; X != XEnd; X += XStep)
-					{
-						TryAdoptNearestSource(X, Y, X - XStep, Y);
-						const int32 PreviousY = Y - YStep;
-						TryAdoptNearestSource(X, Y, X - 1, PreviousY);
-						TryAdoptNearestSource(X, Y, X, PreviousY);
-						TryAdoptNearestSource(X, Y, X + 1, PreviousY);
-					}
-				}
-			};
-			RelaxPass(true, true);
-			RelaxPass(true, false);
-			RelaxPass(false, true);
-			RelaxPass(false, false);
 
 			for (int32 Y = MinY; Y <= MaxY; ++Y)
 			{
@@ -231,6 +372,84 @@ namespace UE::FoliageBaker::Atlas
 			if (PlaneInfo.bHasBackFaceAtlas)
 			{
 				FillTile(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize);
+			}
+		}
+	}
+
+	void WriteUnionSdfToAlpha(
+		TArray<FColor>& Pixels,
+		const int32 Width,
+		const int32 Height,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
+		const TBitArray<>& CoverageMask,
+		const int32 SdfRangePixels)
+	{
+		if (Width <= 0 || Height <= 0 || Pixels.Num() != Width * Height || CoverageMask.Num() != Pixels.Num())
+		{
+			return;
+		}
+
+		const float SafeRange = static_cast<float>(FMath::Max(1, SdfRangePixels));
+		auto PackTile = [&](const FIntPoint& PixelMin, const FIntPoint& TileSize)
+		{
+			if (TileSize.X <= 0 || TileSize.Y <= 0)
+			{
+				return;
+			}
+			const int32 MinX = FMath::Clamp(PixelMin.X, 0, Width - 1);
+			const int32 MinY = FMath::Clamp(PixelMin.Y, 0, Height - 1);
+			const int32 MaxX = FMath::Clamp(PixelMin.X + TileSize.X - 1, 0, Width - 1);
+			const int32 MaxY = FMath::Clamp(PixelMin.Y + TileSize.Y - 1, 0, Height - 1);
+			const int32 RegionWidth = MaxX - MinX + 1;
+			const int32 RegionHeight = MaxY - MinY + 1;
+			const int32 RegionPixelCount = RegionWidth * RegionHeight;
+			if (RegionPixelCount <= 0)
+			{
+				return;
+			}
+
+			TBitArray<> LocalCoverage;
+			LocalCoverage.Init(false, RegionPixelCount);
+			for (int32 LocalY = 0; LocalY < RegionHeight; ++LocalY)
+			{
+				for (int32 LocalX = 0; LocalX < RegionWidth; ++LocalX)
+				{
+					const int32 AtlasIndex = (MinY + LocalY) * Width + MinX + LocalX;
+					LocalCoverage[LocalY * RegionWidth + LocalX] = CoverageMask[AtlasIndex];
+				}
+			}
+
+			TArray<float> DistanceToCoverage;
+			TArray<float> DistanceToBackground;
+			BuildSquaredDistanceField(LocalCoverage, RegionWidth, RegionHeight, true, DistanceToCoverage);
+			BuildSquaredDistanceField(LocalCoverage, RegionWidth, RegionHeight, false, DistanceToBackground);
+
+			for (int32 LocalY = 0; LocalY < RegionHeight; ++LocalY)
+			{
+				for (int32 LocalX = 0; LocalX < RegionWidth; ++LocalX)
+				{
+					const int32 LocalIndex = LocalY * RegionWidth + LocalX;
+					const int32 AtlasIndex = (MinY + LocalY) * Width + MinX + LocalX;
+					const bool bCovered = LocalCoverage[LocalIndex];
+					const float SquaredDistance = bCovered
+						? DistanceToBackground[LocalIndex]
+						: DistanceToCoverage[LocalIndex];
+					const float Distance = SquaredDistance < DistanceInfinity * 0.5f
+						? FMath::Max(0.0f, FMath::Sqrt(SquaredDistance) - 0.5f)
+						: SafeRange;
+					const float SignedDistance = bCovered ? Distance : -Distance;
+					const float UnionSdf = FMath::Clamp(0.5f + SignedDistance / (2.0f * SafeRange), 0.0f, 1.0f);
+					Pixels[AtlasIndex].A = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(UnionSdf * 255.0f), 0, 255));
+				}
+			}
+		};
+
+		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			PackTile(PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize);
+			if (PlaneInfo.bHasBackFaceAtlas)
+			{
+				PackTile(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize);
 			}
 		}
 	}

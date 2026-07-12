@@ -50,6 +50,8 @@ namespace
 	constexpr int32 MaxTextureResolution = 4096;
 	constexpr int32 MinAlphaCropGuardPixels = 0;
 	constexpr int32 MaxAlphaCropGuardPixels = 16;
+	constexpr int32 MinOpacitySdfRangePixels = 1;
+	constexpr int32 MaxOpacitySdfRangePixels = 64;
 
 	bool IsSingleBillboardMode(const EFoliageBakerCardMode Mode)
 	{
@@ -151,6 +153,10 @@ namespace
 			Settings.AlphaCropGuardPixels,
 			MinAlphaCropGuardPixels,
 			MaxAlphaCropGuardPixels);
+		Request.OpacitySdfRangePixels = FMath::Clamp(
+			Settings.OpacitySdfRangePixels,
+			MinOpacitySdfRangePixels,
+			MaxOpacitySdfRangePixels);
 		Request.bTrimUnusedAtlasSpace = Settings.bTrimUnusedAtlasSpace;
 		Request.bBakeBaseColorOpacity = Settings.bBakeBaseColorOpacity;
 		Request.bBakeNormalDepth = Settings.bBakeNormalDepth;

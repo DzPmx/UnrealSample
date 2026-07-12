@@ -28,19 +28,32 @@ FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LO
 
 纹理分辨率范围为 256–4096，硬上限为 4K。Single Billboard 默认 1024，Cross Cards 和 BillboardClouds 默认 2048。
 
-### BaseColor / Opacity
+### BaseColor / Auxiliary
 
 - RGB 保存 Base Color。
-- Single Billboard 和 Cross Cards 的 A 通道在源材质透明度裁切后保存分类：背景为 0，树干为 0.5，树叶为 1。
-- 树干分类使用材质实例名称或父材质名称关键字，默认关键字为 `Trunk`。
+- Single Billboard 和 Cross Cards 的 A 通道保存由最终可见覆盖生成的整株 Union SDF：外部为 `0`，轮廓为 `0.5`，内部为 `1`。
+- `Opacity SDF Range` 控制从轮廓到完全内部或外部的像素距离，默认 16 px。SDF 不增加 Padding，也不扩大平面、UV 或 Atlas Tile。
 - BillboardClouds 的 A 通道保存源 Opacity Mask，树干与叶片分类保存在代理网格 UV2 中。
 
-### Normal / Depth
+Single Billboard 和 Cross Cards 可以直接使用 BaseColor A 计算覆盖：
+
+```hlsl
+float Coverage = smoothstep(AlphaThreshold - EdgeWidth, AlphaThreshold + EdgeWidth, UnionSDF);
+```
+
+### Normal / Auxiliary
 
 - RGB 保存 object/local-space Normal。
-- A 保存线性深度。
-- 同一次代理烘焙的所有视角共享同一组深度范围。
-- 全局最近的所选 LOD 几何点映射为 0，全局最远点映射为 1，未覆盖像素为 1。
+- Single Billboard 和 Cross Cards 的 A 通道保存可见源材质分类：背景为 `0`、树干为 `0.5`、树叶为 `1`。
+- 树干分类使用材质实例名称或父材质名称关键字，默认关键字为 `Trunk`。
+- BillboardClouds 的 A 通道继续保存所有视角共享范围的线性深度：全局最近点为 `0`、全局最远点为 `1`、未覆盖像素为 `1`。
+
+Single Billboard 和 Cross Cards 的分类 Mask：
+
+```hlsl
+float LeafMask = Coverage * step(0.75, NormalMaskA);
+float TrunkMask = Coverage * step(0.25, NormalMaskA) * (1.0 - step(0.75, NormalMaskA));
+```
 
 ### Mix
 
@@ -53,7 +66,7 @@ Mix 输出为可选项，RGBA 分别保存：
 
 ### Atlas 优化
 
-- Single Billboard 和 Cross Cards 始终按每个视角的有效 Alpha 范围裁切，`Per-View Alpha Crop Guard` 控制额外保留边界。
+- Single Billboard 和 Cross Cards 始终按每个视角的原始有效覆盖范围裁切，`Per-View Alpha Crop Guard` 单独控制额外保留边界。`Opacity SDF Range` 不增加 Padding，也不扩大平面、UV 或 Atlas Tile。
 - Single Billboard 默认开启 `Trim Unused Atlas Space`；Cross Cards 可按需开启。启用后允许输出块对齐的矩形纹理。
 - BillboardClouds 可以在最终打包前按每个平面的 Alpha 外边界裁切。
 - Atlas Tile 内未覆盖区域使用最近的有效像素向外填充 RGB，不依赖固定 Padding Pixel 参数，也不会改变代理 UV 的有效占用范围。

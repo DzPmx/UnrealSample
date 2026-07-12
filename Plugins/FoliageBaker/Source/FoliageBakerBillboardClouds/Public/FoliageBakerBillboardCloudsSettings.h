@@ -102,7 +102,7 @@ public:
 	int32 AlphaAwareTileCropGuardPixels = 2;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))
-	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::TrunkCardsOnly;
+	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::AllPlanes;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (ToolTip = "Generate the BaseColor/Opacity atlas. RGB stores base color and A stores the opacity mask; the destination material parameter is configured in Material."))
 	bool bBakeBaseColorOpacityAtlas = true;
