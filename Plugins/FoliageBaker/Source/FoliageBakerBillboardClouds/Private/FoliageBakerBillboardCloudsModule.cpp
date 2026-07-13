@@ -9,6 +9,7 @@
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerMaterialBaker.h"
 #include "FoliageBakerMaterialResolver.h"
+#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerKMeansPlaneCover.h"
 #include "FoliageBakerPlaneCover.h"
 #include "DetailsViewArgs.h"
@@ -154,7 +155,7 @@ namespace
 			break;
 		}
 		Settings.bEnableAlphaAwareTileCrop = EditorSettings.bEnableAlphaAwareTileCrop;
-		Settings.AlphaAwareTileCropGuardPixels = FMath::Clamp(EditorSettings.AlphaAwareTileCropGuardPixels, 0, 16);
+		Settings.AlphaAwareTileCropGuardPixels = FMath::Clamp(EditorSettings.AlphaAwareTileCropGuardPixels, 2, 16);
 		return Settings;
 	}
 
@@ -162,7 +163,7 @@ namespace
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings)
 	{
 		UE::FoliageBaker::BillboardClouds::FKMeansPlaneCoverSettings Settings;
-		Settings.PlaneCount = FMath::Clamp(EditorSettings.KMeansPlaneCount, 1, 4096);
+		Settings.PlaneCount = FMath::Clamp(EditorSettings.KMeansPlaneCount, 1, 512);
 		Settings.MaxIterations = FMath::Clamp(EditorSettings.KMeansMaxIterations, 1, 512);
 		return Settings;
 	}
@@ -2148,39 +2149,27 @@ namespace
 			OutError);
 	}
 
-	const TCHAR* GetMeshOutputModeText(const EBillboardCloudsMeshOutputMode OutputMode)
+	const TCHAR* GetMeshOutputModeText(const EFoliageBakerMeshAssetOutputMode OutputMode)
 	{
 		switch (OutputMode)
 		{
-		case EBillboardCloudsMeshOutputMode::AddToSourceMeshLOD:
+		case EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD:
 			return TEXT("added to source mesh LODs");
-		case EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD:
+		case EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD:
 			return TEXT("replaced source mesh LOD");
-		case EBillboardCloudsMeshOutputMode::SeparateMeshAsset:
+		case EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset:
 		default:
 			return TEXT("separate mesh asset");
 		}
 	}
 
-	EFoliageBakerMeshAssetOutputMode ToAssetOutputMode(const EBillboardCloudsMeshOutputMode OutputMode)
-	{
-		switch (OutputMode)
-		{
-		case EBillboardCloudsMeshOutputMode::AddToSourceMeshLOD:
-			return EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD;
-		case EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD:
-			return EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD;
-		case EBillboardCloudsMeshOutputMode::SeparateMeshAsset:
-		default:
-			return EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
-		}
-	}
-
-	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(const UFoliageBakerBillboardCloudsSettings& Settings)
+	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(
+		const UFoliageBakerBillboardCloudsSettings& Settings,
+		const FFoliageBakerMeshOutputSelection& MeshOutputSelection)
 	{
 		FFoliageBakerSourceLODAssetParams Params;
-		Params.OutputMode = ToAssetOutputMode(Settings.MeshOutputMode);
-		Params.RequestedReplaceLODIndex = Settings.ReplaceSourceLODIndex;
+		Params.OutputMode = MeshOutputSelection.OutputMode;
+		Params.RequestedReplaceLODIndex = MeshOutputSelection.ReplaceLODIndex;
 		Params.SourceLODIndex = Settings.SourceLODIndex;
 		Params.DesiredUVChannelCount = 3;
 
@@ -2225,9 +2214,10 @@ namespace
 	struct FProxyAssetBuildResult
 	{
 		bool bSucceeded = false;
+		bool bCancelled = false;
 		FString Report;
 		UStaticMesh* ProxyMesh = nullptr;
-		EBillboardCloudsMeshOutputMode MeshOutputMode = EBillboardCloudsMeshOutputMode::SeparateMeshAsset;
+		EFoliageBakerMeshAssetOutputMode MeshOutputMode = EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
 		int32 SourceMeshLODIndex = INDEX_NONE;
 		UTexture2D* AtlasTexture = nullptr;
 		UTexture2D* NormalAtlasTexture = nullptr;
@@ -2237,6 +2227,7 @@ namespace
 
 	struct FProxyBatchBuildResult
 	{
+		bool bCancelled = false;
 		FString Report;
 		TArray<UObject*> CreatedAssets;
 	};
@@ -2247,6 +2238,16 @@ namespace
 		const FString MeshName = StaticMesh.GetName();
 		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *MeshName, *Error);
 		UE_LOG(LogFoliageBakerBillboardClouds, Warning, TEXT("%s"), *Result.Report);
+		return Result;
+	}
+
+	FProxyAssetBuildResult MakeProxyBuildCancelled(const UStaticMesh& StaticMesh)
+	{
+		FProxyAssetBuildResult Result;
+		Result.bCancelled = true;
+		Result.Report = FString::Printf(
+			TEXT("%s\n  cancelled after bake: no mesh output was selected and no generated assets were committed."),
+			*StaticMesh.GetName());
 		return Result;
 	}
 
@@ -2552,12 +2553,13 @@ namespace
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyMeshBuildData& MeshData,
 		const FProxyTextureBuildData& TextureData,
+		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
 		FProxyAssetBuildResult& OutResult,
 		FString& OutError)
 	{
-		OutResult.MeshOutputMode = EditorSettings.MeshOutputMode;
+		OutResult.MeshOutputMode = MeshOutputSelection.OutputMode;
 
-		if (EditorSettings.MeshOutputMode == EBillboardCloudsMeshOutputMode::SeparateMeshAsset)
+		if (MeshOutputSelection.OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 		{
 			FFoliageBakerStaticMeshAssetParams MeshParams;
 			MeshParams.AssetNameSuffix = TEXT("_BillboardCloudProxy");
@@ -2581,7 +2583,7 @@ namespace
 			if (!FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 				StaticMesh,
 				AssetTransaction,
-				BuildSourceLODAssetParams(EditorSettings),
+				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection),
 				MeshData.MeshDescription,
 				TextureData.Material,
 				InstalledLODIndex,
@@ -2651,10 +2653,10 @@ namespace
 		const FString BaseAtlasPath = TextureData.AtlasTexture ? TextureData.AtlasTexture->GetPathName() : TEXT("disabled");
 		const FString NormalAtlasPath = TextureData.NormalAtlasTexture ? TextureData.NormalAtlasTexture->GetPathName() : TEXT("disabled");
 		const FString MixAtlasPath = TextureData.MixAtlasTexture ? TextureData.MixAtlasTexture->GetPathName() : TEXT("disabled");
-		const FString MeshOutputDetails = AssetResult.MeshOutputMode == EBillboardCloudsMeshOutputMode::SeparateMeshAsset
+		const FString MeshOutputDetails = AssetResult.MeshOutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
 			? FString::Printf(TEXT("%s: %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), *AssetResult.ProxyMesh->GetPathName())
 			: FString::Printf(TEXT("%s %d on %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), AssetResult.SourceMeshLODIndex, *AssetResult.ProxyMesh->GetPathName());
-		const TCHAR* MeshBuildPathDetails = AssetResult.MeshOutputMode == EBillboardCloudsMeshOutputMode::SeparateMeshAsset
+		const TCHAR* MeshBuildPathDetails = AssetResult.MeshOutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
 			? TEXT("BuildFromMeshDescriptions full build path")
 			: TEXT("source StaticMesh LOD MeshDescription commit");
 		const FString MaterialParameterDetails = FString::Printf(
@@ -2713,14 +2715,6 @@ namespace
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings)
 	{
 		FString Error;
-		if (EditorSettings.MeshOutputMode != EBillboardCloudsMeshOutputMode::SeparateMeshAsset
-			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
-				StaticMesh,
-				BuildSourceLODAssetParams(EditorSettings),
-				Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
-		}
 		FProxyPlaneCoverBuildData CoverData;
 		if (!BuildProxyPlaneCoverData(StaticMesh, EditorSettings, CoverData, Error))
 		{
@@ -2740,8 +2734,31 @@ namespace
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
 
+		const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
+			FFoliageBakerMeshOutputDialog::OpenAfterBake(StaticMesh, EditorSettings.SourceLODIndex);
+		if (!MeshOutputSelection.IsSet())
+		{
+			return MakeProxyBuildCancelled(StaticMesh);
+		}
+		if (MeshOutputSelection->OutputMode != EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
+			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
+				StaticMesh,
+				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection.GetValue()),
+				Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
 		FProxyAssetBuildResult Result;
-		if (!CreateProxyMeshAssetBundle(StaticMesh, EditorSettings, AssetTransaction, MeshData, TextureData, Result, Error))
+		if (!CreateProxyMeshAssetBundle(
+				StaticMesh,
+				EditorSettings,
+				AssetTransaction,
+				MeshData,
+				TextureData,
+				MeshOutputSelection.GetValue(),
+				Result,
+				Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
@@ -2800,6 +2817,11 @@ namespace
 			if (BuildResult.bSucceeded)
 			{
 				AppendProxyCreatedAssets(BuildResult, BatchResult.CreatedAssets);
+			}
+			if (BuildResult.bCancelled)
+			{
+				BatchResult.bCancelled = true;
+				break;
 			}
 		}
 

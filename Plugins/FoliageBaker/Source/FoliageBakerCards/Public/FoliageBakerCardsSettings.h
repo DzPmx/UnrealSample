@@ -24,14 +24,6 @@ enum class EFoliageBakerSingleCaptureAxis : uint8
 	NegativeY UMETA(DisplayName = "-Y")
 };
 
-UENUM()
-enum class EFoliageBakerCardsMeshOutputMode : uint8
-{
-	SeparateMeshAsset UMETA(DisplayName = "Create Separate Mesh Asset"),
-	AddToSourceMeshLOD UMETA(DisplayName = "Add To Source Mesh LODs"),
-	ReplaceSourceMeshLOD UMETA(DisplayName = "Replace Source Mesh LOD")
-};
-
 UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard & Cross Cards"))
 class FOLIAGEBAKERCARDS_API UFoliageBakerCardsSettings : public UObject
 {
@@ -49,12 +41,6 @@ public:
 
 	UPROPERTY(config)
 	EFoliageBakerCardMode Mode = EFoliageBakerCardMode::SingleBillboard;
-
-	UPROPERTY(config, EditAnywhere, Category = "Mesh")
-	EFoliageBakerCardsMeshOutputMode MeshOutputMode = EFoliageBakerCardsMeshOutputMode::SeparateMeshAsset;
-
-	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Output LOD Index To Replace", EditCondition = "MeshOutputMode == EFoliageBakerCardsMeshOutputMode::ReplaceSourceMeshLOD", EditConditionHides, ToolTip = "Existing destination LOD overwritten by the generated proxy. It must differ from Source LOD Index so the original input remains available for rebaking."))
-	int32 ReplaceSourceLODIndex = 1;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Camera is placed on the selected axis and looks toward the source mesh. The generated billboard plane passes through the source Static Mesh local origin (asset pivot)."))
 	EFoliageBakerSingleCaptureAxis SingleCaptureAxis = EFoliageBakerSingleCaptureAxis::PositiveX;
@@ -74,7 +60,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Resolution used to evaluate source material data before the final card atlas is assembled."))
 	int32 SourceMaterialBakeResolution = 2048;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "0", ClampMax = "16", DisplayName = "Per-View Alpha Crop Guard", ToolTip = "Extra pixels retained around the automatically detected visible-alpha bounds. Per-view alpha cropping is always enabled for Single Billboard and Cross Cards."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Per-View Alpha Crop Guard", ToolTip = "Extra pixels retained around the automatically detected visible-alpha bounds. Per-view alpha cropping is always enabled for Single Billboard and Cross Cards."))
 	int32 AlphaCropGuardPixels = 2;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Opacity SDF Range", Suffix = "px", ToolTip = "Pixel distance from the 0.5 contour to fully inside or outside in the BaseColor Alpha Union SDF. It does not add padding or expand the cropped tile."))

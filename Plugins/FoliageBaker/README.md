@@ -20,7 +20,7 @@ FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LO
 - Single Billboard 和 Cross Cards 使用所选 Source LOD 的全部三角形进行固定视角正交投影。
 - Single Billboard 和 Cross Cards 的平面穿过 Static Mesh 本地原点，也就是资产 Pivot。
 - Cross Cards 的每个角度分别计算投影范围、可见关系和 Alpha 裁切。
-- Impostor 使用固定 N×N 八面体方向网格。上半球采用半八面体映射，完整球面采用带下半球折叠的完整八面体映射；虚拟八面体只负责方向编码，不作为最终代理几何。所有视角使用所选 LOD Sphere Radius 构成的共享正方形投影范围，并共享同一深度范围，以匹配 UE Impostor 材质的单一 `Default Mesh Size` 语义。代理初始生成在本地 XY 平面，正面朝向 +Z，再由父材质的 WPO 在运行时朝向观察方向。
+- Impostor 使用固定 N×N 八面体方向网格。上半球采用半八面体映射，完整球面采用带下半球折叠的完整八面体映射；虚拟八面体只负责方向编码，不作为最终代理几何。插件扫描所选 LOD 的全部唯一顶点及全部采样视角，在每个视角的 U、V 和拍摄深度轴上计算一个共享的紧致半径；在不超过原 Sphere Radius 范围的前提下，尽可能为 Tile 四边各保留 2 px。所有视角共享这个正方形投影范围和深度范围，以匹配 UE Impostor 材质的单一 `Default Mesh Size` 语义。代理初始生成在本地 XY 平面，正面朝向 +Z，再由父材质的 WPO 在运行时朝向观察方向。
 - BillboardClouds 只保留 K-Means 技术路径。
 - 已实现的烘焙路径读取未执行顶点变形的 Source LOD，并通过 Unreal MaterialBaking 导出材质属性；WPO 和 Displacement 在导出代理中为 0。
 - 材质图中与颜色、透明度或其他属性直接相关的时间和风参数不会被统一禁用，只有顶点位移不参与烘焙。
@@ -47,7 +47,7 @@ float Coverage = smoothstep(AlphaThreshold - EdgeWidth, AlphaThreshold + EdgeWid
 - RGB 保存 object/local-space Normal。
 - Single Billboard 和 Cross Cards 的 A 通道保存可见源材质分类：背景为 `0`、树干为 `0.5`、树叶为 `1`。
 - 树干分类使用材质实例名称或父材质名称关键字，默认关键字为 `Trunk`。
-- Impostor 的 A 通道保存所有采样视角共享范围的线性深度：最近点为 `0`、最远点为 `1`、未覆盖像素为 `1`。
+- Impostor 的 A 通道保存与 UE ImpostorBaker 一致的共享范围线性深度：最近点为 `0`、最远点为 `1`、未覆盖像素为 `0.5`。
 - BillboardClouds 的 A 通道继续保存所有视角共享范围的线性深度：全局最近点为 `0`、全局最远点为 `1`、未覆盖像素为 `1`。
 
 Single Billboard 和 Cross Cards 的分类 Mask：
@@ -70,7 +70,7 @@ Mix 输出为可选项，RGBA 分别保存：
 
 - Single Billboard 和 Cross Cards 始终按每个视角的原始有效覆盖范围裁切，`Per-View Alpha Crop Guard` 单独控制额外保留边界。`Opacity SDF Range` 不增加 Padding，也不扩大平面、UV 或 Atlas Tile。
 - Single Billboard 默认开启 `Trim Unused Atlas Space`；Cross Cards 可按需开启。启用后允许输出块对齐的矩形纹理。
-- Impostor 使用固定的 N×N 正方形 Tile 网格。所有视角使用相同的正方形拍摄范围；方向帧、代理网格和运行时重建共用同一个尺寸。
+- Impostor 使用固定的 N×N 正方形 Tile 网格。所有视角使用同一个按几何顶点自动计算的紧致正方形拍摄范围；它不是逐帧 Alpha 裁切，透明叶片 Card 的空白角仍会参与范围计算。方向帧、Depth、代理网格和运行时重建始终共用同一个尺寸。
 - BillboardClouds 可以在最终打包前按每个平面的 Alpha 外边界裁切。
 - Atlas Tile 内未覆盖区域使用最近的有效像素向外填充 RGB，不依赖固定 Padding Pixel 参数，也不会改变代理 UV 的有效占用范围。
 
@@ -96,7 +96,7 @@ Mix 输出为可选项，RGBA 分别保存：
 Impostor 默认附加运行时参数：
 
 - `FramesXY`：正方形 Atlas 共用的行列数标量。UE 原函数链将它同时用于 X/Y 帧寻址，因此当前只支持 N×N，不支持不等行列。
-- `Default Mesh Size`：所选 LOD Sphere Radius 的两倍，也是所有视角共用的正方形拍摄边长。
+- `Default Mesh Size`：自动计算的共享紧致半径的两倍，也是所有视角共用的正方形拍摄边长。
 - `Pivot Offset`：所选 LOD 本地 Bounds Center 相对于源资产 Pivot 的偏移。
 - `UpperHemisphereOnlyImpostor`：上半球模式启用，完整球面模式关闭。
 
@@ -106,15 +106,18 @@ Impostor 材质保持 `ColorOpacity` 为 Color 采样，`NormalMask` 和 `Packed
 
 运行时材质先把当前观察方向编码到八面体网格，确定虚拟网格中的三角形并取得三个相邻帧及重心权重。三个帧分别建立自己的投影平面和 UV，不共用投影结果；Normal A 先用于一次深度反投影，再以修正 UV 混合 BaseColor、SDF、Normal 和 Depth。最终代理是一张锁定当前观察方向的 Sprite，ISM/HISM 使用 Instance & Particle Space 计算后再转换为 World Space。
 
-Normal A 的深度沿相机到模型的拍摄射线映射，使用 `lerp(-SphereRadius, SphereRadius, Depth)` 解码。
+Normal A 的深度沿相机到模型的拍摄射线映射，使用 `lerp(-SharedCaptureHalfExtent, SharedCaptureHalfExtent, Depth)` 解码；`Default Mesh Size` 等于 `SharedCaptureHalfExtent × 2`。
 
 ## 网格输出
 
-每个可用功能支持三种输出方式：
+每个可用功能在单个 Mesh 的几何和贴图烘焙成功后弹出统一的 Mesh Output 对话框，确认后才提交本次资产事务。关闭或取消对话框会回滚该 Mesh 本次尚未提交的贴图、材质和网格修改。可选方式为：
 
 1. 创建独立 Static Mesh 资产。
 2. 追加到源 Static Mesh 的 LOD。
 3. 替换源 Static Mesh 的指定 LOD。
+4. 替换源 Static Mesh 的最后一个 LOD；当最后一个 LOD 是 LOD0，或最后一个 LOD 正是本次 Source LOD 时，该选项不可用。
+
+批量烘焙会按 Mesh 逐个弹出确认，保证不同 LOD 数量的源模型分别解析自己的 Last LOD。Mesh 面板不再保存持久化的输出模式或替换索引。
 
 在追加模式下，四个已实现功能使用独立 Metadata Key 记录各自上次生成的目标 LOD：
 
@@ -133,7 +136,7 @@ Normal A 的深度沿相机到模型的拍摄射线映射，使用 `lerp(-Sphere
 - 不生成 Lightmap UV。
 - 使用完整编辑器网格构建流程生成距离场派生数据。
 - 保留源 Static Mesh 的本地坐标系和 Pivot 语义。
-- Impostor 按 UE ImpostorBaker 的 MeshCutout 契约，将每个视角的覆盖面积下采样到 16×16，再跨视角加法合并并以 `0.25` 阈值追踪四个象限，固定生成 1 个中心点、8 个轮廓点和 8 个三角形。代理位置缩放为所选 LOD Sphere Radius 的 1/10；UV0 使用相同的 0.001/0.995 inset，并除以 `FramesXY × 10`，由运行时材质恢复完整尺寸。几何保留源资产 Pivot，独立代理复用所选 LOD 的局部 Bounds，保持与追加到源模型 LOD 时相同的 WPO 剔除范围。
+- Impostor 按 UE ImpostorBaker 的 MeshCutout 契约，将每个视角的覆盖面积下采样到 16×16，再跨视角加法合并并以 `0.25` 阈值追踪四个象限，固定生成 1 个中心点、8 个轮廓点和 8 个三角形。代理位置缩放为共享紧致半径的 1/10；UV0 使用相同的 0.001/0.995 inset，并除以 `FramesXY × 10`，由运行时材质恢复完整尺寸。几何保留源资产 Pivot，独立代理复用所选 LOD 的局部 Bounds，保持与追加到源模型 LOD 时相同的 WPO 剔除范围。
 
 ## 资产位置与重新烘焙
 

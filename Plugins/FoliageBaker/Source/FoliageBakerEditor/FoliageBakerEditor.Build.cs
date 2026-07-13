@@ -22,6 +22,7 @@ public class FoliageBakerEditor : ModuleRules
 				"SlateCore",
 				"UnrealEd",
 				"ToolMenus",
+				"Settings",
 				"FoliageBakerCards",
 				"FoliageBakerImpostor",
 				"FoliageBakerBillboardClouds",

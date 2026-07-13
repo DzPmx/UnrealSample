@@ -3,6 +3,7 @@
 #include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerMaterialResolver.h"
+#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
@@ -55,7 +56,7 @@ namespace
 		ComputeSourceTriangleBounds(SourceTriangles, SourceBounds);
 		Settings.ErrorTolerance = FMath::Max(0.01, static_cast<double>(SourceBounds.SphereRadius) * 1.0e-6);
 		Settings.bEnableAlphaAwareTileCrop = true;
-		Settings.AlphaAwareTileCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 0, 16);
+		Settings.AlphaAwareTileCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
 		return Settings;
 	}
 
@@ -970,6 +971,7 @@ namespace
 	struct FProxyAssetBuildResult
 	{
 		bool bSucceeded = false;
+		bool bCancelled = false;
 		FString Report;
 		UStaticMesh* ProxyMesh = nullptr;
 		EFoliageBakerMeshOutputMode MeshOutputMode = EFoliageBakerMeshOutputMode::SeparateMeshAsset;
@@ -985,6 +987,16 @@ namespace
 		FProxyAssetBuildResult Result;
 		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh.GetName(), *Error);
 		UE_LOG(LogFoliageBakerCardsCore, Warning, TEXT("%s"), *Result.Report);
+		return Result;
+	}
+
+	FProxyAssetBuildResult MakeProxyBuildCancelled(const UStaticMesh& StaticMesh)
+	{
+		FProxyAssetBuildResult Result;
+		Result.bCancelled = true;
+		Result.Report = FString::Printf(
+			TEXT("%s\n  cancelled after bake: no mesh output was selected and no generated assets were committed."),
+			*StaticMesh.GetName());
 		return Result;
 	}
 
@@ -1020,6 +1032,20 @@ namespace
 		case EFoliageBakerMeshOutputMode::SeparateMeshAsset:
 		default:
 			return EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
+		}
+	}
+
+	EFoliageBakerMeshOutputMode ToCardOutputMode(const EFoliageBakerMeshAssetOutputMode OutputMode)
+	{
+		switch (OutputMode)
+		{
+		case EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD:
+			return EFoliageBakerMeshOutputMode::AddToSourceMeshLOD;
+		case EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD:
+			return EFoliageBakerMeshOutputMode::ReplaceSourceMeshLOD;
+		case EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset:
+		default:
+			return EFoliageBakerMeshOutputMode::SeparateMeshAsset;
 		}
 	}
 
@@ -1458,17 +1484,9 @@ namespace
 
 	FProxyAssetBuildResult BuildCardProxyAsset(
 		UStaticMesh& StaticMesh,
-		const FFoliageBakerCardBakeRequest& EditorSettings)
+		FFoliageBakerCardBakeRequest EditorSettings)
 	{
 		FString Error;
-		if (EditorSettings.MeshOutputMode != EFoliageBakerMeshOutputMode::SeparateMeshAsset
-			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
-				StaticMesh,
-				BuildSourceLODAssetParams(EditorSettings),
-				Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
-		}
 		FProxyPlaneCoverBuildData CoverData;
 		if (!BuildProxyPlaneCoverData(StaticMesh, EditorSettings, CoverData, Error))
 		{
@@ -1484,6 +1502,23 @@ namespace
 		FProxyTextureBuildData TextureData;
 		FFoliageBakerAssetTransaction AssetTransaction;
 		if (!BuildProxyTextureData(StaticMesh, EditorSettings, AssetTransaction, CoverData, MeshData, TextureData, Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
+		const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
+			FFoliageBakerMeshOutputDialog::OpenAfterBake(StaticMesh, EditorSettings.SourceLODIndex);
+		if (!MeshOutputSelection.IsSet())
+		{
+			return MakeProxyBuildCancelled(StaticMesh);
+		}
+		EditorSettings.MeshOutputMode = ToCardOutputMode(MeshOutputSelection->OutputMode);
+		EditorSettings.ReplaceSourceLODIndex = MeshOutputSelection->ReplaceLODIndex;
+		if (EditorSettings.MeshOutputMode != EFoliageBakerMeshOutputMode::SeparateMeshAsset
+			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
+				StaticMesh,
+				BuildSourceLODAssetParams(EditorSettings),
+				Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
@@ -1599,7 +1634,7 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 	SanitizedRequest.SourceLODIndex = Request.SourceLODIndex;
 	SanitizedRequest.CrossCardPlaneCount = FMath::Clamp(Request.CrossCardPlaneCount, 2, 5);
 	SanitizedRequest.SourceMaterialBakeResolution = FMath::Clamp(Request.SourceMaterialBakeResolution, 256, 4096);
-	SanitizedRequest.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 0, 16);
+	SanitizedRequest.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
 	SanitizedRequest.OpacitySdfRangePixels = FMath::Clamp(Request.OpacitySdfRangePixels, 1, 64);
 	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
 		? TEXT("_Billboard")
@@ -1611,6 +1646,7 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 
 	const FProxyAssetBuildResult InternalResult = BuildCardProxyAsset(*Request.SourceStaticMesh, SanitizedRequest);
 	OutResult.bSucceeded = InternalResult.bSucceeded;
+	OutResult.bCancelled = InternalResult.bCancelled;
 	OutResult.ProxyMesh = InternalResult.ProxyMesh;
 	OutResult.SourceMeshLODIndex = InternalResult.SourceMeshLODIndex;
 	OutResult.ColorOpacityTexture = InternalResult.AtlasTexture;

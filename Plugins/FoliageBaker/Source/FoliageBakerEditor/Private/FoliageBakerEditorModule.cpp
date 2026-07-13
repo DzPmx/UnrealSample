@@ -1,11 +1,14 @@
 #include "FoliageBakerEditorModule.h"
 
 #include "FoliageBakerBillboardCloudsModule.h"
+#include "FoliageBakerBillboardCloudsSettings.h"
 #include "FoliageBakerCardsModule.h"
 #include "FoliageBakerCardsSettings.h"
 #include "FoliageBakerImpostorModule.h"
+#include "FoliageBakerImpostorSettings.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
+#include "ISettingsModule.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -27,10 +30,18 @@ namespace
 	constexpr int32 ImpostorFeatureIndex = 2;
 	constexpr int32 BillboardCloudsFeatureIndex = 3;
 	constexpr int32 FeatureCount = 4;
+	const FName EditorSettingsContainerName(TEXT("Editor"));
+	const FName PluginsSettingsCategoryName(TEXT("Plugins"));
+	const FName SingleBillboardSettingsSectionName(TEXT("FoliageBakerSingleBillboard"));
+	const FName CrossCardsSettingsSectionName(TEXT("FoliageBakerCrossCards"));
+	const FName ImpostorSettingsSectionName(TEXT("FoliageBakerImpostor"));
+	const FName BillboardCloudsSettingsSectionName(TEXT("FoliageBakerBillboardClouds"));
 }
 
 void FFoliageBakerEditorModule::StartupModule()
 {
+	RegisterEditorPreferences();
+
 	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
 		FoliageBakerToolTabName,
 		FOnSpawnTab::CreateRaw(this, &FFoliageBakerEditorModule::SpawnToolTab))
@@ -44,6 +55,8 @@ void FFoliageBakerEditorModule::StartupModule()
 
 void FFoliageBakerEditorModule::ShutdownModule()
 {
+	UnregisterEditorPreferences();
+
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
 	if (FSlateApplication::IsInitialized())
@@ -55,6 +68,54 @@ void FFoliageBakerEditorModule::ShutdownModule()
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(FoliageBakerToolTabName);
 	}
 	FeatureSwitcher.Reset();
+}
+
+void FFoliageBakerEditorModule::RegisterEditorPreferences()
+{
+	ISettingsModule& SettingsModule = FModuleManager::LoadModuleChecked<ISettingsModule>(TEXT("Settings"));
+
+	SettingsModule.RegisterSettings(
+		EditorSettingsContainerName,
+		PluginsSettingsCategoryName,
+		SingleBillboardSettingsSectionName,
+		LOCTEXT("SingleBillboardSettingsName", "Foliage Baker - Single Billboard"),
+		LOCTEXT("SingleBillboardSettingsDescription", "Configure the default settings used by the Foliage Baker Single Billboard tool."),
+		GetMutableDefault<UFoliageBakerSingleBillboardSettings>());
+
+	SettingsModule.RegisterSettings(
+		EditorSettingsContainerName,
+		PluginsSettingsCategoryName,
+		CrossCardsSettingsSectionName,
+		LOCTEXT("CrossCardsSettingsName", "Foliage Baker - Cross Cards"),
+		LOCTEXT("CrossCardsSettingsDescription", "Configure the default settings used by the Foliage Baker Cross Cards tool."),
+		GetMutableDefault<UFoliageBakerCrossCardsSettings>());
+
+	SettingsModule.RegisterSettings(
+		EditorSettingsContainerName,
+		PluginsSettingsCategoryName,
+		ImpostorSettingsSectionName,
+		LOCTEXT("ImpostorSettingsName", "Foliage Baker - Impostor"),
+		LOCTEXT("ImpostorSettingsDescription", "Configure the default settings used by the Foliage Baker Impostor tool."),
+		GetMutableDefault<UFoliageBakerImpostorSettings>());
+
+	SettingsModule.RegisterSettings(
+		EditorSettingsContainerName,
+		PluginsSettingsCategoryName,
+		BillboardCloudsSettingsSectionName,
+		LOCTEXT("BillboardCloudsSettingsName", "Foliage Baker - Billboard Clouds"),
+		LOCTEXT("BillboardCloudsSettingsDescription", "Configure the default settings used by the Foliage Baker Billboard Clouds tool."),
+		GetMutableDefault<UFoliageBakerBillboardCloudsSettings>());
+}
+
+void FFoliageBakerEditorModule::UnregisterEditorPreferences()
+{
+	if (ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>(TEXT("Settings")))
+	{
+		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, SingleBillboardSettingsSectionName);
+		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, CrossCardsSettingsSectionName);
+		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, ImpostorSettingsSectionName);
+		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, BillboardCloudsSettingsSectionName);
+	}
 }
 
 void FFoliageBakerEditorModule::RegisterMenus()

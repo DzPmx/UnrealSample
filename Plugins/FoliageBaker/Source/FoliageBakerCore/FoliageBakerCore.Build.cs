@@ -22,6 +22,9 @@ public class FoliageBakerCore : ModuleRules
 			{
 				"AssetRegistry",
 				"AssetTools",
+				"InputCore",
+				"Slate",
+				"SlateCore",
 				"StaticMeshDescription",
 				"UnrealEd",
 			}

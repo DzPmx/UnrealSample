@@ -31,14 +31,6 @@ enum class EBillboardCloudsTrunkCardAtlasScale : uint8
 	TwoX UMETA(DisplayName = "2.0x")
 };
 
-UENUM()
-enum class EBillboardCloudsMeshOutputMode : uint8
-{
-	SeparateMeshAsset UMETA(DisplayName = "Create Separate Mesh Asset"),
-	AddToSourceMeshLOD UMETA(DisplayName = "Add To Source Mesh LODs"),
-	ReplaceSourceMeshLOD UMETA(DisplayName = "Replace Source Mesh LOD")
-};
-
 UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard Clouds"))
 class FOLIAGEBAKERBILLBOARDCLOUDS_API UFoliageBakerBillboardCloudsSettings : public UObject
 {
@@ -53,19 +45,13 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for geometry extraction, plane-cover bounds, material baking, and shared depth encoding. Every queued mesh must contain this LOD."))
 	int32 SourceLODIndex = 0;
 
-	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ToolTip = "Choose whether generated proxy geometry is written as a separate Static Mesh asset, appended as a new LOD on the selected source Static Mesh, or used to replace an existing source Static Mesh LOD. Texture and material locations are controlled by the Asset settings."))
-	EBillboardCloudsMeshOutputMode MeshOutputMode = EBillboardCloudsMeshOutputMode::SeparateMeshAsset;
-
-	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Output LOD Index To Replace", EditCondition = "MeshOutputMode == EBillboardCloudsMeshOutputMode::ReplaceSourceMeshLOD", EditConditionHides, ToolTip = "Existing destination LOD overwritten by the generated proxy. It must differ from Source LOD Index so the original input remains available for rebaking."))
-	int32 ReplaceSourceLODIndex = 1;
-
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Plane Cover", meta = (ClampMin = "0.0", ToolTip = "Relative object-space tolerance used by K-Means proxy footprint padding and minimum extent. The analyzer multiplies this by the selected mesh bounds sphere radius."))
 	double RelativeError = 0.02;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Plane Cover", meta = (ClampMin = "0.0", ToolTip = "Minimum K-Means proxy footprint tolerance in Unreal centimeters."))
 	double MinimumErrorCm = 1.0;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|K-Means", meta = (ClampMin = "1", ClampMax = "4096", ToolTip = "Target number of billboard planes for budget-driven K-Means clustering."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|K-Means", meta = (ClampMin = "1", ClampMax = "512", ToolTip = "Target number of billboard planes for budget-driven K-Means clustering."))
 	int32 KMeansPlaneCount = 64;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|K-Means", meta = (ClampMin = "1", ClampMax = "512", ToolTip = "Maximum assignment/refit iterations for the K-Means solver."))
@@ -98,7 +84,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Run a pre-bake alpha pass and crop each billboard tile rectangle to the alpha-painted outer bounds before final packing. This improves per-tile usage by removing transparent outer borders; it does not fill interior alpha holes."))
 	bool bEnableAlphaAwareTileCrop = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "0", ClampMax = "16", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra source-tile pixels kept around the alpha-painted bounds when alpha-aware tile crop is enabled."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra source-tile pixels kept around the alpha-painted bounds when alpha-aware tile crop is enabled."))
 	int32 AlphaAwareTileCropGuardPixels = 2;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))

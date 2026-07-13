@@ -48,7 +48,7 @@ namespace
 	constexpr int32 MaxCardPlaneCount = 5;
 	constexpr int32 MinTextureResolution = 256;
 	constexpr int32 MaxTextureResolution = 4096;
-	constexpr int32 MinAlphaCropGuardPixels = 0;
+	constexpr int32 MinAlphaCropGuardPixels = 2;
 	constexpr int32 MaxAlphaCropGuardPixels = 16;
 	constexpr int32 MinOpacitySdfRangePixels = 1;
 	constexpr int32 MaxOpacitySdfRangePixels = 64;
@@ -107,20 +107,6 @@ namespace
 		}
 	}
 
-	EFoliageBakerMeshOutputMode ToCoreOutputMode(const EFoliageBakerCardsMeshOutputMode Mode)
-	{
-		switch (Mode)
-		{
-		case EFoliageBakerCardsMeshOutputMode::AddToSourceMeshLOD:
-			return EFoliageBakerMeshOutputMode::AddToSourceMeshLOD;
-		case EFoliageBakerCardsMeshOutputMode::ReplaceSourceMeshLOD:
-			return EFoliageBakerMeshOutputMode::ReplaceSourceMeshLOD;
-		case EFoliageBakerCardsMeshOutputMode::SeparateMeshAsset:
-		default:
-			return EFoliageBakerMeshOutputMode::SeparateMeshAsset;
-		}
-	}
-
 	FFoliageBakerCardBakeRequest BuildRequest(
 		UStaticMesh& StaticMesh,
 		UMaterialInstanceConstant& MaterialTemplate,
@@ -137,8 +123,6 @@ namespace
 			MinCardPlaneCount,
 			MaxCardPlaneCount);
 		Request.TrunkMaterialKeywords = Settings.TrunkMaterialKeywords;
-		Request.MeshOutputMode = ToCoreOutputMode(Settings.MeshOutputMode);
-		Request.ReplaceSourceLODIndex = Settings.ReplaceSourceLODIndex;
 		Request.TextureResolution = FMath::Clamp(
 			IsSingleBillboardMode(Settings.Mode)
 				? Settings.SingleTextureResolution
@@ -431,6 +415,10 @@ FReply FFoliageBakerCardsModule::HandleBake(const EFoliageBakerCardMode Mode)
 		{
 			++SuccessCount;
 			CreatedAssets.Append(Result.CreatedAssets);
+		}
+		if (Result.bCancelled)
+		{
+			break;
 		}
 	}
 

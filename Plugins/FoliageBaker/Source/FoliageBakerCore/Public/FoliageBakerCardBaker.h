@@ -67,6 +67,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeResult
 {
 	bool bSucceeded = false;
+	bool bCancelled = false;
 	UStaticMesh* ProxyMesh = nullptr;
 	int32 SourceMeshLODIndex = INDEX_NONE;
 	UTexture2D* ColorOpacityTexture = nullptr;

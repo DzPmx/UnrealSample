@@ -280,6 +280,10 @@ FReply FFoliageBakerImpostorModule::HandleBake()
 			++SuccessCount;
 			CreatedAssets.Append(Result.CreatedAssets);
 		}
+		if (Result.bCancelled)
+		{
+			break;
+		}
 	}
 
 	if (!CreatedAssets.IsEmpty() && GEditor)

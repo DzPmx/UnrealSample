@@ -15,14 +15,6 @@ enum class EFoliageBakerImpostorCoverage : uint8
 	FullSphere UMETA(DisplayName = "Full Sphere")
 };
 
-UENUM()
-enum class EFoliageBakerImpostorMeshOutputMode : uint8
-{
-	SeparateMeshAsset UMETA(DisplayName = "Create Separate Mesh Asset"),
-	AddToSourceMeshLOD UMETA(DisplayName = "Add To Source Mesh LODs"),
-	ReplaceSourceMeshLOD UMETA(DisplayName = "Replace Source Mesh LOD")
-};
-
 UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Impostor"))
 class FOLIAGEBAKERIMPOSTOR_API UFoliageBakerImpostorSettings final : public UObject
 {
@@ -36,12 +28,6 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for geometry extraction, material baking, shared bounds, and depth encoding."))
 	int32 SourceLODIndex = 0;
-
-	UPROPERTY(config, EditAnywhere, Category = "Mesh")
-	EFoliageBakerImpostorMeshOutputMode MeshOutputMode = EFoliageBakerImpostorMeshOutputMode::SeparateMeshAsset;
-
-	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Output LOD Index To Replace", EditCondition = "MeshOutputMode == EFoliageBakerImpostorMeshOutputMode::ReplaceSourceMeshLOD", EditConditionHides, ToolTip = "Existing destination LOD overwritten by the generated proxy. It must differ from Source LOD Index."))
-	int32 ReplaceSourceLODIndex = 1;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Sampling")
 	EFoliageBakerImpostorCoverage Coverage = EFoliageBakerImpostorCoverage::UpperHemisphere;
@@ -61,7 +47,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / SDF", ToolTip = "RGB stores BaseColor. A stores a whole-vegetation SDF: outside 0, contour 0.5, inside 1."))
 	bool bBakeBaseColorSdf = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Depth", ToolTip = "RGB stores object/local-space Normal. A stores shared-range linear depth: near 0, far 1, uncovered 1."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Depth", ToolTip = "RGB stores object/local-space Normal. A stores UE ImpostorBaker-compatible shared-range linear depth: near 0, far 1, uncovered 0.5."))
 	bool bBakeNormalDepth = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission."))

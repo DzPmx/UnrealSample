@@ -15,6 +15,8 @@ public:
 	virtual void ShutdownModule() override;
 
 private:
+	void RegisterEditorPreferences();
+	void UnregisterEditorPreferences();
 	void RegisterMenus();
 	void ExecuteOpenTool(const FToolMenuContext& MenuContext);
 	TSharedRef<SDockTab> SpawnToolTab(const FSpawnTabArgs& SpawnTabArgs);
