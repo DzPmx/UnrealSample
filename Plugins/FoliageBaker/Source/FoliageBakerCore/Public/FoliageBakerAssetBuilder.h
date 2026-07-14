@@ -80,6 +80,10 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 	TextureGroup LODGroup = TEXTUREGROUP_World;
 	bool bSRGB = true;
 	float AlphaCoverageThreshold = 0.0f;
+	// Mip-0 atlas regions that must be filtered independently before being assembled into each lower mip.
+	TArray<FIntRect> MipTileRects;
+	FColor MipBackgroundColor = FColor(0, 0, 0, 0);
+	bool bNormalizeMipNormals = false;
 	FString EmptyPixelsError = TEXT("No texture pixels were generated.");
 };
 

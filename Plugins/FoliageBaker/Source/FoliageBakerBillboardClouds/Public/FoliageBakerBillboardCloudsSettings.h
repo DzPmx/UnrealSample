@@ -78,7 +78,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Generated square atlas resolution. Billboard tile sizes are automatically scaled and packed to maximize use of this texture."))
 	int32 TextureAtlasResolution = 2048;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Resolution used by the fallback/evaluation path for source-material UV-space data, mainly opacity fallback and alpha analysis. Final atlas channels are baked per billboard tile."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Resolution used for source-material alpha analysis before per-billboard-tile atlas baking."))
 	int32 SourceMaterialBakeResolution = 2048;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Run a pre-bake alpha pass and crop each billboard tile rectangle to the alpha-painted outer bounds before final packing. This improves per-tile usage by removing transparent outer borders; it does not fill interior alpha holes."))

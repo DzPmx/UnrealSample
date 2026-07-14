@@ -13,6 +13,7 @@
 #include "MaterialShared.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshResources.h"
 
 namespace UE::FoliageBaker::MaterialResolver
 {
@@ -758,10 +759,94 @@ namespace UE::FoliageBaker::MaterialResolver
 			FMeshData MeshSettings;
 			MeshSettings.MeshDescription = SourceMeshDescription;
 			MeshSettings.Mesh = &SourceStaticMesh;
-			MeshSettings.MaterialIndices.Add(MaterialIndex);
 			MeshSettings.TextureCoordinateBox = FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
 			MeshSettings.TextureCoordinateIndex = 0;
 			const FStaticMeshConstAttributes SourceAttributes(*SourceMeshDescription);
+			const bool bHasPolygonGroupMaterialSlots = SourceMeshDescription->PolygonGroupAttributes().HasAttribute(
+				MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
+			if (bHasPolygonGroupMaterialSlots)
+			{
+				const TPolygonGroupAttributesConstRef<FName> PolygonGroupMaterialSlotNames =
+					SourceAttributes.GetPolygonGroupMaterialSlotNames();
+				const FStaticMeshRenderData* SourceRenderData = SourceStaticMesh.GetRenderData();
+				const FStaticMeshLODResources* SourceLODResources = SourceRenderData
+					&& SourceRenderData->LODResources.IsValidIndex(SourceLODIndex)
+					? &SourceRenderData->LODResources[SourceLODIndex]
+					: nullptr;
+				const int32 PolygonGroupCount = SourceMeshDescription->PolygonGroups().Num();
+				int32 NonEmptyPolygonGroupCount = 0;
+				for (const FPolygonGroupID PolygonGroupID : SourceMeshDescription->PolygonGroups().GetElementIDs())
+				{
+					NonEmptyPolygonGroupCount += SourceMeshDescription->GetNumPolygonGroupPolygons(PolygonGroupID) > 0
+						? 1
+						: 0;
+				}
+				const int32 EffectiveSectionCount = SourceLODResources
+					? SourceLODResources->Sections.Num()
+					: SourceStaticMesh.GetSectionInfoMap().GetSectionNumber(SourceLODIndex);
+				const bool bSectionsMapAllPolygonGroups = EffectiveSectionCount == PolygonGroupCount;
+				const bool bSectionsMapNonEmptyPolygonGroups = !bSectionsMapAllPolygonGroups
+					&& EffectiveSectionCount == NonEmptyPolygonGroupCount;
+				int32 SectionIndex = 0;
+				for (const FPolygonGroupID PolygonGroupID : SourceMeshDescription->PolygonGroups().GetElementIDs())
+				{
+					const bool bPolygonGroupIsEmpty =
+						SourceMeshDescription->GetNumPolygonGroupPolygons(PolygonGroupID) == 0;
+					const bool bConsumesPositionalSection = bSectionsMapAllPolygonGroups
+						|| (bSectionsMapNonEmptyPolygonGroups && !bPolygonGroupIsEmpty);
+					// StaticMeshBuilder emits one render section per PolygonGroup in this
+					// iteration order, while BuildFromMeshDescriptions skips empty groups.
+					// Prefer the effective render-section material only when its section count
+					// proves which convention was used, so overrides/remaps match FSourceTriangle.
+					int32 PolygonGroupMaterialIndex = bConsumesPositionalSection
+						&& SourceLODResources
+						&& SourceLODResources->Sections.IsValidIndex(SectionIndex)
+						? SourceLODResources->Sections[SectionIndex].MaterialIndex
+						: INDEX_NONE;
+					if (bConsumesPositionalSection
+						&& PolygonGroupMaterialIndex == INDEX_NONE
+						&& SourceStaticMesh.GetSectionInfoMap().IsValidSection(SourceLODIndex, SectionIndex))
+					{
+						PolygonGroupMaterialIndex = SourceStaticMesh.GetSectionInfoMap()
+							.Get(SourceLODIndex, SectionIndex)
+							.MaterialIndex;
+					}
+					if (bConsumesPositionalSection)
+					{
+						++SectionIndex;
+					}
+					if (bPolygonGroupIsEmpty)
+					{
+						continue;
+					}
+					if (PolygonGroupMaterialIndex == INDEX_NONE)
+					{
+						const FName MaterialSlotName = PolygonGroupMaterialSlotNames[PolygonGroupID];
+						PolygonGroupMaterialIndex = SourceStaticMesh.GetMaterialIndex(MaterialSlotName);
+						if (PolygonGroupMaterialIndex == INDEX_NONE)
+						{
+							PolygonGroupMaterialIndex = SourceStaticMesh.GetMaterialIndexFromImportedMaterialSlotName(
+								MaterialSlotName);
+						}
+					}
+					if (PolygonGroupMaterialIndex == MaterialIndex)
+					{
+						MeshSettings.MaterialIndices.Add(PolygonGroupID.GetValue());
+					}
+				}
+				// This material slot is unused by the selected LOD. Do not fall back to
+				// treating its slot index as a PolygonGroupID and baking another material's geometry.
+				if (MeshSettings.MaterialIndices.IsEmpty())
+				{
+					return false;
+				}
+			}
+			else
+			{
+				// Legacy descriptions without imported slot names commonly keep group IDs
+				// aligned with material indices; preserve that behavior only when no mapping exists.
+				MeshSettings.MaterialIndices.Add(MaterialIndex);
+			}
 			const int32 SourceUVChannelCount = FMath::Max(
 				1,
 				SourceAttributes.GetVertexInstanceUVs().GetNumChannels());
@@ -1225,7 +1310,11 @@ namespace UE::FoliageBaker::MaterialResolver
 				? SourceMaterials[MaterialIndex].MaterialSlotName.ToString()
 				: TEXT("None");
 			const FString MaterialName = MaterialInterface ? MaterialInterface->GetName() : TEXT("None");
-			const FString NormalSource = TEXT("GPU-baked MP_Normal converted through matched source render-data TBN basis for all cards; two-sided tangent-space backfaces flip after decode");
+			const FString NormalSource = !OutputSelection.bNormalMask
+				? TEXT("not requested")
+				: (bBakeNormalTexture
+					? TEXT("shared source-UV GPU MP_Normal bake requested by caller")
+					: TEXT("shared source-UV normal bake disabled; caller supplies side-aware projected normal bake"));
 			InOutStats.MaterialAlphaPolicyDetails += FString::Printf(
 				TEXT("\n    material=%d, slot=%s, asset=%s, blend=%s, two-sided=%s, alpha=%s, normal=%s"),
 				MaterialIndex,

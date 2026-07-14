@@ -28,9 +28,7 @@ public class FoliageBakerBillboardClouds : ModuleRules
 				"PropertyEditor",
 				"MeshDescription",
 				"StaticMeshDescription",
-				"RenderCore",
-				"RHI",
-				"Renderer",
+				"MaterialBaking",
 			}
 		);
 	}

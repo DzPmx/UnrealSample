@@ -4,14 +4,15 @@
 #include "AssetSelection.h"
 #include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
+#include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerBillboardCloudsSettings.h"
 #include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerAtlasTools.h"
-#include "FoliageBakerMaterialBaker.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerKMeansPlaneCover.h"
 #include "FoliageBakerPlaneCover.h"
+#include "FoliageBakerProjectedMaterialBake.h"
 #include "DetailsViewArgs.h"
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
@@ -30,7 +31,6 @@
 #include "MaterialBakingStructures.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
-#include "StaticMeshAttributes.h"
 #include "StaticMeshResources.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
@@ -48,6 +48,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerBillboardClouds, Log, All);
 
 namespace
 {
+	using UE::FoliageBaker::ProjectedMaterialBake::EncodeObjectSpaceNormalToColor;
+
 	class FFoliageBakerCategoryOrderCustomization final : public IDetailCustomization
 	{
 	public:
@@ -330,7 +332,7 @@ namespace
 	using EBillboardOpacityMaskChannel = UE::FoliageBaker::MaterialResolver::EOpacityMaskChannel;
 	using FAtlasOutputSelection = UE::FoliageBaker::MaterialResolver::FMaterialOutputSelection;
 	using FMaterialBakeData = UE::FoliageBaker::MaterialResolver::FMaterialBakeData;
-	using UE::FoliageBaker::MaterialResolver::SampleOpacityMaskValue;
+	using FMaterialScalarBakeData = UE::FoliageBaker::MaterialResolver::FMaterialScalarBakeData;
 
 	struct FAtlasBakeStats : UE::FoliageBaker::MaterialResolver::FMaterialResolveStats
 	{
@@ -385,7 +387,19 @@ namespace
 	};
 
 
-	bool ComputeBarycentric2D(const FVector2D& Point, const FVector2D& A, const FVector2D& B, const FVector2D& C, double& OutA, double& OutB, double& OutC)
+	uint8 UnitFloatToByte(const float Value)
+	{
+		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Value, 0.0f, 1.0f) * 255.0f), 0, 255));
+	}
+
+	bool ComputeBarycentric2D(
+		const FVector2D& Point,
+		const FVector2D& A,
+		const FVector2D& B,
+		const FVector2D& C,
+		double& OutA,
+		double& OutB,
+		double& OutC)
 	{
 		const double Denominator = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
 		if (FMath::Abs(Denominator) <= UE_DOUBLE_SMALL_NUMBER)
@@ -396,151 +410,29 @@ namespace
 		OutA = ((B.Y - C.Y) * (Point.X - C.X) + (C.X - B.X) * (Point.Y - C.Y)) / Denominator;
 		OutB = ((C.Y - A.Y) * (Point.X - C.X) + (A.X - C.X) * (Point.Y - C.Y)) / Denominator;
 		OutC = 1.0 - OutA - OutB;
-		return OutA >= -1.0e-5 && OutB >= -1.0e-5 && OutC >= -1.0e-5;
-	}
-
-	bool ComputeBarycentric3D(const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle, const FVector& Point, double& OutA, double& OutB, double& OutC)
-	{
-		const FVector V0 = Triangle.Vertices[1] - Triangle.Vertices[0];
-		const FVector V1 = Triangle.Vertices[2] - Triangle.Vertices[0];
-		const FVector V2 = Point - Triangle.Vertices[0];
-		const double D00 = FVector::DotProduct(V0, V0);
-		const double D01 = FVector::DotProduct(V0, V1);
-		const double D11 = FVector::DotProduct(V1, V1);
-		const double D20 = FVector::DotProduct(V2, V0);
-		const double D21 = FVector::DotProduct(V2, V1);
-		const double Denominator = D00 * D11 - D01 * D01;
-		if (FMath::Abs(Denominator) <= UE_DOUBLE_SMALL_NUMBER)
-		{
-			return false;
-		}
-
-		OutB = (D11 * D20 - D01 * D21) / Denominator;
-		OutC = (D00 * D21 - D01 * D20) / Denominator;
-		OutA = 1.0 - OutB - OutC;
 		return true;
 	}
 
-	uint8 UnitFloatToByte(const float Value)
+	float SampleMaterialScalar(const FMaterialScalarBakeData& BakeData, const FVector2f& UV)
 	{
-		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Value, 0.0f, 1.0f) * 255.0f), 0, 255));
-	}
-
-	FColor EncodeObjectSpaceNormalToColor(const FVector& InNormal, const uint8 Alpha = 255)
-	{
-		FVector Normal = InNormal.GetSafeNormal();
-		if (Normal.IsNearlyZero())
+		if (!BakeData.bHasReadableTexture || !BakeData.Texture.IsValid())
 		{
-			Normal = FVector::UpVector;
+			return FMath::Clamp(BakeData.Constant, 0.0f, 1.0f);
 		}
 
-		return FColor(
-			static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((Normal.X * 0.5 + 0.5) * 255.0), 0, 255)),
-			static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((Normal.Y * 0.5 + 0.5) * 255.0), 0, 255)),
-			static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((Normal.Z * 0.5 + 0.5) * 255.0), 0, 255)),
-			Alpha);
-	}
-
-	FVector DecodeObjectSpaceNormalColor(const FColor& Color)
-	{
-		return FVector(
-			static_cast<double>(Color.R) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(Color.G) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(Color.B) / 255.0 * 2.0 - 1.0).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-	}
-
-	struct FNormalBakeBasisSample
-	{
-		FVector Normal = FVector::UpVector;
-		FVector Tangent = FVector::ForwardVector;
-		double CaptureDepth = TNumericLimits<double>::Max();
-		float BinormalSign = 1.0f;
-		float OutputNormalSign = 1.0f;
-		bool bValid = false;
-	};
-
-	FVector DeriveTangentForNormal(const FVector& InNormal)
-	{
-		const FVector Normal = InNormal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-		const FVector ReferenceAxis = FMath::Abs(Normal.Z) < 0.95 ? FVector::UpVector : FVector::ForwardVector;
-		FVector Tangent = FVector::CrossProduct(ReferenceAxis, Normal).GetSafeNormal();
-		if (Tangent.IsNearlyZero())
+		const FLinearColor Sample = BakeData.Texture.Sample(UV);
+		if (BakeData.bUseLuminance)
 		{
-			Tangent = FVector::RightVector;
+			return FMath::Clamp(FMath::Max3(Sample.R, Sample.G, Sample.B), 0.0f, 1.0f);
 		}
-		return Tangent;
-	}
-
-	FNormalBakeBasisSample MakeNormalBakeBasisSample(
-		const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle,
-		const double W0,
-		const double W1,
-		const double W2,
-		const bool bFlipOutputNormalForTwoSidedBackFace)
-	{
-		FNormalBakeBasisSample Result;
-
-		FVector Normal = Triangle.VertexNormals[0] * W0
-			+ Triangle.VertexNormals[1] * W1
-			+ Triangle.VertexNormals[2] * W2;
-		if (!Normal.Normalize())
+		switch (BakeData.Channel)
 		{
-			Normal = Triangle.Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+		case EBillboardOpacityMaskChannel::Green: return FMath::Clamp(Sample.G, 0.0f, 1.0f);
+		case EBillboardOpacityMaskChannel::Blue: return FMath::Clamp(Sample.B, 0.0f, 1.0f);
+		case EBillboardOpacityMaskChannel::Alpha: return FMath::Clamp(Sample.A, 0.0f, 1.0f);
+		case EBillboardOpacityMaskChannel::Red:
+		default: return FMath::Clamp(Sample.R, 0.0f, 1.0f);
 		}
-
-		FVector Tangent = FVector::ForwardVector;
-		float BinormalSign = 1.0f;
-		if (Triangle.bHasTangents)
-		{
-			Tangent = Triangle.VertexTangents[0] * W0
-				+ Triangle.VertexTangents[1] * W1
-				+ Triangle.VertexTangents[2] * W2;
-			BinormalSign = (Triangle.BinormalSigns[0] * W0
-				+ Triangle.BinormalSigns[1] * W1
-				+ Triangle.BinormalSigns[2] * W2) < 0.0 ? -1.0f : 1.0f;
-		}
-		else
-		{
-			Tangent = DeriveTangentForNormal(Normal);
-		}
-
-		Tangent = Tangent - Normal * FVector::DotProduct(Tangent, Normal);
-		if (!Tangent.Normalize())
-		{
-			Tangent = DeriveTangentForNormal(Normal);
-		}
-
-		Result.Normal = Normal;
-		Result.Tangent = Tangent;
-		Result.BinormalSign = BinormalSign;
-		Result.OutputNormalSign = bFlipOutputNormalForTwoSidedBackFace ? -1.0f : 1.0f;
-		Result.bValid = true;
-		return Result;
-	}
-
-	FColor EncodeBakedTangentSpaceNormalToObjectSpaceColor(
-		const FColor& RawBakedTangentSpaceNormal,
-		const FNormalBakeBasisSample& Basis,
-		const uint8 AlphaOverride)
-	{
-		if (!Basis.bValid)
-		{
-			return EncodeObjectSpaceNormalToColor(FVector::UpVector, AlphaOverride);
-		}
-
-		const FVector TangentSpaceNormal = DecodeObjectSpaceNormalColor(RawBakedTangentSpaceNormal);
-		const FVector Normal = Basis.Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-		FVector Tangent = Basis.Tangent - Normal * FVector::DotProduct(Basis.Tangent, Normal);
-		if (!Tangent.Normalize())
-		{
-			Tangent = DeriveTangentForNormal(Normal);
-		}
-		const FVector Binormal = FVector::CrossProduct(Normal, Tangent).GetSafeNormal() * Basis.BinormalSign;
-		const FVector ObjectSpaceNormal = (Tangent * TangentSpaceNormal.X
-			+ Binormal * TangentSpaceNormal.Y
-			+ Normal * TangentSpaceNormal.Z).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Normal)
-			* static_cast<double>(Basis.OutputNormalSign);
-		return EncodeObjectSpaceNormalToColor(ObjectSpaceNormal, AlphaOverride);
 	}
 
 	bool IsPointInsidePlaneProxyEnvelope(const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo, const FVector& Point, const double Tolerance)
@@ -612,351 +504,6 @@ namespace
 
 
 
-	bool BuildPerPlaneBakeMeshDescription(
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
-		const TArray<int32>& TriangleIndices,
-		const TArray<UE::FoliageBaker::PlaneCover::FCrackReductionProjection>& CrackReductionProjections,
-		const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
-		const FIntPoint& TileSize,
-		const int32 MaterialIndexFilter,
-		const int32 NumSourceUVChannels,
-		const bool bReverseBakeWinding,
-		FMeshDescription& OutMeshDescription,
-		TArray<FVector2D>& OutCustomTileUVs,
-		int32& OutMatchingTriangleCount)
-	{
-		OutMatchingTriangleCount = 0;
-		OutCustomTileUVs.Reset();
-		OutMeshDescription.Empty();
-		FStaticMeshAttributes(OutMeshDescription).Register();
-
-
-
-		const int32 DesiredUVChannels = FMath::Clamp(NumSourceUVChannels, 1, UE::FoliageBaker::PlaneCover::MaxMaterialBakeUVChannels);
-
-		FStaticMeshAttributes Attributes(OutMeshDescription);
-		TVertexAttributesRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
-		TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
-		TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
-		TVertexInstanceAttributesRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
-		TVertexInstanceAttributesRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
-		TVertexInstanceAttributesRef<FVector4f> VertexInstanceColors = Attributes.GetVertexInstanceColors();
-		TPolygonGroupAttributesRef<FName> PolygonGroupMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
-
-		VertexInstanceUVs.SetNumChannels(DesiredUVChannels);
-
-		const FPolygonGroupID PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
-		PolygonGroupMaterialSlotNames[PolygonGroupID] = FName(TEXT("BillboardBakeSlot"));
-
-		const double UExtent = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, UE_DOUBLE_SMALL_NUMBER);
-		const double VExtent = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, UE_DOUBLE_SMALL_NUMBER);
-
-
-
-
-
-		auto AppendTriangleGeometry = [&](
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Tri,
-			const FVector Positions[3]) -> bool
-		{
-			if (MaterialIndexFilter != INDEX_NONE && Tri.MaterialIndex != MaterialIndexFilter)
-			{
-				return false;
-			}
-			if (Tri.Area <= 0.0)
-			{
-				return false;
-			}
-			if (FVector::CrossProduct(Positions[1] - Positions[0], Positions[2] - Positions[0]).SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
-			{
-				return false;
-			}
-
-			double Weights[3][3] = {};
-			for (int32 Corner = 0; Corner < 3; ++Corner)
-			{
-				if (!ComputeBarycentric3D(Tri, Positions[Corner], Weights[Corner][0], Weights[Corner][1], Weights[Corner][2]))
-				{
-					return false;
-				}
-			}
-
-			FVertexInstanceID VertexInstanceIDs[3];
-			FVector2D CustomUVs[3];
-			for (int32 Corner = 0; Corner < 3; ++Corner)
-			{
-				const double W0 = Weights[Corner][0];
-				const double W1 = Weights[Corner][1];
-				const double W2 = Weights[Corner][2];
-				const float W0f = static_cast<float>(W0);
-				const float W1f = static_cast<float>(W1);
-				const float W2f = static_cast<float>(W2);
-				const FNormalBakeBasisSample Basis = MakeNormalBakeBasisSample(Tri, W0, W1, W2, false);
-
-				const FVertexID VertexID = OutMeshDescription.CreateVertex();
-				VertexPositions[VertexID] = FVector3f(Positions[Corner]);
-
-				VertexInstanceIDs[Corner] = OutMeshDescription.CreateVertexInstance(VertexID);
-
-
-
-				const FVector2f FallbackUV = Tri.bHasUVs
-					? Tri.UVs[0] * W0f + Tri.UVs[1] * W1f + Tri.UVs[2] * W2f
-					: FVector2f::ZeroVector;
-				for (int32 UVChannel = 0; UVChannel < DesiredUVChannels; ++UVChannel)
-				{
-					const FVector2f SourceUV = (Tri.bHasUVs && UVChannel < Tri.NumUVChannels)
-						? Tri.UVChannels[UVChannel][0] * W0f + Tri.UVChannels[UVChannel][1] * W1f + Tri.UVChannels[UVChannel][2] * W2f
-						: FallbackUV;
-					VertexInstanceUVs.Set(VertexInstanceIDs[Corner], UVChannel, SourceUV);
-				}
-
-				VertexInstanceNormals[VertexInstanceIDs[Corner]] = FVector3f(Basis.Normal);
-				VertexInstanceTangents[VertexInstanceIDs[Corner]] = FVector3f(Basis.Tangent);
-				VertexInstanceBinormalSigns[VertexInstanceIDs[Corner]] = Basis.BinormalSign;
-				VertexInstanceColors[VertexInstanceIDs[Corner]] = Tri.bHasVertexColors
-					? Tri.VertexColors[0] * W0f + Tri.VertexColors[1] * W1f + Tri.VertexColors[2] * W2f
-					: FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-
-
-
-
-
-				const FVector Projected = UE::FoliageBaker::PlaneCover::ProjectPointToPlane(
-					Positions[Corner], PlaneInfo.Normal, PlaneInfo.Rho);
-				const double UFrac = (FVector::DotProduct(Projected, PlaneInfo.AxisU) - PlaneInfo.MinU) / UExtent;
-				const double VFrac = (FVector::DotProduct(Projected, PlaneInfo.AxisV) - PlaneInfo.MinV) / VExtent;
-				CustomUVs[Corner] = FVector2D(UFrac, VFrac);
-			}
-
-			if (bReverseBakeWinding)
-			{
-				const FVertexInstanceID ReversedVertexInstanceIDs[3] =
-				{
-					VertexInstanceIDs[0],
-					VertexInstanceIDs[2],
-					VertexInstanceIDs[1]
-				};
-				OutCustomTileUVs.Add(CustomUVs[0]);
-				OutCustomTileUVs.Add(CustomUVs[2]);
-				OutCustomTileUVs.Add(CustomUVs[1]);
-				OutMeshDescription.CreateTriangle(PolygonGroupID, ReversedVertexInstanceIDs);
-			}
-			else
-			{
-				OutCustomTileUVs.Add(CustomUVs[0]);
-				OutCustomTileUVs.Add(CustomUVs[1]);
-				OutCustomTileUVs.Add(CustomUVs[2]);
-				OutMeshDescription.CreateTriangle(PolygonGroupID, VertexInstanceIDs);
-			}
-			return true;
-		};
-
-		for (const int32 TriangleIndex : TriangleIndices)
-		{
-			if (!Triangles.IsValidIndex(TriangleIndex))
-			{
-				continue;
-			}
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Tri = Triangles[TriangleIndex];
-			const FVector Positions[3] = { Tri.Vertices[0], Tri.Vertices[1], Tri.Vertices[2] };
-			if (AppendTriangleGeometry(Tri, Positions))
-			{
-				++OutMatchingTriangleCount;
-			}
-		}
-
-		for (const UE::FoliageBaker::PlaneCover::FCrackReductionProjection& Projection : CrackReductionProjections)
-		{
-			if (!Triangles.IsValidIndex(Projection.TriangleIndex) || Projection.ClippedPolygon.Num() < 3)
-			{
-				continue;
-			}
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Tri = Triangles[Projection.TriangleIndex];
-			for (int32 PolygonVertexIndex = 1; PolygonVertexIndex + 1 < Projection.ClippedPolygon.Num(); ++PolygonVertexIndex)
-			{
-				const FVector Positions[3] =
-				{
-					Projection.ClippedPolygon[0],
-					Projection.ClippedPolygon[PolygonVertexIndex],
-					Projection.ClippedPolygon[PolygonVertexIndex + 1]
-				};
-				if (AppendTriangleGeometry(Tri, Positions))
-				{
-					++OutMatchingTriangleCount;
-				}
-			}
-		}
-
-		return OutMatchingTriangleCount > 0;
-	}
-
-	bool BuildPerPlaneNormalBasisMap(
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
-		const TArray<int32>& TriangleIndices,
-		const TArray<UE::FoliageBaker::PlaneCover::FCrackReductionProjection>& CrackReductionProjections,
-		const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
-		const FIntPoint& TileSize,
-		const int32 MaterialIndexFilter,
-		const bool bFlipTwoSidedBackFaceOutputNormals,
-		const FVector& CaptureRayDirection,
-		const bool bReverseBakeWinding,
-		TArray<FNormalBakeBasisSample>& OutBasisMap)
-	{
-		OutBasisMap.Reset();
-		if (TileSize.X <= 0 || TileSize.Y <= 0)
-		{
-			return false;
-		}
-
-		OutBasisMap.Init(FNormalBakeBasisSample(), TileSize.X * TileSize.Y);
-
-		const double UExtent = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, UE_DOUBLE_SMALL_NUMBER);
-		const double VExtent = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, UE_DOUBLE_SMALL_NUMBER);
-		bool bWroteAnyPixel = false;
-
-		auto RasterizeProjectedTriangle = [&](
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle,
-			const FVector Positions[3])
-		{
-			if (MaterialIndexFilter != INDEX_NONE && Triangle.MaterialIndex != MaterialIndexFilter)
-			{
-				return;
-			}
-			if (Triangle.Area <= 0.0)
-			{
-				return;
-			}
-			if (FVector::CrossProduct(Positions[1] - Positions[0], Positions[2] - Positions[0]).SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
-			{
-				return;
-			}
-
-
-
-			const bool bFlipOutputNormalForTwoSidedBackFace = bFlipTwoSidedBackFaceOutputNormals
-				&& FVector::DotProduct(Triangle.Normal, CaptureRayDirection) < 0.0;
-
-			FVector2D ProjectedPoints[3];
-			double SourceWeightsAtVertex[3][3] = {};
-			for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
-			{
-				if (!ComputeBarycentric3D(
-					Triangle,
-					Positions[VertexIndex],
-					SourceWeightsAtVertex[VertexIndex][0],
-					SourceWeightsAtVertex[VertexIndex][1],
-					SourceWeightsAtVertex[VertexIndex][2]))
-				{
-					return;
-				}
-
-				const FVector ProjectedVertex = UE::FoliageBaker::PlaneCover::ProjectPointToPlane(
-					Positions[VertexIndex],
-					PlaneInfo.Normal,
-					PlaneInfo.Rho);
-				const double UFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisU) - PlaneInfo.MinU) / UExtent;
-				const double VFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisV) - PlaneInfo.MinV) / VExtent;
-				ProjectedPoints[VertexIndex] = FVector2D(UFraction * TileSize.X, VFraction * TileSize.Y);
-			}
-
-			if (bReverseBakeWinding)
-			{
-				Swap(ProjectedPoints[1], ProjectedPoints[2]);
-				for (int32 WeightIndex = 0; WeightIndex < 3; ++WeightIndex)
-				{
-					Swap(SourceWeightsAtVertex[1][WeightIndex], SourceWeightsAtVertex[2][WeightIndex]);
-				}
-			}
-
-			const int32 MinX = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), 0, TileSize.X - 1);
-			const int32 MaxX = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), 0, TileSize.X - 1);
-			const int32 MinY = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), 0, TileSize.Y - 1);
-			const int32 MaxY = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), 0, TileSize.Y - 1);
-
-			for (int32 Y = MinY; Y <= MaxY; ++Y)
-			{
-				for (int32 X = MinX; X <= MaxX; ++X)
-				{
-					double W0 = 0.0;
-					double W1 = 0.0;
-					double W2 = 0.0;
-					if (!ComputeBarycentric2D(FVector2D(X + 0.5, Y + 0.5), ProjectedPoints[0], ProjectedPoints[1], ProjectedPoints[2], W0, W1, W2))
-					{
-						continue;
-					}
-
-					const double SourceW0 = SourceWeightsAtVertex[0][0] * W0
-						+ SourceWeightsAtVertex[1][0] * W1
-						+ SourceWeightsAtVertex[2][0] * W2;
-					const double SourceW1 = SourceWeightsAtVertex[0][1] * W0
-						+ SourceWeightsAtVertex[1][1] * W1
-						+ SourceWeightsAtVertex[2][1] * W2;
-					const double SourceW2 = SourceWeightsAtVertex[0][2] * W0
-						+ SourceWeightsAtVertex[1][2] * W1
-						+ SourceWeightsAtVertex[2][2] * W2;
-
-					const int32 PixelIndex = Y * TileSize.X + X;
-					if (!OutBasisMap.IsValidIndex(PixelIndex))
-					{
-						continue;
-					}
-
-
-
-
-
-					FNormalBakeBasisSample BasisSample = MakeNormalBakeBasisSample(
-						Triangle,
-						SourceW0,
-						SourceW1,
-						SourceW2,
-						bFlipOutputNormalForTwoSidedBackFace);
-					const FVector SourcePoint = Triangle.Vertices[0] * SourceW0
-						+ Triangle.Vertices[1] * SourceW1
-						+ Triangle.Vertices[2] * SourceW2;
-					BasisSample.CaptureDepth = FVector::DotProduct(SourcePoint, CaptureRayDirection);
-					OutBasisMap[PixelIndex] = BasisSample;
-					bWroteAnyPixel = true;
-				}
-			}
-		};
-
-		for (const int32 TriangleIndex : TriangleIndices)
-		{
-			if (!Triangles.IsValidIndex(TriangleIndex))
-			{
-				continue;
-			}
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle = Triangles[TriangleIndex];
-			const FVector Positions[3] = { Triangle.Vertices[0], Triangle.Vertices[1], Triangle.Vertices[2] };
-			RasterizeProjectedTriangle(Triangle, Positions);
-		}
-
-		for (const UE::FoliageBaker::PlaneCover::FCrackReductionProjection& Projection : CrackReductionProjections)
-		{
-			if (!Triangles.IsValidIndex(Projection.TriangleIndex) || Projection.ClippedPolygon.Num() < 3)
-			{
-				continue;
-			}
-
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle = Triangles[Projection.TriangleIndex];
-			for (int32 PolygonVertexIndex = 1; PolygonVertexIndex + 1 < Projection.ClippedPolygon.Num(); ++PolygonVertexIndex)
-			{
-				const FVector Positions[3] =
-				{
-					Projection.ClippedPolygon[0],
-					Projection.ClippedPolygon[PolygonVertexIndex],
-					Projection.ClippedPolygon[PolygonVertexIndex + 1]
-				};
-				RasterizeProjectedTriangle(Triangle, Positions);
-			}
-		}
-
-		return bWroteAnyPixel;
-	}
-
 	int32 GetSourceMeshMaxUVChannelCount(const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles)
 	{
 		int32 ChannelCount = 1;
@@ -967,9 +514,6 @@ namespace
 		return FMath::Clamp(ChannelCount, 1, UE::FoliageBaker::PlaneCover::MaxMaterialBakeUVChannels);
 	}
 
-
-
-
 	FORCEINLINE bool IsBakerBackgroundPixel(const FColor& Sample, const FColor& Background)
 	{
 		return Sample.R == Background.R
@@ -977,340 +521,6 @@ namespace
 			&& Sample.B == Background.B
 			&& Sample.A == Background.A;
 	}
-
-	bool IsDepthResolvedPixelWinner(
-		const TArray<FNormalBakeBasisSample>& BasisMap,
-		const int32 BasisIndex,
-		TArray<double>& InOutTileDepth,
-		const bool bUpdateDepth)
-	{
-		if (BasisMap.IsEmpty() || InOutTileDepth.IsEmpty())
-		{
-			return true;
-		}
-		if (!BasisMap.IsValidIndex(BasisIndex)
-			|| !BasisMap[BasisIndex].bValid
-			|| !InOutTileDepth.IsValidIndex(BasisIndex))
-		{
-			return false;
-		}
-
-		const double Depth = BasisMap[BasisIndex].CaptureDepth;
-		if (!FMath::IsFinite(Depth))
-		{
-			return false;
-		}
-
-
-
-		constexpr double DepthEpsilon = 1.0e-6;
-		if (Depth <= InOutTileDepth[BasisIndex] + DepthEpsilon)
-		{
-			if (bUpdateDepth && Depth < InOutTileDepth[BasisIndex])
-			{
-				InOutTileDepth[BasisIndex] = Depth;
-			}
-			return true;
-		}
-
-		return false;
-	}
-
-
-
-
-
-
-
-
-
-
-
-
-
-	void BlitBakedBaseColorAndOpacityIntoAtlas(
-		const TArray<FColor>& BakedBaseColor,
-		const TArray<FColor>* BakedOpacityMask,
-		const FIntPoint& BakedSize,
-		const bool bBaseColorIsLinear,
-		const FColor& BackgroundColor,
-		const bool bMaterialHasOpacityMask,
-		const float OpacityMaskClipValue,
-		TArray<FColor>& AtlasPixels,
-		const int32 AtlasWidth,
-		const int32 AtlasHeight,
-		const FIntPoint& TilePixelMin,
-		const FIntPoint& TileSize,
-		const TArray<FNormalBakeBasisSample>& BasisMap,
-		TArray<double>& InOutTileDepth,
-		TBitArray<>& OutMaterialCoverageMask,
-		TBitArray<>& InOutCoverageMask,
-		int32& InOutBakedClipZeroedPixels,
-		int32& InOutPaintedPixels)
-	{
-		OutMaterialCoverageMask.Init(false, FMath::Max(0, TileSize.X * TileSize.Y));
-		if (BakedBaseColor.IsEmpty() || BakedSize.X <= 0 || BakedSize.Y <= 0
-			|| TileSize.X <= 0 || TileSize.Y <= 0)
-		{
-			return;
-		}
-
-		const int32 PadX = FMath::Max(0, (BakedSize.X - TileSize.X) / 2);
-		const int32 PadY = FMath::Max(0, (BakedSize.Y - TileSize.Y) / 2);
-
-		for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
-		{
-			const int32 AtlasY = TilePixelMin.Y + LocalY;
-			const int32 SrcY = PadY + LocalY;
-			if (AtlasY < 0 || AtlasY >= AtlasHeight || SrcY < 0 || SrcY >= BakedSize.Y)
-			{
-				continue;
-			}
-			for (int32 LocalX = 0; LocalX < TileSize.X; ++LocalX)
-			{
-				const int32 AtlasX = TilePixelMin.X + LocalX;
-				const int32 SrcX = PadX + LocalX;
-				if (AtlasX < 0 || AtlasX >= AtlasWidth || SrcX < 0 || SrcX >= BakedSize.X)
-				{
-					continue;
-				}
-				const int32 SrcIdx = SrcY * BakedSize.X + SrcX;
-				const int32 DstIdx = AtlasY * AtlasWidth + AtlasX;
-				if (!BakedBaseColor.IsValidIndex(SrcIdx))
-				{
-					continue;
-				}
-
-				const FColor RawBase = BakedBaseColor[SrcIdx];
-				if (IsBakerBackgroundPixel(RawBase, BackgroundColor))
-				{
-
-					continue;
-				}
-
-
-
-
-				FColor Out;
-				if (bBaseColorIsLinear)
-				{
-					const FLinearColor Linear(
-						static_cast<float>(RawBase.R) / 255.0f,
-						static_cast<float>(RawBase.G) / 255.0f,
-						static_cast<float>(RawBase.B) / 255.0f,
-						1.0f);
-					Out = Linear.ToFColorSRGB();
-				}
-				else
-				{
-					Out = RawBase;
-				}
-
-				if (bMaterialHasOpacityMask && BakedOpacityMask && BakedOpacityMask->IsValidIndex(SrcIdx))
-				{
-					const FColor OpacitySample = (*BakedOpacityMask)[SrcIdx];
-					if (IsBakerBackgroundPixel(OpacitySample, BackgroundColor))
-					{
-
-
-						Out.A = 0;
-						++InOutBakedClipZeroedPixels;
-					}
-					else
-					{
-
-						Out.A = OpacitySample.R < UnitFloatToByte(OpacityMaskClipValue) ? 0 : OpacitySample.R;
-						if (Out.A == 0)
-						{
-							++InOutBakedClipZeroedPixels;
-						}
-					}
-				}
-				else
-				{
-					Out.A = 255;
-				}
-
-				const int32 BasisIdx = LocalY * TileSize.X + LocalX;
-				if (Out.A == 0)
-				{
-					if (BasisMap.IsEmpty()
-						|| !InOutTileDepth.IsValidIndex(BasisIdx)
-						|| !FMath::IsFinite(InOutTileDepth[BasisIdx]))
-					{
-						AtlasPixels[DstIdx] = Out;
-						if (InOutCoverageMask.IsValidIndex(DstIdx))
-						{
-							InOutCoverageMask[DstIdx] = false;
-						}
-						++InOutPaintedPixels;
-					}
-					continue;
-				}
-				if (!IsDepthResolvedPixelWinner(BasisMap, BasisIdx, InOutTileDepth, true))
-				{
-					continue;
-				}
-
-				AtlasPixels[DstIdx] = Out;
-				if (InOutCoverageMask.IsValidIndex(DstIdx))
-				{
-					InOutCoverageMask[DstIdx] = true;
-				}
-				if (OutMaterialCoverageMask.IsValidIndex(BasisIdx))
-				{
-					OutMaterialCoverageMask[BasisIdx] = true;
-				}
-				++InOutPaintedPixels;
-			}
-		}
-	}
-
-	bool BuildProjectedOpacityMaskFromMaterialBakeData(
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
-		const TArray<int32>& TriangleIndices,
-		const TArray<UE::FoliageBaker::PlaneCover::FCrackReductionProjection>& CrackReductionProjections,
-		const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
-		const FIntPoint& TileSize,
-		const int32 MaterialIndexFilter,
-		const FMaterialBakeData& BakeData,
-		const FColor& BackgroundColor,
-		TArray<FColor>& OutOpacityData)
-	{
-		OutOpacityData.Reset();
-		if (TileSize.X <= 0 || TileSize.Y <= 0
-			|| !BakeData.bUseTextureAlphaAsOpacity
-			|| !BakeData.bHasReadableOpacityMaskTexture
-			|| !BakeData.OpacityMaskTexture.IsValid())
-		{
-			return false;
-		}
-
-		OutOpacityData.Init(BackgroundColor, TileSize.X * TileSize.Y);
-
-		const double UExtent = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, UE_DOUBLE_SMALL_NUMBER);
-		const double VExtent = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, UE_DOUBLE_SMALL_NUMBER);
-		const uint8 ClipByte = UnitFloatToByte(BakeData.OpacityMaskClipValue);
-		int64 CoveredPixels = 0;
-		int64 KeptPixels = 0;
-		int64 RejectedPixels = 0;
-
-		auto RasterizeProjectedTriangle = [&](
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle,
-			const FVector Positions[3])
-		{
-			if (Triangle.MaterialIndex != MaterialIndexFilter || !Triangle.bHasUVs || Triangle.Area <= 0.0)
-			{
-				return;
-			}
-			if (FVector::CrossProduct(Positions[1] - Positions[0], Positions[2] - Positions[0]).SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
-			{
-				return;
-			}
-
-			FVector2D ProjectedPoints[3];
-			FVector2f SourceUVs[3];
-			for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
-			{
-				double W0 = 0.0;
-				double W1 = 0.0;
-				double W2 = 0.0;
-				if (!ComputeBarycentric3D(Triangle, Positions[VertexIndex], W0, W1, W2))
-				{
-					return;
-				}
-				SourceUVs[VertexIndex] = Triangle.UVs[0] * static_cast<float>(W0)
-					+ Triangle.UVs[1] * static_cast<float>(W1)
-					+ Triangle.UVs[2] * static_cast<float>(W2);
-
-				const FVector ProjectedVertex = UE::FoliageBaker::PlaneCover::ProjectPointToPlane(
-					Positions[VertexIndex],
-					PlaneInfo.Normal,
-					PlaneInfo.Rho);
-				const double UFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisU) - PlaneInfo.MinU) / UExtent;
-				const double VFraction = (FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisV) - PlaneInfo.MinV) / VExtent;
-				ProjectedPoints[VertexIndex] = FVector2D(UFraction * TileSize.X, VFraction * TileSize.Y);
-			}
-
-			const int32 MinX = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), 0, TileSize.X - 1);
-			const int32 MaxX = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), 0, TileSize.X - 1);
-			const int32 MinY = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), 0, TileSize.Y - 1);
-			const int32 MaxY = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), 0, TileSize.Y - 1);
-
-			for (int32 Y = MinY; Y <= MaxY; ++Y)
-			{
-				for (int32 X = MinX; X <= MaxX; ++X)
-				{
-					double W0 = 0.0;
-					double W1 = 0.0;
-					double W2 = 0.0;
-					if (!ComputeBarycentric2D(FVector2D(X + 0.5, Y + 0.5), ProjectedPoints[0], ProjectedPoints[1], ProjectedPoints[2], W0, W1, W2))
-					{
-						continue;
-					}
-
-					const FVector2f SourceUV = SourceUVs[0] * static_cast<float>(W0)
-						+ SourceUVs[1] * static_cast<float>(W1)
-						+ SourceUVs[2] * static_cast<float>(W2);
-					const uint8 MaskByte = UnitFloatToByte(SampleOpacityMaskValue(BakeData.OpacityMaskTexture, SourceUV, BakeData.OpacityMaskChannel));
-					const int32 PixelIndex = Y * TileSize.X + X;
-					if (!OutOpacityData.IsValidIndex(PixelIndex))
-					{
-						continue;
-					}
-
-					OutOpacityData[PixelIndex] = FColor(MaskByte, MaskByte, MaskByte, 255);
-					++CoveredPixels;
-					if (MaskByte >= ClipByte)
-					{
-						++KeptPixels;
-					}
-					else
-					{
-						++RejectedPixels;
-					}
-				}
-			}
-		};
-
-		for (const int32 TriangleIndex : TriangleIndices)
-		{
-			if (!Triangles.IsValidIndex(TriangleIndex))
-			{
-				continue;
-			}
-
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle = Triangles[TriangleIndex];
-			const FVector Positions[3] = { Triangle.Vertices[0], Triangle.Vertices[1], Triangle.Vertices[2] };
-			RasterizeProjectedTriangle(Triangle, Positions);
-		}
-
-		for (const UE::FoliageBaker::PlaneCover::FCrackReductionProjection& Projection : CrackReductionProjections)
-		{
-			if (!Triangles.IsValidIndex(Projection.TriangleIndex) || Projection.ClippedPolygon.Num() < 3)
-			{
-				continue;
-			}
-
-			const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle = Triangles[Projection.TriangleIndex];
-			for (int32 PolygonVertexIndex = 1; PolygonVertexIndex + 1 < Projection.ClippedPolygon.Num(); ++PolygonVertexIndex)
-			{
-				const FVector Positions[3] =
-				{
-					Projection.ClippedPolygon[0],
-					Projection.ClippedPolygon[PolygonVertexIndex],
-					Projection.ClippedPolygon[PolygonVertexIndex + 1]
-				};
-				RasterizeProjectedTriangle(Triangle, Positions);
-			}
-		}
-
-		constexpr double MinimumUsefulOpacityMaskTransparentRatio = 0.001;
-		return CoveredPixels > 0
-			&& (KeptPixels > 0 || RejectedPixels > 0)
-			&& BakeData.OpacityMaskTransparentRatio >= MinimumUsefulOpacityMaskTransparentRatio;
-	}
-
 
 	TArray<int32> CollectReferencedMaterialIndices(
 		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
@@ -1337,74 +547,8 @@ namespace
 		return Result;
 	}
 
-	double ComputeTriangleCaptureDepth(
-		const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle,
-		const FVector& CaptureRayDirection)
-	{
-		const FVector Center = (Triangle.Vertices[0] + Triangle.Vertices[1] + Triangle.Vertices[2]) / 3.0;
-		return FVector::DotProduct(Center, CaptureRayDirection);
-	}
 
-	double ComputeProjectionCaptureDepth(
-		const UE::FoliageBaker::PlaneCover::FCrackReductionProjection& Projection,
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
-		const FVector& CaptureRayDirection)
-	{
-		if (!Projection.ClippedPolygon.IsEmpty())
-		{
-			FVector Center = FVector::ZeroVector;
-			for (const FVector& Point : Projection.ClippedPolygon)
-			{
-				Center += Point;
-			}
-			Center /= static_cast<double>(Projection.ClippedPolygon.Num());
-			return FVector::DotProduct(Center, CaptureRayDirection);
-		}
-
-		return Triangles.IsValidIndex(Projection.TriangleIndex)
-			? ComputeTriangleCaptureDepth(Triangles[Projection.TriangleIndex], CaptureRayDirection)
-			: TNumericLimits<double>::Lowest();
-	}
-
-	void SortBakeFragmentsFarToNear(
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
-		const FVector& CaptureRayDirection,
-		TArray<int32>& TriangleIndices,
-		TArray<UE::FoliageBaker::PlaneCover::FCrackReductionProjection>& CrackReductionProjections)
-	{
-
-
-
-		TriangleIndices.Sort(
-			[&Triangles, &CaptureRayDirection](const int32 A, const int32 B)
-			{
-				const double DepthA = Triangles.IsValidIndex(A)
-					? ComputeTriangleCaptureDepth(Triangles[A], CaptureRayDirection)
-					: TNumericLimits<double>::Lowest();
-				const double DepthB = Triangles.IsValidIndex(B)
-					? ComputeTriangleCaptureDepth(Triangles[B], CaptureRayDirection)
-					: TNumericLimits<double>::Lowest();
-				if (!FMath::IsNearlyEqual(DepthA, DepthB, 1.0e-6))
-				{
-					return DepthA > DepthB;
-				}
-				return A < B;
-			});
-
-		CrackReductionProjections.Sort(
-			[&Triangles, &CaptureRayDirection](const UE::FoliageBaker::PlaneCover::FCrackReductionProjection& A, const UE::FoliageBaker::PlaneCover::FCrackReductionProjection& B)
-			{
-				const double DepthA = ComputeProjectionCaptureDepth(A, Triangles, CaptureRayDirection);
-				const double DepthB = ComputeProjectionCaptureDepth(B, Triangles, CaptureRayDirection);
-				if (!FMath::IsNearlyEqual(DepthA, DepthB, 1.0e-6))
-				{
-					return DepthA > DepthB;
-				}
-				return A.TriangleIndex < B.TriangleIndex;
-			});
-	}
-
-	void BakeBillboardAtlasGPU(
+	bool BakeBillboardAtlasGPU(
 		const UStaticMesh& SourceStaticMesh,
 		const int32 SourceLODIndex,
 		const FBoxSphereBounds& SourceLODBounds,
@@ -1416,17 +560,19 @@ namespace
 		TArray<FColor>& OutPixels,
 		TArray<FColor>& OutNormalPixels,
 		TArray<FColor>& OutMixPixels,
-		FAtlasBakeStats& OutStats)
+		FAtlasBakeStats& OutStats,
+		FString& OutError)
 	{
 		OutStats.Width = ProxyStats.AtlasWidth;
 		OutStats.Height = ProxyStats.AtlasHeight;
 		OutStats.TileResolution = ProxyStats.AtlasTileResolution;
 		OutStats.TilePaddingPixels = ProxyStats.AtlasTilePaddingPixels;
 
-		OutPixels.Init(FColor(0, 0, 0, 0), OutStats.Width * OutStats.Height);
+		const int32 AtlasPixelCount = FMath::Max(0, OutStats.Width * OutStats.Height);
+		OutPixels.Init(FColor(0, 0, 0, 0), AtlasPixelCount);
 		if (OutputSelection.bNormalMask)
 		{
-			OutNormalPixels.Init(EncodeObjectSpaceNormalToColor(FVector::UpVector, 255), OutStats.Width * OutStats.Height);
+			OutNormalPixels.Init(EncodeObjectSpaceNormalToColor(FVector::UpVector, 255), AtlasPixelCount);
 		}
 		else
 		{
@@ -1434,13 +580,12 @@ namespace
 		}
 		if (OutputSelection.bMix)
 		{
-			OutMixPixels.Init(FColor(255, 128, 0, 0), OutStats.Width * OutStats.Height);
+			OutMixPixels.Init(FColor(255, 128, 0, 0), AtlasPixelCount);
 		}
 		else
 		{
 			OutMixPixels.Reset();
 		}
-
 
 		int64 PackedPaddedTilePixels = 0;
 		auto AccumulateAtlasTileStats = [&](const FIntPoint& TileSize, const int32 Padding, const bool bBackFace)
@@ -1449,9 +594,8 @@ namespace
 			{
 				return;
 			}
-			const int64 PaddedWidth = static_cast<int64>(TileSize.X + Padding * 2);
-			const int64 PaddedHeight = static_cast<int64>(TileSize.Y + Padding * 2);
-			PackedPaddedTilePixels += PaddedWidth * PaddedHeight;
+			PackedPaddedTilePixels += static_cast<int64>(TileSize.X + Padding * 2)
+				* static_cast<int64>(TileSize.Y + Padding * 2);
 			if (bBackFace)
 			{
 				++OutStats.BackTileCount;
@@ -1469,44 +613,85 @@ namespace
 				AccumulateAtlasTileStats(PlaneInfo.BackAtlasTileSize, PlaneInfo.AtlasTilePaddingPixels, true);
 			}
 		}
-		const int64 AtlasPixelCount = static_cast<int64>(OutStats.Width) * static_cast<int64>(OutStats.Height);
 		OutStats.PackedTileUtilizationPercent = AtlasPixelCount > 0
 			? 100.0 * static_cast<double>(PackedPaddedTilePixels) / static_cast<double>(AtlasPixelCount)
 			: 0.0;
 
 		TBitArray<> AtlasCoverage;
-		AtlasCoverage.Init(false, OutPixels.Num());
+		AtlasCoverage.Init(false, AtlasPixelCount);
 		TBitArray<> NormalCoverage;
-		NormalCoverage.Init(false, OutPixels.Num());
+		NormalCoverage.Init(false, AtlasPixelCount);
 		const FVector SharedDepthCenter = SourceLODBounds.Origin;
 		const double SharedDepthRadius = FMath::Max(
 			static_cast<double>(SourceLODBounds.SphereRadius),
 			UE_DOUBLE_SMALL_NUMBER);
-
 		const TArray<FStaticMaterial>& SourceMaterials = SourceStaticMesh.GetStaticMaterials();
 		const int32 NumSourceUVChannels = GetSourceMeshMaxUVChannelCount(Triangles);
-		const TArray<FMaterialBakeData> MaterialBakeData = UE::FoliageBaker::MaterialResolver::ResolveMaterialBakeData(
-			SourceStaticMesh,
-			SourceLODIndex,
-			SourceLODBounds,
-			Triangles,
-			OutputSelection,
-			Settings.SourceMaterialBakeResolution,
-			false,
-			OutStats);
+
+		TArray<FMaterialBakeData> MaterialBakeData;
+		if (OutputSelection.bMix)
+		{
+			FAtlasOutputSelection SourcePropertySelection = OutputSelection;
+			SourcePropertySelection.bBaseColorOpacity = false;
+			SourcePropertySelection.bNormalMask = false;
+			MaterialBakeData = UE::FoliageBaker::MaterialResolver::ResolveMaterialBakeData(
+				SourceStaticMesh,
+				SourceLODIndex,
+				SourceLODBounds,
+				Triangles,
+				SourcePropertySelection,
+				Settings.SourceMaterialBakeResolution,
+				false,
+				OutStats);
+		}
+		OutStats.MaterialAlphaPolicyDetails =
+			TEXT(" source masked-shader BaseColor/final coverage/source-triangle-id/object-normal share one projected painter input; no color, alpha, normal, or depth fallback");
+
+		auto AccumulateBakeChannel = [](FAtlasBakeStats::FBakeChannelAgg& Agg, const TArray<FColor>* Data, const FColor& Background)
+		{
+			if (!Data || Data->IsEmpty())
+			{
+				return;
+			}
+			Agg.bAny = true;
+			++Agg.BakeCount;
+			for (const FColor& Color : *Data)
+			{
+				++Agg.TotalPixels;
+				if (IsBakerBackgroundPixel(Color, Background))
+				{
+					++Agg.BackgroundPixels;
+					continue;
+				}
+				Agg.SumR += Color.R;
+				Agg.MinR = FMath::Min(Agg.MinR, Color.R);
+				Agg.MaxR = FMath::Max(Agg.MaxR, Color.R);
+				if (Color.R == 0 && Color.G == 0 && Color.B == 0)
+				{
+					++Agg.ZeroRgbPixels;
+				}
+				else if (Color.R == 255 && Color.G == 255 && Color.B == 255)
+				{
+					++Agg.FullWhiteRgbPixels;
+				}
+				else
+				{
+					++Agg.OtherRgbPixels;
+				}
+			}
+		};
 
 		auto BakePlaneAndSide = [&](
 			const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
 			const FIntPoint& TilePixelMin,
 			const FIntPoint& TileSize,
 			const FVector& CaptureRayDirection,
-			const bool bReverseBakeWinding)
+			const bool bBackSide) -> bool
 		{
 			if (TileSize.X <= 0 || TileSize.Y <= 0)
 			{
-				return;
+				return true;
 			}
-
 
 			TArray<int32> PrimaryTriangleIndices;
 			PrimaryTriangleIndices.Reserve(PlaneInfo.TriangleIndices.Num());
@@ -1522,8 +707,6 @@ namespace
 					PrimaryTriangleIndices.Add(TriangleIndex);
 				}
 			}
-
-
 			if (!PlaneInfo.bIsTrunkCard)
 			{
 				for (const UE::FoliageBaker::PlaneCover::FCrackReductionProjection& Projection : PlaneInfo.CrackReductionProjections)
@@ -1537,26 +720,23 @@ namespace
 					}
 				}
 			}
-
 			if (PrimaryTriangleIndices.IsEmpty() && CrackReductionProjectionsToBake.IsEmpty())
 			{
-				return;
+				return true;
 			}
 
-			SortBakeFragmentsFarToNear(
+			const int32 TilePixelCount = TileSize.X * TileSize.Y;
+			TArray<double> TileDepth;
+			TileDepth.Init(TNumericLimits<double>::Max(), TilePixelCount);
+			const double UExtent = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, UE_DOUBLE_SMALL_NUMBER);
+			const double VExtent = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, UE_DOUBLE_SMALL_NUMBER);
+			const bool bFlipTextureV = Settings.AtlasVConvention
+				== UE::FoliageBaker::PlaneCover::EAtlasVConvention::GeometryMinVToTextureMaxV;
+			const TArray<int32> MaterialIndicesUsed = CollectReferencedMaterialIndices(
 				Triangles,
-				CaptureRayDirection,
 				PrimaryTriangleIndices,
 				CrackReductionProjectionsToBake);
-
-			TArray<double> TileDepth;
-			TileDepth.Init(TNumericLimits<double>::Max(), TileSize.X * TileSize.Y);
-
-
-			const TArray<int32> MaterialIndicesUsed = CollectReferencedMaterialIndices(Triangles, PrimaryTriangleIndices, CrackReductionProjectionsToBake);
-
-
-			const FIntPoint BakeRTSize = TileSize;
+			const FColor BakeBackground = FColor::Magenta;
 
 			for (const int32 MaterialIndex : MaterialIndicesUsed)
 			{
@@ -1567,433 +747,358 @@ namespace
 				{
 					MaterialInterface = UMaterial::GetDefaultMaterial(MD_Surface);
 				}
-
 				const EBlendMode SourceBlendMode = MaterialInterface->GetBlendMode();
-				const bool bMaterialHasOpacityMask = (SourceBlendMode == BLEND_Masked)
-					|| MaterialInterface->IsPropertyActive(MP_OpacityMask);
-				const float SourceOpacityMaskClipValue = MaterialInterface->GetOpacityMaskClipValue();
-				const bool bSourceMaterialTwoSided = MaterialInterface->IsTwoSided();
-				const bool bWantsBaseColor = OutputSelection.bBaseColorOpacity;
-				const bool bWantsOpacity = OutputSelection.bBaseColorOpacity && bMaterialHasOpacityMask;
-				const bool bWantsNormal = OutputSelection.bNormalMask;
-				const bool bWantsAO = OutputSelection.bMix && MaterialInterface->IsPropertyActive(MP_AmbientOcclusion);
-				const bool bWantsRoughness = OutputSelection.bMix && MaterialInterface->IsPropertyActive(MP_Roughness);
-				const bool bWantsMetallic = OutputSelection.bMix && MaterialInterface->IsPropertyActive(MP_Metallic);
-				const bool bWantsEmission = OutputSelection.bMix && MaterialInterface->IsPropertyActive(MP_EmissiveColor);
-				const UMaterial* SourceMaterial = MaterialInterface->GetMaterial();
-				const bool bSourceMaterialTangentSpaceNormal = !SourceMaterial || SourceMaterial->bTangentSpaceNormal;
-				const bool bFlipTwoSidedBackFaceOutputNormals = bSourceMaterialTwoSided && bSourceMaterialTangentSpaceNormal;
+				const bool bMaterialHasOpacityMask = SourceBlendMode == BLEND_Masked;
+
+				UE::FoliageBaker::ProjectedMaterialBake::FPlaneSideBakeParams ProjectedBakeParams;
+				ProjectedBakeParams.TileSize = TileSize;
+				ProjectedBakeParams.CaptureRayDirection = CaptureRayDirection;
+				ProjectedBakeParams.AtlasVConvention = Settings.AtlasVConvention;
+				ProjectedBakeParams.MaterialIndexFilter = MaterialIndex;
+				ProjectedBakeParams.NumSourceUVChannels = NumSourceUVChannels;
+				ProjectedBakeParams.bBackSide = bBackSide;
+				ProjectedBakeParams.bBuildNormalBasisMap = false;
 
 				FMeshDescription PerPlaneMesh;
 				TArray<FVector2D> CustomTileUVs;
+				TArray<UE::FoliageBaker::ProjectedMaterialBake::FNormalBasisSample> UnusedNormalBasisMap;
+				TArray<int32> RasterSourceTriangleIndices;
 				int32 MatchingTriangleCount = 0;
-				if (!BuildPerPlaneBakeMeshDescription(
-						Triangles, PrimaryTriangleIndices, CrackReductionProjectionsToBake, PlaneInfo, TileSize,
-						MaterialIndex, NumSourceUVChannels, bReverseBakeWinding,
-						PerPlaneMesh, CustomTileUVs, MatchingTriangleCount)
-					|| MatchingTriangleCount == 0)
+				FString ProjectedInputError;
+				const bool bBuiltPlaneSideBakeInputs =
+					UE::FoliageBaker::ProjectedMaterialBake::BuildPlaneSideBakeInputs(
+						Triangles,
+						PrimaryTriangleIndices,
+						CrackReductionProjectionsToBake,
+						PlaneInfo,
+						ProjectedBakeParams,
+						PerPlaneMesh,
+						CustomTileUVs,
+						UnusedNormalBasisMap,
+						MatchingTriangleCount,
+						&ProjectedInputError,
+						&RasterSourceTriangleIndices);
+				if (MatchingTriangleCount == 0)
 				{
 					continue;
 				}
+				if (!bBuiltPlaneSideBakeInputs)
+				{
+					OutError = FString::Printf(
+						TEXT("BillboardClouds projected material input failed for plane %d (%s), material %d: %s"),
+						PlaneInfo.SourcePlaneIndex,
+						bBackSide ? TEXT("back") : TEXT("front"),
+						MaterialIndex,
+						*ProjectedInputError);
+					return false;
+				}
 
-				OutStats.SourceTexturedTriangles += MatchingTriangleCount;
 				OutStats.RasterizedTriangleReferences += MatchingTriangleCount;
-
-				TArray<FNormalBakeBasisSample> NormalBasisMap;
-				const bool bHasNormalBasisMap = BuildPerPlaneNormalBasisMap(
-					Triangles,
-					PrimaryTriangleIndices,
-					CrackReductionProjectionsToBake,
-					PlaneInfo,
-					TileSize,
-					MaterialIndex,
-					bFlipTwoSidedBackFaceOutputNormals,
-					CaptureRayDirection,
-					bReverseBakeWinding,
-					NormalBasisMap);
-				if (!bHasNormalBasisMap)
+				if (OutputSelection.bBaseColorOpacity)
 				{
-					NormalBasisMap.Reset();
+					OutStats.SourceTexturedTriangles += MatchingTriangleCount;
 				}
-
-
-
-
-
-
-
-				const FColor BakeBackground = FColor::Magenta;
-
-				FMaterialData MaterialSettings;
-				MaterialSettings.Material = MaterialInterface;
-
-
-
-
-				MaterialSettings.BlendMode = BLEND_Opaque;
-				MaterialSettings.bPerformBorderSmear = false;
-				MaterialSettings.bPerformShrinking = false;
-
-
-
-				MaterialSettings.bTangentSpaceNormal = true;
-				MaterialSettings.BackgroundColor = BakeBackground;
-
-				if (bWantsBaseColor)      { MaterialSettings.PropertySizes.Add(MP_BaseColor,        BakeRTSize); }
-				if (bWantsOpacity)        { MaterialSettings.PropertySizes.Add(MP_OpacityMask,      BakeRTSize); }
-				if (bWantsNormal)         { MaterialSettings.PropertySizes.Add(MP_Normal,           BakeRTSize); }
-				if (bWantsAO)             { MaterialSettings.PropertySizes.Add(MP_AmbientOcclusion, BakeRTSize); }
-				if (bWantsRoughness)      { MaterialSettings.PropertySizes.Add(MP_Roughness,        BakeRTSize); }
-				if (bWantsMetallic)       { MaterialSettings.PropertySizes.Add(MP_Metallic,         BakeRTSize); }
-				if (bWantsEmission)       { MaterialSettings.PropertySizes.Add(MP_EmissiveColor,    BakeRTSize); }
-				if (MaterialSettings.PropertySizes.IsEmpty())
+				if (bMaterialHasOpacityMask)
 				{
-					continue;
+					OutStats.TextureAlphaOpacityReferences += MatchingTriangleCount;
+					OutStats.GpuOpacityExportReferences += MatchingTriangleCount;
+					OutStats.MaskedMaterialBakeReferences += MatchingTriangleCount;
+				}
+				else
+				{
+					OutStats.ForcedOpaqueAlphaReferences += MatchingTriangleCount;
+				}
+				if (OutputSelection.bMix && MaterialBakeData.IsValidIndex(MaterialIndex))
+				{
+					const FMaterialBakeData& BakeData = MaterialBakeData[MaterialIndex];
+					if (BakeData.AmbientOcclusion.bHasReadableTexture
+						|| BakeData.Roughness.bHasReadableTexture
+						|| BakeData.Metallic.bHasReadableTexture
+						|| BakeData.Emission.bHasReadableTexture)
+					{
+						OutStats.SourceMixTextureReferences += MatchingTriangleCount;
+					}
 				}
 
 				FMeshData MeshSettings;
 				MeshSettings.MeshDescription = &PerPlaneMesh;
 				MeshSettings.Mesh = &SourceStaticMesh;
-
-
 				MeshSettings.MaterialIndices.Add(0);
 				MeshSettings.TextureCoordinateBox = FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
-
-
-
-
 				MeshSettings.TextureCoordinateIndex = 0;
 				MeshSettings.LightMapIndex = 0;
 				MeshSettings.PrimitiveData = FPrimitiveData(SourceLODBounds);
-
-
 				MeshSettings.CustomTextureCoordinates = MoveTemp(CustomTileUVs);
 
-				TArray<FMaterialData*> MaterialSettingPtrs;
-				MaterialSettingPtrs.Add(&MaterialSettings);
-				TArray<FMeshData*> MeshSettingPtrs;
-				MeshSettingPtrs.Add(&MeshSettings);
-
-				TArray<FBakeOutput> BakeOutputs;
-				if (!FFoliageBakerMaterialBaker::BakeMaterials(MaterialSettingPtrs, MeshSettingPtrs, BakeOutputs))
+				TArray<FColor> MaskedBaseColorData;
+				if (OutputSelection.bBaseColorOpacity)
 				{
-					continue;
-				}
-				const FBakeOutput& BakeOutput = BakeOutputs[0];
-
-				const TArray<FColor>* BaseColorData = BakeOutput.PropertyData.Find(MP_BaseColor);
-				const TArray<FColor>* OpacityData = BakeOutput.PropertyData.Find(MP_OpacityMask);
-				const TArray<FColor>* NormalData = BakeOutput.PropertyData.Find(MP_Normal);
-				const TArray<FColor>* AOData = BakeOutput.PropertyData.Find(MP_AmbientOcclusion);
-				const TArray<FColor>* RoughData = BakeOutput.PropertyData.Find(MP_Roughness);
-				const TArray<FColor>* MetallicData = BakeOutput.PropertyData.Find(MP_Metallic);
-				const TArray<FColor>* EmissionData = BakeOutput.PropertyData.Find(MP_EmissiveColor);
-
-
-				auto IsOpacityBakeUsableForBaseCoverage = [&](
-					const TArray<FColor>* CandidateOpacityData) -> bool
-				{
-					if (!BaseColorData || BaseColorData->IsEmpty()
-						|| !CandidateOpacityData || CandidateOpacityData->IsEmpty()
-						|| CandidateOpacityData->Num() != BaseColorData->Num())
+					FString MaskedBaseColorError;
+					if (!FFoliageBakerMaskedMaterialBaker::BakeBaseColor(
+							*MaterialInterface,
+							MeshSettings,
+							TileSize,
+							BakeBackground,
+							MaskedBaseColorData,
+							&MaskedBaseColorError))
 					{
+						OutError = FString::Printf(
+							TEXT("BillboardClouds masked BaseColor bake failed for plane %d (%s), material %d: %s"),
+							PlaneInfo.SourcePlaneIndex,
+							bBackSide ? TEXT("back") : TEXT("front"),
+							MaterialIndex,
+							*MaskedBaseColorError);
 						return false;
 					}
+				}
 
-					int64 BaseCoveredPixels = 0;
-					int64 OpacityCoveredPixels = 0;
-					for (int32 SampleIndex = 0; SampleIndex < BaseColorData->Num(); ++SampleIndex)
-					{
-						if (IsBakerBackgroundPixel((*BaseColorData)[SampleIndex], BakeBackground))
-						{
-							continue;
-						}
-						++BaseCoveredPixels;
-						const FColor& OpacitySample = (*CandidateOpacityData)[SampleIndex];
-						if (!IsBakerBackgroundPixel(OpacitySample, BakeBackground))
-						{
-							++OpacityCoveredPixels;
-						}
-					}
-					return BaseCoveredPixels > 0 && OpacityCoveredPixels > 0;
-				};
-				const bool bOpacityMaskBakeSucceeded = bWantsOpacity && IsOpacityBakeUsableForBaseCoverage(OpacityData);
-				const FMaterialBakeData* FallbackOpacityBakeData = MaterialBakeData.IsValidIndex(MaterialIndex)
-					? &MaterialBakeData[MaterialIndex]
-					: nullptr;
-				TArray<FColor> ProjectedOpacityData;
-				const bool bProjectedOpacityMaskSucceeded = bWantsOpacity
-					&& !bOpacityMaskBakeSucceeded
-					&& FallbackOpacityBakeData
-					&& BuildProjectedOpacityMaskFromMaterialBakeData(
-						Triangles,
-						PrimaryTriangleIndices,
-						CrackReductionProjectionsToBake,
-						PlaneInfo,
+				TArray<FColor> FinalCoverageData;
+				FString FinalCoverageError;
+				if (!FFoliageBakerMaskedMaterialBaker::BakeFinalCoverage(
+						*MaterialInterface,
+						MeshSettings,
 						TileSize,
+						BakeBackground,
+						FinalCoverageData,
+						&FinalCoverageError))
+				{
+					OutStats.GpuOpacityExportFailedReferences += MatchingTriangleCount;
+					OutError = FString::Printf(
+						TEXT("BillboardClouds FinalCoverage bake failed for plane %d (%s), material %d: %s"),
+						PlaneInfo.SourcePlaneIndex,
+						bBackSide ? TEXT("back") : TEXT("front"),
 						MaterialIndex,
-						*FallbackOpacityBakeData,
-						BakeBackground,
-						ProjectedOpacityData);
-				const TArray<FColor>* EffectiveOpacityData = bOpacityMaskBakeSucceeded
-					? OpacityData
-					: (bProjectedOpacityMaskSucceeded ? &ProjectedOpacityData : nullptr);
-				const bool bEffectiveOpacityMaskSucceeded = bOpacityMaskBakeSucceeded || bProjectedOpacityMaskSucceeded;
+						*FinalCoverageError);
+					return false;
+				}
 
-
-
-
-
-				auto AccumulateBakeChannel = [&BakeBackground](FAtlasBakeStats::FBakeChannelAgg& Agg, const TArray<FColor>* Data)
+				TArray<FColor> SourceTriangleIdData;
+				FString SourceTriangleIdError;
+				if (!FFoliageBakerMaskedMaterialBaker::BakeSourceTriangleId(
+						*MaterialInterface,
+						MeshSettings,
+						RasterSourceTriangleIndices,
+						TileSize,
+						SourceTriangleIdData,
+						&SourceTriangleIdError))
 				{
-					if (!Data || Data->IsEmpty())
+					OutError = FString::Printf(
+						TEXT("BillboardClouds source-triangle-id bake failed for plane %d (%s), material %d: %s"),
+						PlaneInfo.SourcePlaneIndex,
+						bBackSide ? TEXT("back") : TEXT("front"),
+						MaterialIndex,
+						*SourceTriangleIdError);
+					return false;
+				}
+
+				TArray<FColor> MaskedObjectNormalData;
+				if (OutputSelection.bNormalMask)
+				{
+					FString MaskedNormalError;
+					if (!FFoliageBakerMaskedMaterialBaker::BakeObjectSpaceNormal(
+							*MaterialInterface,
+							MeshSettings,
+							TileSize,
+							BakeBackground,
+							MaskedObjectNormalData,
+							&MaskedNormalError))
 					{
-						return;
+						OutError = FString::Printf(
+							TEXT("BillboardClouds masked object-normal bake failed for plane %d (%s), material %d: %s"),
+							PlaneInfo.SourcePlaneIndex,
+							bBackSide ? TEXT("back") : TEXT("front"),
+							MaterialIndex,
+							*MaskedNormalError);
+						return false;
 					}
-					Agg.bAny = true;
-					++Agg.BakeCount;
-					for (const FColor& C : *Data)
-					{
-						++Agg.TotalPixels;
-						if (IsBakerBackgroundPixel(C, BakeBackground))
-						{
-							++Agg.BackgroundPixels;
-							continue;
-						}
-						Agg.SumR += C.R;
-						if (C.R < Agg.MinR) Agg.MinR = C.R;
-						if (C.R > Agg.MaxR) Agg.MaxR = C.R;
-						if (C.R == 0 && C.G == 0 && C.B == 0)                { ++Agg.ZeroRgbPixels; }
-						else if (C.R == 255 && C.G == 255 && C.B == 255)     { ++Agg.FullWhiteRgbPixels; }
-						else                                                  { ++Agg.OtherRgbPixels; }
-					}
-				};
-				FAtlasBakeStats::FBakeMaterialAgg& MaterialAgg = OutStats.GpuBakeDiagnostics.FindOrAdd(MaterialInterface->GetName());
+				}
+
+				if ((OutputSelection.bBaseColorOpacity && MaskedBaseColorData.Num() != TilePixelCount)
+					|| FinalCoverageData.Num() != TilePixelCount
+					|| SourceTriangleIdData.Num() != TilePixelCount
+					|| (OutputSelection.bNormalMask && MaskedObjectNormalData.Num() != TilePixelCount))
+				{
+					OutError = FString::Printf(
+						TEXT("BillboardClouds masked outputs returned invalid sizes for plane %d (%s), material %d: base=%d, coverage=%d, id=%d, normal=%d, expected=%d."),
+						PlaneInfo.SourcePlaneIndex,
+						bBackSide ? TEXT("back") : TEXT("front"),
+						MaterialIndex,
+						MaskedBaseColorData.Num(),
+						FinalCoverageData.Num(),
+						SourceTriangleIdData.Num(),
+						MaskedObjectNormalData.Num(),
+						TilePixelCount);
+					return false;
+				}
+
+				FAtlasBakeStats::FBakeMaterialAgg& MaterialAgg =
+					OutStats.GpuBakeDiagnostics.FindOrAdd(MaterialInterface->GetName());
 				MaterialAgg.SourceBlendMode = static_cast<int32>(SourceBlendMode);
-				MaterialAgg.WantsOpacity = bWantsOpacity ? 1 : 0;
-				MaterialAgg.WantsBaseColor = bWantsBaseColor ? 1 : 0;
-				MaterialAgg.WantsNormal = bWantsNormal ? 1 : 0;
-				AccumulateBakeChannel(MaterialAgg.BaseColor, BaseColorData);
-				AccumulateBakeChannel(MaterialAgg.Opacity, EffectiveOpacityData ? EffectiveOpacityData : OpacityData);
-				AccumulateBakeChannel(MaterialAgg.Normal, NormalData);
+				MaterialAgg.WantsOpacity = bMaterialHasOpacityMask ? 1 : 0;
+				MaterialAgg.WantsBaseColor = OutputSelection.bBaseColorOpacity ? 1 : 0;
+				MaterialAgg.WantsNormal = OutputSelection.bNormalMask ? 1 : 0;
+				AccumulateBakeChannel(MaterialAgg.BaseColor, OutputSelection.bBaseColorOpacity ? &MaskedBaseColorData : nullptr, BakeBackground);
+				AccumulateBakeChannel(MaterialAgg.Opacity, &FinalCoverageData, BakeBackground);
+				AccumulateBakeChannel(MaterialAgg.Normal, OutputSelection.bNormalMask ? &MaskedObjectNormalData : nullptr, BakeBackground);
 
-				const FIntPoint* BakeSizePtr = BakeOutput.PropertySizes.Find(MP_BaseColor);
-				if (!BakeSizePtr && NormalData)
+				for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
 				{
-					BakeSizePtr = BakeOutput.PropertySizes.Find(MP_Normal);
-				}
-				if (!BakeSizePtr && AOData)     { BakeSizePtr = BakeOutput.PropertySizes.Find(MP_AmbientOcclusion); }
-				if (!BakeSizePtr)               { continue; }
-				const FIntPoint BakeSize = *BakeSizePtr;
-
-				const bool bBaseColorLinear = BakeOutput.PropertyIsLinearColor.FindRef(MP_BaseColor);
-				const bool bBaseColorWritesDepth = BaseColorData && !BaseColorData->IsEmpty();
-
-
-				TBitArray<> MaterialCoverageMask;
-				if (BaseColorData && !BaseColorData->IsEmpty())
-				{
-					int32 PaintedThisTile = 0;
-					int32 BakedClipZeroedThisTile = 0;
-					BlitBakedBaseColorAndOpacityIntoAtlas(
-						*BaseColorData,
-						bWantsOpacity ? EffectiveOpacityData : nullptr,
-						BakeSize,
-						bBaseColorLinear,
-						BakeBackground,
-						bWantsOpacity && bEffectiveOpacityMaskSucceeded,
-						SourceOpacityMaskClipValue,
-						OutPixels,
-						OutStats.Width, OutStats.Height,
-						TilePixelMin, TileSize,
-						NormalBasisMap,
-						TileDepth,
-						MaterialCoverageMask,
-						AtlasCoverage,
-						BakedClipZeroedThisTile,
-						PaintedThisTile);
-					OutStats.PaintedPixels += PaintedThisTile;
-					OutStats.BakedOpacityClipZeroedPixels += BakedClipZeroedThisTile;
-					if (bWantsOpacity)
+					const int32 AtlasY = TilePixelMin.Y + LocalY;
+					if (AtlasY < 0 || AtlasY >= OutStats.Height)
 					{
-						OutStats.TextureAlphaOpacityReferences += MatchingTriangleCount;
-						if (bEffectiveOpacityMaskSucceeded)
-						{
-							OutStats.GpuOpacityExportReferences += MatchingTriangleCount;
-						}
-						else
-						{
-							OutStats.GpuOpacityExportFailedReferences += MatchingTriangleCount;
-						}
-						if (SourceBlendMode == BLEND_Masked)
-						{
-							OutStats.MaskedMaterialBakeReferences += MatchingTriangleCount;
-						}
+						continue;
 					}
-					else
+					for (int32 LocalX = 0; LocalX < TileSize.X; ++LocalX)
 					{
-						OutStats.ForcedOpaqueAlphaReferences += MatchingTriangleCount;
-					}
-				}
-
-
-				if (bWantsNormal && bHasNormalBasisMap && NormalData && !NormalData->IsEmpty())
-				{
-					for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
-					{
-						const int32 AtlasY = TilePixelMin.Y + LocalY;
-						const int32 SrcY = FMath::Max(0, (BakeSize.Y - TileSize.Y) / 2) + LocalY;
-						if (AtlasY < 0 || AtlasY >= OutStats.Height || SrcY < 0 || SrcY >= BakeSize.Y)
+						const int32 AtlasX = TilePixelMin.X + LocalX;
+						if (AtlasX < 0 || AtlasX >= OutStats.Width)
 						{
 							continue;
 						}
-						for (int32 LocalX = 0; LocalX < TileSize.X; ++LocalX)
+						const int32 TilePixelIndex = LocalY * TileSize.X + LocalX;
+						const bool bHasFinalCoverage =
+							FinalCoverageData[TilePixelIndex] != BakeBackground;
+						const int32 SourceTriangleIndex =
+							FFoliageBakerMaskedMaterialBaker::DecodeSourceTriangleId(
+								SourceTriangleIdData[TilePixelIndex]);
+						const bool bHasSourceTriangleId = SourceTriangleIndex != INDEX_NONE;
+						const bool bHasObjectNormal = !OutputSelection.bNormalMask
+							|| MaskedObjectNormalData[TilePixelIndex] != BakeBackground;
+						if (bHasFinalCoverage != bHasSourceTriangleId
+							|| (bHasFinalCoverage && !bHasObjectNormal))
 						{
-							const int32 AtlasX = TilePixelMin.X + LocalX;
-							const int32 SrcX = FMath::Max(0, (BakeSize.X - TileSize.X) / 2) + LocalX;
-							if (AtlasX < 0 || AtlasX >= OutStats.Width || SrcX < 0 || SrcX >= BakeSize.X)
-							{
-								continue;
-							}
-							const int32 SrcIdx = SrcY * BakeSize.X + SrcX;
-							const int32 DstIdx = AtlasY * OutStats.Width + AtlasX;
-							if (!NormalData->IsValidIndex(SrcIdx))
-							{
-								continue;
-							}
-							const FColor RawNormal = (*NormalData)[SrcIdx];
+							OutError = FString::Printf(
+								TEXT("BillboardClouds masked passes disagree at pixel (%d,%d) for plane %d (%s), material %d: coverage=%d, id=%d, normal=%d."),
+								LocalX,
+								LocalY,
+								PlaneInfo.SourcePlaneIndex,
+								bBackSide ? TEXT("back") : TEXT("front"),
+								MaterialIndex,
+								bHasFinalCoverage ? 1 : 0,
+								bHasSourceTriangleId ? 1 : 0,
+								bHasObjectNormal ? 1 : 0);
+							return false;
+						}
+						if (!bHasFinalCoverage)
+						{
+							continue;
+						}
+						if (!Triangles.IsValidIndex(SourceTriangleIndex)
+							|| Triangles[SourceTriangleIndex].MaterialIndex != MaterialIndex)
+						{
+							OutError = FString::Printf(
+								TEXT("BillboardClouds source-triangle-id decoded invalid triangle %d for plane %d (%s), material %d."),
+								SourceTriangleIndex,
+								PlaneInfo.SourcePlaneIndex,
+								bBackSide ? TEXT("back") : TEXT("front"),
+								MaterialIndex);
+							return false;
+						}
 
-							if (IsBakerBackgroundPixel(RawNormal, BakeBackground))
-							{
-								continue;
-							}
-							const int32 BasisIdx = LocalY * TileSize.X + LocalX;
+						const UE::FoliageBaker::PlaneCover::FSourceTriangle& SourceTriangle =
+							Triangles[SourceTriangleIndex];
+						FVector2D ProjectedPoints[3];
+						for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+						{
+							const FVector ProjectedVertex = UE::FoliageBaker::PlaneCover::ProjectPointToPlane(
+								SourceTriangle.Vertices[VertexIndex],
+								PlaneInfo.Normal,
+								PlaneInfo.Rho);
+							const double UFraction =
+								(FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisU) - PlaneInfo.MinU) / UExtent;
+							const double PlaneVFraction =
+								(FVector::DotProduct(ProjectedVertex, PlaneInfo.AxisV) - PlaneInfo.MinV) / VExtent;
+							const double TileVFraction = bFlipTextureV ? 1.0 - PlaneVFraction : PlaneVFraction;
+							ProjectedPoints[VertexIndex] = FVector2D(
+								UFraction * TileSize.X,
+								TileVFraction * TileSize.Y);
+						}
 
+						double W0 = 0.0;
+						double W1 = 0.0;
+						double W2 = 0.0;
+						if (!ComputeBarycentric2D(
+								FVector2D(LocalX + 0.5, LocalY + 0.5),
+								ProjectedPoints[0],
+								ProjectedPoints[1],
+								ProjectedPoints[2],
+								W0,
+								W1,
+								W2))
+						{
+							OutError = FString::Printf(
+								TEXT("BillboardClouds could not reconstruct source triangle %d at covered pixel (%d,%d) for plane %d (%s), material %d."),
+								SourceTriangleIndex,
+								LocalX,
+								LocalY,
+								PlaneInfo.SourcePlaneIndex,
+								bBackSide ? TEXT("back") : TEXT("front"),
+								MaterialIndex);
+							return false;
+						}
 
-							if (bBaseColorWritesDepth
-								&& (!MaterialCoverageMask.IsValidIndex(BasisIdx) || !MaterialCoverageMask[BasisIdx]))
-							{
-								continue;
-							}
-							if (!NormalBasisMap.IsValidIndex(BasisIdx) || !NormalBasisMap[BasisIdx].bValid)
-							{
-								continue;
-							}
-							if (!IsDepthResolvedPixelWinner(NormalBasisMap, BasisIdx, TileDepth, !bBaseColorWritesDepth))
-							{
-								continue;
-							}
-							const uint8 CoverageAlpha = (bBaseColorWritesDepth && OutPixels.IsValidIndex(DstIdx))
-								? OutPixels[DstIdx].A
-								: 255;
-							if (CoverageAlpha == 0)
-							{
-								continue;
-							}
-							const double SignedDepth = NormalBasisMap[BasisIdx].CaptureDepth
+						const FVector SourcePoint = SourceTriangle.Vertices[0] * W0
+							+ SourceTriangle.Vertices[1] * W1
+							+ SourceTriangle.Vertices[2] * W2;
+						const double CaptureDepth = FVector::DotProduct(SourcePoint, CaptureRayDirection);
+						if (!FMath::IsFinite(CaptureDepth)
+							|| CaptureDepth > TileDepth[TilePixelIndex] + 1.0e-6)
+						{
+							continue;
+						}
+						TileDepth[TilePixelIndex] = CaptureDepth;
+						const int32 AtlasPixelIndex = AtlasY * OutStats.Width + AtlasX;
+						const uint8 CoverageAlpha = bMaterialHasOpacityMask
+							? FinalCoverageData[TilePixelIndex].R
+							: 255;
+
+						if (OutputSelection.bBaseColorOpacity)
+						{
+							FColor Color = MaskedBaseColorData[TilePixelIndex];
+							Color.A = CoverageAlpha;
+							OutPixels[AtlasPixelIndex] = Color;
+						}
+						if (AtlasCoverage.IsValidIndex(AtlasPixelIndex))
+						{
+							AtlasCoverage[AtlasPixelIndex] = true;
+						}
+
+						if (OutputSelection.bNormalMask)
+						{
+							const double SignedDepth = CaptureDepth
 								- FVector::DotProduct(SharedDepthCenter, CaptureRayDirection);
 							const double LinearDepth = FMath::Clamp(
 								(SignedDepth + SharedDepthRadius) / (2.0 * SharedDepthRadius),
 								0.0,
 								1.0);
-							const uint8 EncodedDepth = static_cast<uint8>(FMath::RoundToInt(LinearDepth * 255.0));
-							OutNormalPixels[DstIdx] = EncodeBakedTangentSpaceNormalToObjectSpaceColor(
-								RawNormal,
-								NormalBasisMap[BasisIdx],
-								EncodedDepth);
-							if (NormalCoverage.IsValidIndex(DstIdx))
+							FColor ObjectNormal = MaskedObjectNormalData[TilePixelIndex];
+							ObjectNormal.A = UnitFloatToByte(static_cast<float>(LinearDepth));
+							OutNormalPixels[AtlasPixelIndex] = ObjectNormal;
+							if (NormalCoverage.IsValidIndex(AtlasPixelIndex))
 							{
-								NormalCoverage[DstIdx] = true;
+								NormalCoverage[AtlasPixelIndex] = true;
 							}
 						}
-					}
-				}
 
-
-				if (OutputSelection.bMix)
-				{
-					const bool bAnyMix = (AOData && !AOData->IsEmpty())
-						|| (RoughData && !RoughData->IsEmpty())
-						|| (MetallicData && !MetallicData->IsEmpty())
-						|| (EmissionData && !EmissionData->IsEmpty());
-					if (bAnyMix)
-					{
-						OutStats.SourceMixTextureReferences += MatchingTriangleCount;
-						for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
+						if (OutputSelection.bMix && MaterialBakeData.IsValidIndex(MaterialIndex))
 						{
-							const int32 AtlasY = TilePixelMin.Y + LocalY;
-							const int32 SrcY = FMath::Max(0, (BakeSize.Y - TileSize.Y) / 2) + LocalY;
-							if (AtlasY < 0 || AtlasY >= OutStats.Height || SrcY < 0 || SrcY >= BakeSize.Y)
-							{
-								continue;
-							}
-							for (int32 LocalX = 0; LocalX < TileSize.X; ++LocalX)
-							{
-								const int32 AtlasX = TilePixelMin.X + LocalX;
-								const int32 SrcX = FMath::Max(0, (BakeSize.X - TileSize.X) / 2) + LocalX;
-								if (AtlasX < 0 || AtlasX >= OutStats.Width || SrcX < 0 || SrcX >= BakeSize.X)
-								{
-									continue;
-								}
-								const int32 SrcIdx = SrcY * BakeSize.X + SrcX;
-								const int32 DstIdx = AtlasY * OutStats.Width + AtlasX;
-								const int32 BasisIdx = LocalY * TileSize.X + LocalX;
-								if (bBaseColorWritesDepth
-									&& (!MaterialCoverageMask.IsValidIndex(BasisIdx) || !MaterialCoverageMask[BasisIdx]))
-								{
-									continue;
-								}
-								if (!IsDepthResolvedPixelWinner(NormalBasisMap, BasisIdx, TileDepth, !bBaseColorWritesDepth))
-								{
-									continue;
-								}
-
-								const bool bAOBg = !AOData || !AOData->IsValidIndex(SrcIdx)
-									|| IsBakerBackgroundPixel((*AOData)[SrcIdx], BakeBackground);
-								const bool bRoughBg = !RoughData || !RoughData->IsValidIndex(SrcIdx)
-									|| IsBakerBackgroundPixel((*RoughData)[SrcIdx], BakeBackground);
-								const bool bMetalBg = !MetallicData || !MetallicData->IsValidIndex(SrcIdx)
-									|| IsBakerBackgroundPixel((*MetallicData)[SrcIdx], BakeBackground);
-								const bool bEmBg = !EmissionData || !EmissionData->IsValidIndex(SrcIdx)
-									|| IsBakerBackgroundPixel((*EmissionData)[SrcIdx], BakeBackground);
-								if (bAOBg && bRoughBg && bMetalBg && bEmBg)
-								{
-									continue;
-								}
-								auto SampleR = [SrcIdx, &BakeBackground](const TArray<FColor>* Data, uint8 Default) -> uint8
-								{
-									if (Data && Data->IsValidIndex(SrcIdx))
-									{
-										const FColor& C = (*Data)[SrcIdx];
-										if (!IsBakerBackgroundPixel(C, BakeBackground))
-										{
-											return C.R;
-										}
-									}
-									return Default;
-								};
-								auto SampleLuminance = [SrcIdx, &BakeBackground](const TArray<FColor>* Data, uint8 Default) -> uint8
-								{
-									if (Data && Data->IsValidIndex(SrcIdx))
-									{
-										const FColor& C = (*Data)[SrcIdx];
-										if (!IsBakerBackgroundPixel(C, BakeBackground))
-										{
-											return static_cast<uint8>(FMath::Max3(C.R, C.G, C.B));
-										}
-									}
-									return Default;
-								};
-								FColor& Mix = OutMixPixels[DstIdx];
-								Mix.R = SampleR(AOData, 255);
-								Mix.G = SampleR(RoughData, 128);
-								Mix.B = SampleR(MetallicData, 0);
-								Mix.A = SampleLuminance(EmissionData, 0);
-							}
+							const FMaterialBakeData& BakeData = MaterialBakeData[MaterialIndex];
+							const FVector2f SourceUV = SourceTriangle.bHasUVs
+								? SourceTriangle.UVs[0] * static_cast<float>(W0)
+									+ SourceTriangle.UVs[1] * static_cast<float>(W1)
+									+ SourceTriangle.UVs[2] * static_cast<float>(W2)
+								: FVector2f::ZeroVector;
+							OutMixPixels[AtlasPixelIndex] = FColor(
+								UnitFloatToByte(SampleMaterialScalar(BakeData.AmbientOcclusion, SourceUV)),
+								UnitFloatToByte(SampleMaterialScalar(BakeData.Roughness, SourceUV)),
+								UnitFloatToByte(SampleMaterialScalar(BakeData.Metallic, SourceUV)),
+								UnitFloatToByte(SampleMaterialScalar(BakeData.Emission, SourceUV)));
 						}
+						++OutStats.PaintedPixels;
 					}
 				}
 			}
+			return true;
 		};
 
 		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
@@ -2003,30 +1108,41 @@ namespace
 			{
 				continue;
 			}
-
-			BakePlaneAndSide(
-				PlaneInfo,
-				PlaneInfo.AtlasPixelMin,
-				PlaneInfo.AtlasTileSize,
-				-PlaneInfo.Normal,
-				false);
-			if (PlaneInfo.bHasBackFaceAtlas)
+			if (!BakePlaneAndSide(
+					PlaneInfo,
+					PlaneInfo.AtlasPixelMin,
+					PlaneInfo.AtlasTileSize,
+					-PlaneInfo.Normal,
+					false))
 			{
-				BakePlaneAndSide(
+				return false;
+			}
+			if (PlaneInfo.bHasBackFaceAtlas
+				&& !BakePlaneAndSide(
 					PlaneInfo,
 					PlaneInfo.BackAtlasPixelMin,
 					PlaneInfo.BackAtlasTileSize,
 					PlaneInfo.Normal,
-					true);
+					true))
+			{
+				return false;
 			}
 		}
 
-
-
-		UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(OutPixels, OutStats.Width, OutStats.Height, PlaneInfos);
+		UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(
+			OutPixels,
+			OutStats.Width,
+			OutStats.Height,
+			PlaneInfos);
 		if (OutputSelection.bNormalMask)
 		{
-			UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(OutNormalPixels, OutStats.Width, OutStats.Height, PlaneInfos, &NormalCoverage, false);
+			UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(
+				OutNormalPixels,
+				OutStats.Width,
+				OutStats.Height,
+				PlaneInfos,
+				&NormalCoverage,
+				false);
 			for (int32 PixelIndex = 0; PixelIndex < OutNormalPixels.Num(); ++PixelIndex)
 			{
 				if (!NormalCoverage.IsValidIndex(PixelIndex) || !NormalCoverage[PixelIndex])
@@ -2038,10 +1154,16 @@ namespace
 		}
 		if (OutputSelection.bMix)
 		{
-			UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(OutMixPixels, OutStats.Width, OutStats.Height, PlaneInfos, &AtlasCoverage, true);
+			UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(
+				OutMixPixels,
+				OutStats.Width,
+				OutStats.Height,
+				PlaneInfos,
+				&AtlasCoverage,
+				true);
 		}
+		return true;
 	}
-
 	UTexture2D* CreateBillboardTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
@@ -2050,6 +1172,8 @@ namespace
 		const FString& AssetNameSuffix,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
+		const FColor MipBackgroundColor,
 		const TextureCompressionSettings CompressionSettings,
 		const TextureGroup LODGroup,
 		const bool bSRGB,
@@ -2067,6 +1191,16 @@ namespace
 		Params.LODGroup = LODGroup;
 		Params.bSRGB = bSRGB;
 		Params.AlphaCoverageThreshold = AlphaCoverageThreshold;
+		Params.MipBackgroundColor = MipBackgroundColor;
+		Params.bNormalizeMipNormals = LODGroup == TEXTUREGROUP_WorldNormalMap;
+		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			Params.MipTileRects.Add(FIntRect(PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasPixelMin + PlaneInfo.AtlasTileSize));
+			if (PlaneInfo.bHasBackFaceAtlas)
+			{
+				Params.MipTileRects.Add(FIntRect(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasPixelMin + PlaneInfo.BackAtlasTileSize));
+			}
+		}
 		Params.EmptyPixelsError = EmptyPixelsError;
 		return FFoliageBakerAssetBuilder::CreateTextureAsset(
 			SourceStaticMesh,
@@ -2082,6 +1216,7 @@ namespace
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		const float AlphaCoverageThreshold,
 		FString& OutError)
 	{
@@ -2093,6 +1228,8 @@ namespace
 			EditorSettings.BaseColorOpacityTextureSuffix,
 			Pixels,
 			AtlasStats,
+			PlaneInfos,
+			FColor(0, 0, 0, 0),
 			TC_BC7,
 			TEXTUREGROUP_World,
 			true,
@@ -2107,6 +1244,7 @@ namespace
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
 		return CreateBillboardTextureAsset(
@@ -2117,6 +1255,8 @@ namespace
 			EditorSettings.NormalTextureSuffix,
 			Pixels,
 			AtlasStats,
+			PlaneInfos,
+			FColor(128, 128, 255, 255),
 			TC_BC7,
 			TEXTUREGROUP_WorldNormalMap,
 			false,
@@ -2131,6 +1271,7 @@ namespace
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
 		return CreateBillboardTextureAsset(
@@ -2141,6 +1282,8 @@ namespace
 			EditorSettings.MixTextureSuffix,
 			Pixels,
 			AtlasStats,
+			PlaneInfos,
+			FColor(255, 128, 0, 0),
 			TC_BC7,
 			TEXTUREGROUP_WorldSpecular,
 			false,
@@ -2420,7 +1563,7 @@ namespace
 			TArray<FColor> CropNormalPixels;
 			TArray<FColor> CropMixPixels;
 			FAtlasBakeStats CropStats;
-			BakeBillboardAtlasGPU(
+			if (!BakeBillboardAtlasGPU(
 				StaticMesh,
 				CoverData.SourceLODIndex,
 				CoverData.SourceLODBounds,
@@ -2432,7 +1575,11 @@ namespace
 				CropAtlasPixels,
 				CropNormalPixels,
 				CropMixPixels,
-				CropStats);
+				CropStats,
+				OutError))
+			{
+				return false;
+			}
 
 			TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop> TileCrops;
 			AlphaAwareCroppedPlaneCount = UE::FoliageBaker::Atlas::BuildAlphaAwareTileCrops(
@@ -2459,7 +1606,7 @@ namespace
 			}
 		}
 
-		BakeBillboardAtlasGPU(
+		if (!BakeBillboardAtlasGPU(
 			StaticMesh,
 			CoverData.SourceLODIndex,
 			CoverData.SourceLODBounds,
@@ -2471,7 +1618,11 @@ namespace
 			OutData.AtlasPixels,
 			OutData.NormalAtlasPixels,
 			OutData.MixAtlasPixels,
-			OutData.AtlasStats);
+			OutData.AtlasStats,
+			OutError))
+		{
+			return false;
+		}
 		OutData.AtlasStats.AlphaAwareCroppedPlanes = AlphaAwareCroppedPlaneCount;
 		OutData.AtlasStats.AlphaAwareTileCropGuardPixels = CoverData.Settings.bEnableAlphaAwareTileCrop
 			? CoverData.Settings.AlphaAwareTileCropGuardPixels
@@ -2488,6 +1639,7 @@ namespace
 				EditorSettings,
 				OutData.AtlasPixels,
 				OutData.AtlasStats,
+				MeshData.PlaneInfos,
 				AlphaCoverageThreshold,
 				OutError);
 			if (!OutData.AtlasTexture)
@@ -2504,6 +1656,7 @@ namespace
 				EditorSettings,
 				OutData.NormalAtlasPixels,
 				OutData.AtlasStats,
+				MeshData.PlaneInfos,
 				OutError);
 			if (!OutData.NormalAtlasTexture)
 			{
@@ -2519,6 +1672,7 @@ namespace
 				EditorSettings,
 				OutData.MixAtlasPixels,
 				OutData.AtlasStats,
+				MeshData.PlaneInfos,
 				OutError);
 			if (!OutData.MixAtlasTexture)
 			{
@@ -2615,8 +1769,6 @@ namespace
 			? FString()
 			: FString::Printf(TEXT("\n  alpha policy:%s"), *TextureData.AtlasStats.MaterialAlphaPolicyDetails);
 
-
-
 		FString GpuBakeDetails;
 		for (const TPair<FString, FAtlasBakeStats::FBakeMaterialAgg>& It : TextureData.AtlasStats.GpuBakeDiagnostics)
 		{
@@ -2666,7 +1818,7 @@ namespace
 			*EditorSettings.MixTextureParameterName.ToString());
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, readable material textures=%d, mix-texture materials=%d, alpha-mask materials=%d, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, crack-reduction refs=%d, alpha refs=%d, masked refs=%d, gpu opacity mask refs=%d, gpu opacity mask failed refs=%d, gpu opacity clip zeroed pixels=%d, mix refs texture=%d, forced opaque=%d, shooting=%s, resolve=GPU material bake, side-aware per-plane material raster, far-to-near painter depth order\n  base/color opacity atlas: %s\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 0, far 1, uncovered 1); WPO disabled during material baking\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks, GPU-baked from material outputs\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (copied from settings template; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals%s"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, source-textured refs=%d, fallback refs=%d, rasterized refs=%d, crack-reduction refs=%d, alpha refs=%d, masked refs=%d, final coverage refs=%d, final coverage failed refs=%d, mix refs texture=%d, forced opaque=%d, shooting=%s, resolve=GPU material bake, source masked-shader final coverage, side-aware per-plane material raster, far-to-near painter depth order\n  base/color opacity atlas: %s\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 0, far 1, uncovered 1); WPO disabled during material baking\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks, GPU-baked from material outputs\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (copied from settings template; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals%s"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
@@ -2682,9 +1834,6 @@ namespace
 			TextureData.AtlasStats.PaintedPixels,
 			TextureData.AtlasStats.AlphaAwareCroppedPlanes,
 			TextureData.AtlasStats.AlphaAwareTileCropGuardPixels,
-			TextureData.AtlasStats.ReadableMaterialTextures,
-			TextureData.AtlasStats.SourceMixTextureMaterials,
-			TextureData.AtlasStats.TextureAlphaOpacityMaterials,
 			TextureData.AtlasStats.SourceTexturedTriangles,
 			TextureData.AtlasStats.FallbackTriangles,
 			TextureData.AtlasStats.RasterizedTriangleReferences,
@@ -2693,7 +1842,6 @@ namespace
 			TextureData.AtlasStats.MaskedMaterialBakeReferences,
 			TextureData.AtlasStats.GpuOpacityExportReferences,
 			TextureData.AtlasStats.GpuOpacityExportFailedReferences,
-			TextureData.AtlasStats.BakedOpacityClipZeroedPixels,
 			TextureData.AtlasStats.SourceMixTextureReferences,
 			TextureData.AtlasStats.ForcedOpaqueAlphaReferences,
 			GetTextureShootingMode(),

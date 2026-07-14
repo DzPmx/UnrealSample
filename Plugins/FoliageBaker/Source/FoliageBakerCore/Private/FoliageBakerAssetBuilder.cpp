@@ -7,6 +7,7 @@
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
+#include "ImageCore.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
@@ -203,6 +204,324 @@ namespace
 		{
 			StaticMesh.GetOriginalSectionInfoMap().Remove(LODIndex, SectionIndex);
 		}
+	}
+
+	void NormalizeEncodedNormalPixels(FColor* Pixels, const int32 PixelCount)
+	{
+		if (!Pixels || PixelCount <= 0)
+		{
+			return;
+		}
+
+		for (int32 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
+		{
+			FColor& Pixel = Pixels[PixelIndex];
+			const FVector Normal(
+				static_cast<double>(Pixel.R) / 255.0 * 2.0 - 1.0,
+				static_cast<double>(Pixel.G) / 255.0 * 2.0 - 1.0,
+				static_cast<double>(Pixel.B) / 255.0 * 2.0 - 1.0);
+			const FVector SafeNormal = Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+			Pixel.R = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.X * 0.5 + 0.5) * 255.0), 0, 255));
+			Pixel.G = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.Y * 0.5 + 0.5) * 255.0), 0, 255));
+			Pixel.B = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.Z * 0.5 + 0.5) * 255.0), 0, 255));
+		}
+	}
+
+	double ComputeAlphaCoverage(
+		const FColor* Pixels,
+		const int32 PixelCount,
+		const uint8 Threshold,
+		const float AlphaScale = 1.0f)
+	{
+		if (!Pixels || PixelCount <= 0)
+		{
+			return 0.0;
+		}
+
+		int32 CoveredPixelCount = 0;
+		for (int32 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
+		{
+			if (static_cast<float>(Pixels[PixelIndex].A) * AlphaScale >= Threshold)
+			{
+				++CoveredPixelCount;
+			}
+		}
+		return static_cast<double>(CoveredPixelCount) / static_cast<double>(PixelCount);
+	}
+
+	void ScaleAlphaToCoverage(
+		FColor* Pixels,
+		const int32 PixelCount,
+		const uint8 Threshold,
+		const double TargetCoverage)
+	{
+		if (!Pixels || PixelCount <= 0 || Threshold == 0 || TargetCoverage <= 0.0)
+		{
+			return;
+		}
+
+		float MinScale = 0.0f;
+		float MaxScale = 4.0f;
+		float AlphaScale = 1.0f;
+		for (int32 Iteration = 0; Iteration < 8; ++Iteration)
+		{
+			const double Coverage = ComputeAlphaCoverage(Pixels, PixelCount, Threshold, AlphaScale);
+			if (FMath::IsNearlyEqual(Coverage, TargetCoverage, 1.0 / FMath::Max(1, PixelCount)))
+			{
+				break;
+			}
+			if (Coverage < TargetCoverage)
+			{
+				MinScale = AlphaScale;
+			}
+			else
+			{
+				MaxScale = AlphaScale;
+			}
+			AlphaScale = 0.5f * (MinScale + MaxScale);
+		}
+
+		for (int32 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
+		{
+			Pixels[PixelIndex].A = static_cast<uint8>(FMath::Clamp(
+				FMath::RoundToInt(static_cast<float>(Pixels[PixelIndex].A) * AlphaScale),
+				0,
+				255));
+		}
+	}
+
+	bool InitializeTileIsolatedTextureSource(
+		UTexture2D& Texture,
+		const FFoliageBakerTextureAssetParams& Params,
+		const TArray<FColor>& Pixels,
+		FString& OutError)
+	{
+		Texture.Source.Init2DWithMipChain(Params.Width, Params.Height, TSF_BGRA8);
+		const int32 NumMips = Texture.Source.GetNumMips();
+		if (NumMips <= 0)
+		{
+			OutError = TEXT("Could not allocate the texture source mip chain.");
+			return false;
+		}
+
+		TArray<FColor*> MipData;
+		MipData.Reserve(NumMips);
+		for (int32 MipIndex = 0; MipIndex < NumMips; ++MipIndex)
+		{
+			FColor* LockedMip = reinterpret_cast<FColor*>(Texture.Source.LockMip(MipIndex));
+			if (!LockedMip)
+			{
+				for (int32 LockedMipIndex = MipData.Num() - 1; LockedMipIndex >= 0; --LockedMipIndex)
+				{
+					Texture.Source.UnlockMip(LockedMipIndex);
+				}
+				OutError = FString::Printf(TEXT("Could not lock generated texture source mip %d."), MipIndex);
+				return false;
+			}
+			MipData.Add(LockedMip);
+
+			const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
+			const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
+			for (int32 PixelIndex = 0; PixelIndex < MipWidth * MipHeight; ++PixelIndex)
+			{
+				LockedMip[PixelIndex] = Params.MipBackgroundColor;
+			}
+		}
+		FMemory::Memcpy(MipData[0], Pixels.GetData(), static_cast<SIZE_T>(Pixels.Num()) * sizeof(FColor));
+
+		const EGammaSpace GammaSpace = Params.bSRGB ? EGammaSpace::sRGB : EGammaSpace::Linear;
+		const uint8 AlphaCoverageThreshold = Params.AlphaCoverageThreshold > 0.0f
+			? static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Params.AlphaCoverageThreshold, 0.0f, 1.0f) * 255.0f), 1, 255))
+			: 0;
+
+		TArray<FIntRect> TileRects;
+		TileRects.Reserve(Params.MipTileRects.Num());
+		for (const FIntRect& RawTileRect : Params.MipTileRects)
+		{
+			const FIntRect TileRect(
+				FIntPoint(
+					FMath::Clamp(RawTileRect.Min.X, 0, Params.Width),
+					FMath::Clamp(RawTileRect.Min.Y, 0, Params.Height)),
+				FIntPoint(
+					FMath::Clamp(RawTileRect.Max.X, 0, Params.Width),
+					FMath::Clamp(RawTileRect.Max.Y, 0, Params.Height)));
+			if (TileRect.Width() <= 0 || TileRect.Height() <= 0)
+			{
+				continue;
+			}
+			TileRects.Add(TileRect);
+		}
+
+		auto ProjectTileRectToMip = [&Params](const FIntRect& TileRect, const int32 MipIndex)
+		{
+			const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
+			const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
+			return FIntRect(
+				FIntPoint(
+					FMath::Clamp(TileRect.Min.X >> MipIndex, 0, MipWidth),
+					FMath::Clamp(TileRect.Min.Y >> MipIndex, 0, MipHeight)),
+				FIntPoint(
+					FMath::Clamp(TileRect.Max.X >> MipIndex, 0, MipWidth),
+					FMath::Clamp(TileRect.Max.Y >> MipIndex, 0, MipHeight)));
+		};
+		auto RectsOverlap = [](const FIntRect& A, const FIntRect& B)
+		{
+			return A.Min.X < B.Max.X
+				&& A.Max.X > B.Min.X
+				&& A.Min.Y < B.Max.Y
+				&& A.Max.Y > B.Min.Y;
+		};
+
+		int32 IsolatedMipCount = 1;
+		for (int32 MipIndex = 1; MipIndex < NumMips && !TileRects.IsEmpty(); ++MipIndex)
+		{
+			TArray<FIntRect> MipTileRects;
+			MipTileRects.Reserve(TileRects.Num());
+			bool bMipKeepsTilesIsolated = true;
+			for (const FIntRect& TileRect : TileRects)
+			{
+				const FIntRect MipTileRect = ProjectTileRectToMip(TileRect, MipIndex);
+				if (MipTileRect.Width() <= 0 || MipTileRect.Height() <= 0)
+				{
+					bMipKeepsTilesIsolated = false;
+					break;
+				}
+				for (const FIntRect& ExistingRect : MipTileRects)
+				{
+					if (RectsOverlap(MipTileRect, ExistingRect))
+					{
+						bMipKeepsTilesIsolated = false;
+						break;
+					}
+				}
+				if (!bMipKeepsTilesIsolated)
+				{
+					break;
+				}
+				MipTileRects.Add(MipTileRect);
+			}
+			if (!bMipKeepsTilesIsolated)
+			{
+				break;
+			}
+			IsolatedMipCount = MipIndex + 1;
+		}
+
+		for (const FIntRect& TileRect : TileRects)
+		{
+
+			FImage CurrentTile(
+				TileRect.Width(),
+				TileRect.Height(),
+				1,
+				ERawImageFormat::BGRA8,
+				GammaSpace);
+			FColor* CurrentTilePixels = reinterpret_cast<FColor*>(CurrentTile.RawData.GetData());
+			for (int32 LocalY = 0; LocalY < TileRect.Height(); ++LocalY)
+			{
+				FMemory::Memcpy(
+					CurrentTilePixels + LocalY * TileRect.Width(),
+					Pixels.GetData() + (TileRect.Min.Y + LocalY) * Params.Width + TileRect.Min.X,
+					static_cast<SIZE_T>(TileRect.Width()) * sizeof(FColor));
+			}
+			const double TargetAlphaCoverage = AlphaCoverageThreshold > 0
+				? ComputeAlphaCoverage(CurrentTilePixels, TileRect.Width() * TileRect.Height(), AlphaCoverageThreshold)
+				: 0.0;
+
+			for (int32 MipIndex = 1; MipIndex < IsolatedMipCount; ++MipIndex)
+			{
+				const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
+				const FIntRect MipTileRect = ProjectTileRectToMip(TileRect, MipIndex);
+
+				FImage NextTile(
+					MipTileRect.Width(),
+					MipTileRect.Height(),
+					1,
+					ERawImageFormat::BGRA8,
+					GammaSpace);
+				FImageCore::ResizeImage(CurrentTile, NextTile, FImageCore::EResizeImageFilter::Box);
+				FColor* NextTilePixels = reinterpret_cast<FColor*>(NextTile.RawData.GetData());
+				const int32 NextTilePixelCount = MipTileRect.Width() * MipTileRect.Height();
+				if (Params.bNormalizeMipNormals)
+				{
+					NormalizeEncodedNormalPixels(NextTilePixels, NextTilePixelCount);
+				}
+				if (AlphaCoverageThreshold > 0)
+				{
+					ScaleAlphaToCoverage(NextTilePixels, NextTilePixelCount, AlphaCoverageThreshold, TargetAlphaCoverage);
+				}
+
+				for (int32 LocalY = 0; LocalY < MipTileRect.Height(); ++LocalY)
+				{
+					FMemory::Memcpy(
+						MipData[MipIndex] + (MipTileRect.Min.Y + LocalY) * MipWidth + MipTileRect.Min.X,
+						NextTilePixels + LocalY * MipTileRect.Width(),
+						static_cast<SIZE_T>(MipTileRect.Width()) * sizeof(FColor));
+				}
+				CurrentTile.Swap(NextTile);
+			}
+		}
+
+		if (IsolatedMipCount < NumMips)
+		{
+			const int32 LastIsolatedMipIndex = IsolatedMipCount - 1;
+			const int32 LastIsolatedMipWidth = FMath::Max(1, Params.Width >> LastIsolatedMipIndex);
+			const int32 LastIsolatedMipHeight = FMath::Max(1, Params.Height >> LastIsolatedMipIndex);
+			FImage CurrentAtlas(
+				LastIsolatedMipWidth,
+				LastIsolatedMipHeight,
+				1,
+				ERawImageFormat::BGRA8,
+				GammaSpace);
+			FMemory::Memcpy(
+				CurrentAtlas.RawData.GetData(),
+				MipData[LastIsolatedMipIndex],
+				static_cast<SIZE_T>(LastIsolatedMipWidth * LastIsolatedMipHeight) * sizeof(FColor));
+			const double TailAlphaCoverage = AlphaCoverageThreshold > 0
+				? ComputeAlphaCoverage(
+					reinterpret_cast<const FColor*>(CurrentAtlas.RawData.GetData()),
+					LastIsolatedMipWidth * LastIsolatedMipHeight,
+					AlphaCoverageThreshold)
+				: 0.0;
+
+			for (int32 MipIndex = IsolatedMipCount; MipIndex < NumMips; ++MipIndex)
+			{
+				const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
+				const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
+				FImage NextAtlas(
+					MipWidth,
+					MipHeight,
+					1,
+					ERawImageFormat::BGRA8,
+					GammaSpace);
+				FImageCore::ResizeImage(CurrentAtlas, NextAtlas, FImageCore::EResizeImageFilter::Box);
+				FColor* NextAtlasPixels = reinterpret_cast<FColor*>(NextAtlas.RawData.GetData());
+				const int32 NextAtlasPixelCount = MipWidth * MipHeight;
+				if (Params.bNormalizeMipNormals)
+				{
+					NormalizeEncodedNormalPixels(NextAtlasPixels, NextAtlasPixelCount);
+				}
+				if (AlphaCoverageThreshold > 0)
+				{
+					ScaleAlphaToCoverage(
+						NextAtlasPixels,
+						NextAtlasPixelCount,
+						AlphaCoverageThreshold,
+						TailAlphaCoverage);
+				}
+				FMemory::Memcpy(
+					MipData[MipIndex],
+					NextAtlasPixels,
+					static_cast<SIZE_T>(NextAtlasPixelCount) * sizeof(FColor));
+				CurrentAtlas.Swap(NextAtlas);
+			}
+		}
+
+		for (int32 MipIndex = MipData.Num() - 1; MipIndex >= 0; --MipIndex)
+		{
+			Texture.Source.UnlockMip(MipIndex);
+		}
+		return true;
 	}
 
 	bool ResolveSourceLODTarget(
@@ -565,14 +884,25 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 	}
 
 	Texture->PreEditChange(nullptr);
-	Texture->Source.Init(Params.Width, Params.Height, 1, 1, TSF_BGRA8, reinterpret_cast<const uint8*>(Pixels.GetData()));
+	const bool bUseTileIsolatedMips = !Params.MipTileRects.IsEmpty();
+	if (bUseTileIsolatedMips)
+	{
+		if (!InitializeTileIsolatedTextureSource(*Texture, Params, Pixels, OutError))
+		{
+			return nullptr;
+		}
+	}
+	else
+	{
+		Texture->Source.Init(Params.Width, Params.Height, 1, 1, TSF_BGRA8, reinterpret_cast<const uint8*>(Pixels.GetData()));
+	}
 	Texture->CompressionSettings = Params.CompressionSettings;
 	Texture->LODGroup = Params.LODGroup;
-	Texture->MipGenSettings = TMGS_FromTextureGroup;
+	Texture->MipGenSettings = bUseTileIsolatedMips ? TMGS_LeaveExistingMips : TMGS_FromTextureGroup;
 	Texture->SRGB = Params.bSRGB;
 	Texture->bUseNewMipFilter = true;
-	Texture->bDoScaleMipsForAlphaCoverage = Params.AlphaCoverageThreshold > 0.0f;
-	Texture->AlphaCoverageThresholds = Params.AlphaCoverageThreshold > 0.0f
+	Texture->bDoScaleMipsForAlphaCoverage = !bUseTileIsolatedMips && Params.AlphaCoverageThreshold > 0.0f;
+	Texture->AlphaCoverageThresholds = !bUseTileIsolatedMips && Params.AlphaCoverageThreshold > 0.0f
 		? FVector4(0.0, 0.0, 0.0, FMath::Clamp(Params.AlphaCoverageThreshold, 0.01f, 0.99f))
 		: FVector4(0.0, 0.0, 0.0, 0.0);
 	Texture->AddressX = TA_Clamp;
@@ -776,6 +1106,9 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 
 	if (UBodySetup* BodySetup = ProxyMesh->GetBodySetup())
 	{
+		BodySetup->Modify(false);
+		BodySetup->CollisionTraceFlag = CTF_UseSimpleAsComplex;
+		BodySetup->bNeverNeedsCookedCollisionData = true;
 		BodySetup->RemoveSimpleCollision();
 	}
 	ConfigureProxySourceModel(

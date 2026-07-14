@@ -991,6 +991,7 @@ namespace
 		const TextureCompressionSettings Compression,
 		const TextureGroup LODGroup,
 		const bool bSRGB,
+		const FColor MipBackgroundColor,
 		FString& OutError)
 	{
 		FFoliageBakerTextureAssetParams Params;
@@ -1003,6 +1004,20 @@ namespace
 		Params.LODGroup = LODGroup;
 		Params.bSRGB = bSRGB;
 		Params.AlphaCoverageThreshold = 0.0f;
+		Params.MipBackgroundColor = MipBackgroundColor;
+		Params.bNormalizeMipNormals = LODGroup == TEXTUREGROUP_WorldNormalMap;
+		const int32 TileResolution = FMath::Max(1, Stats.TileResolution);
+		for (int32 TileY = 0; TileY < Stats.AtlasHeight; TileY += TileResolution)
+		{
+			for (int32 TileX = 0; TileX < Stats.AtlasWidth; TileX += TileResolution)
+			{
+				Params.MipTileRects.Add(FIntRect(
+					FIntPoint(TileX, TileY),
+					FIntPoint(
+						FMath::Min(TileX + TileResolution, Stats.AtlasWidth),
+						FMath::Min(TileY + TileResolution, Stats.AtlasHeight))));
+			}
+		}
 		Params.EmptyPixelsError = TEXT("No Impostor atlas pixels were generated.");
 		return FFoliageBakerAssetBuilder::CreateTextureAsset(SourceStaticMesh, Transaction, Params, Pixels, OutError);
 	}
@@ -1152,6 +1167,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			TC_BC7,
 			TEXTUREGROUP_World,
 			true,
+			FColor(0, 0, 0, 0),
 			Error);
 		if (!Result.BaseColorSdfTexture)
 		{
@@ -1172,6 +1188,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			TC_BC7,
 			TEXTUREGROUP_WorldNormalMap,
 			false,
+			EncodeObjectSpaceNormal(FVector::UpVector, UnitFloatToByte(0.5f)),
 			Error);
 		if (!Result.NormalDepthTexture)
 		{
@@ -1192,6 +1209,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			TC_BC7,
 			TEXTUREGROUP_WorldSpecular,
 			false,
+			FColor(255, 128, 0, 0),
 			Error);
 		if (!Result.MixTexture)
 		{
