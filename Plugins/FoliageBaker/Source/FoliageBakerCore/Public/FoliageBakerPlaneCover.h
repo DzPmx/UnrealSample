@@ -78,7 +78,6 @@ namespace UE::FoliageBaker::PlaneCover
 		EPlaneProxyCrackReductionMode CrackReductionMode = EPlaneProxyCrackReductionMode::Off;
 		double CrackReductionProjectionScale = 1.0;
 		int32 TextureAtlasResolution = 4096;
-		int32 SourceMaterialBakeResolution = 2048;
 		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;
 		EAtlasVConvention AtlasVConvention = EAtlasVConvention::GeometryMinVToTextureMinV;
 		double TrunkCardAtlasScale = 2.0;

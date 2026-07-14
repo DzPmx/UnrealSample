@@ -38,9 +38,6 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum dimension of the generated square atlas. Square tiles are arranged in the configured octahedral frame grid."))
 	int32 TextureResolution = 2048;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Resolution used to evaluate source material data before the final view atlas is assembled."))
-	int32 SourceMaterialBakeResolution = 2048;
-
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Opacity SDF Range", Suffix = "px", ToolTip = "Pixel distance from the 0.5 contour to fully inside or outside in BaseColor Alpha. It does not add padding or change the fixed view grid."))
 	int32 OpacitySdfRangePixels = 16;
 

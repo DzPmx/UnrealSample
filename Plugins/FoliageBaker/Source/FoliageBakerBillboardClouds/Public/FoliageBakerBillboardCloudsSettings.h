@@ -78,19 +78,19 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Generated square atlas resolution. Billboard tile sizes are automatically scaled and packed to maximize use of this texture."))
 	int32 TextureAtlasResolution = 2048;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Resolution used for source-material alpha analysis before per-billboard-tile atlas baking."))
-	int32 SourceMaterialBakeResolution = 2048;
-
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Run a pre-bake alpha pass and crop each billboard tile rectangle to the alpha-painted outer bounds before final packing. This improves per-tile usage by removing transparent outer borders; it does not fill interior alpha holes."))
 	bool bEnableAlphaAwareTileCrop = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra source-tile pixels kept around the alpha-painted bounds when alpha-aware tile crop is enabled."))
 	int32 AlphaAwareTileCropGuardPixels = 2;
 
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", ToolTip = "Signed-distance range written to BaseColor alpha after final atlas packing. The range is clipped inside each tile and does not affect alpha-aware crop or tile size."))
+	int32 OpacitySdfRangePixels = 16;
+
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))
 	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::AllPlanes;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (ToolTip = "Generate the BaseColor/Opacity atlas. RGB stores base color and A stores the opacity mask; the destination material parameter is configured in Material."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (ToolTip = "Generate the BaseColor/SDF atlas. RGB stores base color and A stores the whole-proxy signed distance field; the destination material parameter is configured in Material."))
 	bool bBakeBaseColorOpacityAtlas = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (ToolTip = "Generate the Normal/Depth atlas. RGB stores object/local-space normal and A stores shared-range linear depth; the destination material parameter is configured in Material."))
@@ -108,7 +108,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Prefix added before the source Static Mesh name for every generated atlas texture."))
 	FString TextureNamePrefix = TEXT("T_");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated BaseColor/Opacity atlas texture."))
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated BaseColor/SDF atlas texture."))
 	FString BaseColorOpacityTextureSuffix = TEXT("_DA");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated object-space normal atlas texture."))
@@ -126,7 +126,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ToolTip = "Template material instance copied for every generated proxy. Enabled atlas outputs are assigned to the configured texture parameter names."))
 	TSoftObjectPtr<UMaterialInstanceConstant> BillboardMaterialTemplate;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Opacity Parameter", ToolTip = "Texture parameter receiving the generated BaseColor/Opacity atlas when that output is enabled."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter", ToolTip = "Texture parameter receiving the generated BaseColor/SDF atlas when that output is enabled."))
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Depth Parameter", ToolTip = "Texture parameter receiving the generated object/local-space Normal and shared-depth atlas when that output is enabled."))

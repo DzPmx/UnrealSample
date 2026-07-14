@@ -57,9 +57,6 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", EditCondition = "Mode == EFoliageBakerCardMode::CrossCards", EditConditionHides))
 	int32 CrossTextureResolution = 2048;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Resolution used to evaluate source material data before the final card atlas is assembled."))
-	int32 SourceMaterialBakeResolution = 2048;
-
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Per-View Alpha Crop Guard", ToolTip = "Extra pixels retained around the automatically detected visible-alpha bounds. Per-view alpha cropping is always enabled for Single Billboard and Cross Cards."))
 	int32 AlphaCropGuardPixels = 2;
 

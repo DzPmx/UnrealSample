@@ -536,6 +536,27 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 		}
 	}
 
+	bool ComputeGpuWinnerBarycentric2D(
+		const FVector2D& Point,
+		const FVector2D& A,
+		const FVector2D& B,
+		const FVector2D& C,
+		double& OutA,
+		double& OutB,
+		double& OutC)
+	{
+		const double Denominator = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
+		if (FMath::Abs(Denominator) <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			return false;
+		}
+
+		OutA = ((B.Y - C.Y) * (Point.X - C.X) + (C.X - B.X) * (Point.Y - C.Y)) / Denominator;
+		OutB = ((C.Y - A.Y) * (Point.X - C.X) + (A.X - C.X) * (Point.Y - C.Y)) / Denominator;
+		OutC = 1.0 - OutA - OutB;
+		return FMath::IsFinite(OutA) && FMath::IsFinite(OutB) && FMath::IsFinite(OutC);
+	}
+
 	bool BuildPlaneSideBakeInputs(
 		const TArray<PlaneCover::FSourceTriangle>& Triangles,
 		const TArray<int32>& TriangleIndices,

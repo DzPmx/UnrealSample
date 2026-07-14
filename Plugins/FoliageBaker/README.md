@@ -1,6 +1,6 @@
 # FoliageBaker
 
-FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LOD 烘焙远景植被代理。插件使用统一工具窗口承载不同烘焙方式，并由公共 Core 模块负责网格提取、源材质解析与属性烘焙、Atlas 处理和资产写入。
+FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LOD 烘焙远景植被代理。插件使用统一工具窗口承载不同烘焙方式，并由公共 Core 模块负责网格提取、源材质遮罩与属性烘焙、Atlas 处理和资产写入。
 
 当前版本为实验性编辑器工具，不包含运行时模块。
 
@@ -10,7 +10,7 @@ FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LO
 | --- | --- | --- |
 | Single Billboard | 可用 | 从 `+X`、`-X`、`+Y` 或 `-Y` 方向进行一次正交拍摄，生成一个穿过资产 Pivot 的垂直平面，只烘焙一个面 |
 | Cross Cards | 可用 | 生成 2–5 个在 180° 内等角度分布的垂直相交平面，每个角度独立裁切并烘焙正反面 |
-| Impostor | 可用 | 使用 3×3–8×8 八面体方向网格采样上半球或完整球面，生成固定 Atlas 和单张自动裁边 Sprite 代理 |
+| Impostor | 可用 | 使用 3×3–8×8 八面体方向网格采样上半球或完整球面，每帧通过共享 Masked RDG 深度选择可见片元，生成固定 Atlas 和单张自动裁边 Sprite 代理 |
 | BillboardClouds | 可用 | 使用 K-Means 生成自适应平面云，可选独立的树干 Cross Cards |
 
 ## 输入与拍摄规则
@@ -21,8 +21,8 @@ FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LO
 - Single Billboard 和 Cross Cards 的平面穿过 Static Mesh 本地原点，也就是资产 Pivot。
 - Cross Cards 的每个角度分别计算投影范围、可见关系和 Alpha 裁切。
 - Impostor 使用固定 N×N 八面体方向网格。上半球采用半八面体映射，完整球面采用带下半球折叠的完整八面体映射；虚拟八面体只负责方向编码，不作为最终代理几何。插件扫描所选 LOD 的全部唯一顶点及全部采样视角，在每个视角的 U、V 和拍摄深度轴上计算一个共享的紧致半径；在不超过原 Sphere Radius 范围的前提下，尽可能为 Tile 四边各保留 2 px。所有视角共享这个正方形投影范围和深度范围，以匹配 UE Impostor 材质的单一 `Default Mesh Size` 语义。代理初始生成在本地 XY 平面，正面朝向 +Z，再由父材质的 WPO 在运行时朝向观察方向。
-- BillboardClouds 只保留 K-Means 技术路径。
-- 已实现的烘焙路径读取未执行顶点变形的 Source LOD，并通过 Unreal MaterialBaking 导出材质属性；WPO 和 Displacement 在导出代理中为 0。
+- BillboardClouds 只保留 K-Means 技术路径；每个平面和正反面分别烘焙，主投影与 Crack Reduction 投影在同一个逐 Tile 深度目标中竞争，胜出的同一片元同时提供 BaseColor、Normal、Source Triangle ID、Depth 和 Mix。
+- 已实现的烘焙路径读取未执行顶点变形的 Source LOD。BaseColor、Object Normal、Source Triangle ID，以及 Mix 中的 AO、Roughness、Metallic、Emission 都使用 Core 的编辑器 RDG Masked 材质路径，并由同一个逐 Tile 深度目标确定胜出片元。WPO 和 Displacement 在导出代理中为 0。
 - 材质图中与颜色、透明度或其他属性直接相关的时间和风参数不会被统一禁用，只有顶点位移不参与烘焙。
 
 ## 纹理输出
@@ -32,11 +32,11 @@ FoliageBaker 是一个 Unreal Editor 插件，用于从 Static Mesh 的指定 LO
 ### BaseColor / Auxiliary
 
 - RGB 保存 Base Color。
-- Single Billboard、Cross Cards 和 Impostor 的 A 通道保存由最终可见覆盖生成的整株 Union SDF：外部为 `0`，轮廓为 `0.5`，内部为 `1`。
+- Single Billboard、Cross Cards、Impostor 和 BillboardClouds 的 A 通道都保存由最终可见覆盖生成的整株 Union SDF：外部为 `0`，轮廓为 `0.5`，内部为 `1`。
 - `Opacity SDF Range` 控制从轮廓到完全内部或外部的像素距离，默认 16 px。SDF 不增加 Padding，也不扩大平面、UV 或 Atlas Tile。
-- BillboardClouds 的 A 通道保存源 Opacity Mask，树干与叶片分类保存在代理网格 UV2 中。
+- BillboardClouds 的树干与叶片分类继续保存在代理网格 UV2 中。
 
-Single Billboard、Cross Cards 和 Impostor 可以直接使用 BaseColor A 计算覆盖：
+四种功能都可以直接使用 BaseColor A 计算覆盖：
 
 ```hlsl
 float Coverage = smoothstep(AlphaThreshold - EdgeWidth, AlphaThreshold + EdgeWidth, UnionSDF);
@@ -66,12 +66,14 @@ Mix 输出为可选项，RGBA 分别保存：
 3. Metallic
 4. Emission
 
+四个通道分别通过线性 Masked 属性 Pass 计算，并与 BaseColor、Normal 和 Source Triangle ID 复用同一逐 Tile 深度结果；最终由 Core 打包为一张 RGBA 纹理。
+
 ### Atlas 优化
 
 - Single Billboard 和 Cross Cards 始终按每个视角的原始有效覆盖范围裁切，`Per-View Alpha Crop Guard` 单独控制额外保留边界。`Opacity SDF Range` 不增加 Padding，也不扩大平面、UV 或 Atlas Tile。
 - Single Billboard 默认开启 `Trim Unused Atlas Space`；Cross Cards 可按需开启。启用后允许输出块对齐的矩形纹理。
 - Impostor 使用固定的 N×N 正方形 Tile 网格。所有视角使用同一个按几何顶点自动计算的紧致正方形拍摄范围；它不是逐帧 Alpha 裁切，透明叶片 Card 的空白角仍会参与范围计算。方向帧、Depth、代理网格和运行时重建始终共用同一个尺寸。
-- BillboardClouds 可以在最终打包前按每个平面的 Alpha 外边界裁切。
+- BillboardClouds 可以在最终打包前按每个平面的 Alpha 外边界裁切；SDF 只在最终 Tile 内生成，不参与裁切，也不改变 Tile 尺寸。
 - Atlas Tile 内未覆盖区域使用最近的有效像素向外填充 RGB，不依赖固定 Padding Pixel 参数，也不会改变代理 UV 的有效占用范围。
 
 ## 材质模板

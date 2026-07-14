@@ -19,7 +19,6 @@ public class FoliageBakerCore : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"MaterialBaking",
 				"MeshDescription",
 			}
 		);
@@ -31,6 +30,8 @@ public class FoliageBakerCore : ModuleRules
 				"AssetTools",
 				"ImageCore",
 				"InputCore",
+				"MaterialBaking",
+				"Projects",
 				"RenderCore",
 				"RHI",
 				"Renderer",

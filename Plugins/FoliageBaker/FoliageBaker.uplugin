@@ -19,7 +19,7 @@
 		{
 			"Name": "FoliageBakerCore",
 			"Type": "Editor",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "PostConfigInit"
 		},
 		{
 			"Name": "FoliageBakerCards",

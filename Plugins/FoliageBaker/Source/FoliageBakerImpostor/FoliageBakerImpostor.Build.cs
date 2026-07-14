@@ -27,6 +27,7 @@ public class FoliageBakerImpostor : ModuleRules
 				"PropertyEditor",
 				"MeshDescription",
 				"StaticMeshDescription",
+				"MaterialBaking",
 			}
 		);
 	}

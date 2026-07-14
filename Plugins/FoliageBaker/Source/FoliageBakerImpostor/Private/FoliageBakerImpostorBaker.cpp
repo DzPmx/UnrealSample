@@ -3,15 +3,18 @@
 #include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerImpostorSettings.h"
-#include "FoliageBakerMaterialResolver.h"
+#include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
+#include "FoliageBakerProjectedMaterialBake.h"
 #include "Containers/Set.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
+#include "Materials/Material.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
+#include "MaterialBakingStructures.h"
 #include "MaterialShared.h"
 #include "Math/RotationMatrix.h"
 #include "MeshDescription.h"
@@ -21,12 +24,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerImpostor, Log, All);
 
 namespace
 {
-	using EOpacityMaskChannel = UE::FoliageBaker::MaterialResolver::EOpacityMaskChannel;
-	using FMaterialBakeData = UE::FoliageBaker::MaterialResolver::FMaterialBakeData;
-	using FMaterialOutputSelection = UE::FoliageBaker::MaterialResolver::FMaterialOutputSelection;
-	using FMaterialScalarBakeData = UE::FoliageBaker::MaterialResolver::FMaterialScalarBakeData;
 	using FSourceTriangle = UE::FoliageBaker::PlaneCover::FSourceTriangle;
-	using UE::FoliageBaker::MaterialResolver::SampleOpacityMaskValue;
 	constexpr int32 ImpostorProjectionGuardPixels = 2;
 
 	struct FImpostorCaptureView
@@ -42,28 +40,7 @@ namespace
 		FIntPoint GridIndex = FIntPoint::ZeroValue;
 	};
 
-	struct FVisibleFragment
-	{
-		FVector2f Barycentric01 = FVector2f::ZeroVector;
-		float CaptureDepth = TNumericLimits<float>::Max();
-		int32 TriangleIndex = INDEX_NONE;
-
-		bool IsValid() const
-		{
-			return TriangleIndex != INDEX_NONE;
-		}
-	};
-
-	struct FNormalBasis
-	{
-		FVector Normal = FVector::UpVector;
-		FVector Tangent = FVector::ForwardVector;
-		float BinormalSign = 1.0f;
-		float OutputNormalSign = 1.0f;
-		bool bValid = false;
-	};
-
-	struct FImpostorBakeStats : UE::FoliageBaker::MaterialResolver::FMaterialResolveStats
+	struct FImpostorBakeStats
 	{
 		int32 AtlasWidth = 0;
 		int32 AtlasHeight = 0;
@@ -71,7 +48,8 @@ namespace
 		int32 ViewCount = 0;
 		int32 PaintedPixels = 0;
 		int32 RasterizedTriangleReferences = 0;
-		int32 OpacityRejectedPixels = 0;
+		int32 MaskedTriangleReferences = 0;
+		int32 DepthCorrectTileCount = 0;
 	};
 
 	struct FImpostorBakeData
@@ -116,26 +94,6 @@ namespace
 		return true;
 	}
 
-	bool ComputeBarycentric2D(
-		const FVector2D& Point,
-		const FVector2D& A,
-		const FVector2D& B,
-		const FVector2D& C,
-		double& OutA,
-		double& OutB,
-		double& OutC)
-	{
-		const double Denominator = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
-		if (FMath::Abs(Denominator) <= UE_DOUBLE_SMALL_NUMBER)
-		{
-			return false;
-		}
-		OutA = ((B.Y - C.Y) * (Point.X - C.X) + (C.X - B.X) * (Point.Y - C.Y)) / Denominator;
-		OutB = ((C.Y - A.Y) * (Point.X - C.X) + (A.X - C.X) * (Point.Y - C.Y)) / Denominator;
-		OutC = 1.0 - OutA - OutB;
-		return OutA >= -1.0e-5 && OutB >= -1.0e-5 && OutC >= -1.0e-5;
-	}
-
 	uint8 UnitFloatToByte(const float Value)
 	{
 		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Value, 0.0f, 1.0f) * 255.0f), 0, 255));
@@ -149,95 +107,6 @@ namespace
 			UnitFloatToByte(static_cast<float>(Normal.Y * 0.5 + 0.5)),
 			UnitFloatToByte(static_cast<float>(Normal.Z * 0.5 + 0.5)),
 			Alpha);
-	}
-
-	FVector DecodeNormalColor(const FColor& Color)
-	{
-		return FVector(
-			static_cast<double>(Color.R) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(Color.G) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(Color.B) / 255.0 * 2.0 - 1.0).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-	}
-
-	FVector DeriveTangent(const FVector& InNormal)
-	{
-		const FVector Normal = InNormal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-		const FVector ReferenceAxis = FMath::Abs(Normal.Z) < 0.95 ? FVector::UpVector : FVector::ForwardVector;
-		return FVector::CrossProduct(ReferenceAxis, Normal).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::RightVector);
-	}
-
-	FNormalBasis MakeNormalBasis(
-		const FSourceTriangle& Triangle,
-		const double W0,
-		const double W1,
-		const double W2,
-		const bool bFlipOutputNormal)
-	{
-		FNormalBasis Result;
-		FVector Normal = Triangle.VertexNormals[0] * W0
-			+ Triangle.VertexNormals[1] * W1
-			+ Triangle.VertexNormals[2] * W2;
-		if (!Normal.Normalize())
-		{
-			Normal = Triangle.Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-		}
-
-		FVector Tangent = Triangle.bHasTangents
-			? Triangle.VertexTangents[0] * W0 + Triangle.VertexTangents[1] * W1 + Triangle.VertexTangents[2] * W2
-			: DeriveTangent(Normal);
-		Tangent = Tangent - Normal * FVector::DotProduct(Tangent, Normal);
-		if (!Tangent.Normalize())
-		{
-			Tangent = DeriveTangent(Normal);
-		}
-
-		Result.Normal = Normal;
-		Result.Tangent = Tangent;
-		Result.BinormalSign = Triangle.bHasTangents
-			&& Triangle.BinormalSigns[0] * W0 + Triangle.BinormalSigns[1] * W1 + Triangle.BinormalSigns[2] * W2 < 0.0
-			? -1.0f
-			: 1.0f;
-		Result.OutputNormalSign = bFlipOutputNormal ? -1.0f : 1.0f;
-		Result.bValid = true;
-		return Result;
-	}
-
-	FColor EncodeTangentNormalToObjectSpace(const FColor& RawNormal, const FNormalBasis& Basis, const uint8 Alpha)
-	{
-		if (!Basis.bValid)
-		{
-			return EncodeObjectSpaceNormal(FVector::UpVector, Alpha);
-		}
-		const FVector TangentSpaceNormal = DecodeNormalColor(RawNormal);
-		const FVector Normal = Basis.Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-		const FVector Tangent = Basis.Tangent.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, DeriveTangent(Normal));
-		const FVector Binormal = FVector::CrossProduct(Normal, Tangent).GetSafeNormal() * Basis.BinormalSign;
-		const FVector ObjectNormal = (Tangent * TangentSpaceNormal.X
-			+ Binormal * TangentSpaceNormal.Y
-			+ Normal * TangentSpaceNormal.Z).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Normal)
-			* static_cast<double>(Basis.OutputNormalSign);
-		return EncodeObjectSpaceNormal(ObjectNormal, Alpha);
-	}
-
-	float SampleMaterialScalar(const FMaterialScalarBakeData& BakeData, const FVector2f& UV)
-	{
-		if (!BakeData.bHasReadableTexture || !BakeData.Texture.IsValid())
-		{
-			return FMath::Clamp(BakeData.Constant, 0.0f, 1.0f);
-		}
-		const FLinearColor Sample = BakeData.Texture.Sample(UV);
-		if (BakeData.bUseLuminance)
-		{
-			return FMath::Clamp(FMath::Max3(Sample.R, Sample.G, Sample.B), 0.0f, 1.0f);
-		}
-		switch (BakeData.Channel)
-		{
-		case EOpacityMaskChannel::Green: return FMath::Clamp(Sample.G, 0.0f, 1.0f);
-		case EOpacityMaskChannel::Blue: return FMath::Clamp(Sample.B, 0.0f, 1.0f);
-		case EOpacityMaskChannel::Alpha: return FMath::Clamp(Sample.A, 0.0f, 1.0f);
-		case EOpacityMaskChannel::Red:
-		default: return FMath::Clamp(Sample.R, 0.0f, 1.0f);
-		}
 	}
 
 	FVector DecodeHemiOctahedralDirection(const FVector2D& Encoded)
@@ -354,16 +223,28 @@ namespace
 			SourceBounds,
 			OutViews,
 			TileResolution);
-		for (FImpostorCaptureView& View : OutViews)
+		for (int32 ViewIndex = 0; ViewIndex < OutViews.Num(); ++ViewIndex)
 		{
+			FImpostorCaptureView& View = OutViews[ViewIndex];
 			View.ProjectionHalfExtentU = OutSharedCaptureHalfExtent;
 			View.ProjectionHalfExtentV = OutSharedCaptureHalfExtent;
+			UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& TileInfo = OutTileInfos[ViewIndex];
+			TileInfo.SourcePlaneIndex = ViewIndex;
+			TileInfo.Normal = View.ViewDirection;
+			TileInfo.Rho = FVector::DotProduct(View.ViewDirection, SourceBounds.Origin);
+			TileInfo.AxisU = View.AxisU;
+			TileInfo.AxisV = View.AxisV;
+			const double CenterU = FVector::DotProduct(SourceBounds.Origin, View.AxisU);
+			const double CenterV = FVector::DotProduct(SourceBounds.Origin, View.AxisV);
+			TileInfo.MinU = CenterU - OutSharedCaptureHalfExtent;
+			TileInfo.MaxU = CenterU + OutSharedCaptureHalfExtent;
+			TileInfo.MinV = CenterV - OutSharedCaptureHalfExtent;
+			TileInfo.MaxV = CenterV + OutSharedCaptureHalfExtent;
 		}
 	}
 
 	bool BakeViewAtlas(
 		const UStaticMesh& SourceStaticMesh,
-		const int32 SourceLODIndex,
 		const UFoliageBakerImpostorSettings& Settings,
 		FImpostorBakeData& InOutData,
 		FString& OutError)
@@ -391,106 +272,174 @@ namespace
 		InOutData.CoverageValues.Init(0.0f, PixelCount);
 		TBitArray<> NormalCoverage;
 		NormalCoverage.Init(false, PixelCount);
-		FMaterialOutputSelection OutputSelection;
-		OutputSelection.bBaseColorOpacity = true;
-		OutputSelection.bNormalMask = Settings.bBakeNormalDepth;
-		OutputSelection.bMix = Settings.bBakeMix;
-		const TArray<FMaterialBakeData> MaterialData = UE::FoliageBaker::MaterialResolver::ResolveMaterialBakeData(
-			SourceStaticMesh,
-			SourceLODIndex,
-			InOutData.SourceBounds,
-			InOutData.Triangles,
-			OutputSelection,
-			FMath::Clamp(Settings.SourceMaterialBakeResolution, 256, 4096),
-			true,
-			InOutData.Stats);
-		if (MaterialData.IsEmpty())
+
+		TArray<int32> SourceTriangleIndices;
+		SourceTriangleIndices.Reserve(InOutData.Triangles.Num());
+		TSet<int32> ReferencedMaterialSet;
+		for (int32 TriangleIndex = 0; TriangleIndex < InOutData.Triangles.Num(); ++TriangleIndex)
 		{
-			OutError = TEXT("No source material data could be resolved for the selected LOD.");
+			const FSourceTriangle& Triangle = InOutData.Triangles[TriangleIndex];
+			if (Triangle.Area <= 0.0)
+			{
+				continue;
+			}
+			SourceTriangleIndices.Add(TriangleIndex);
+			ReferencedMaterialSet.Add(FMath::Max(0, Triangle.MaterialIndex));
+		}
+		TArray<int32> ReferencedMaterialIndices = ReferencedMaterialSet.Array();
+		ReferencedMaterialIndices.Sort();
+		if (SourceTriangleIndices.IsEmpty() || ReferencedMaterialIndices.IsEmpty())
+		{
+			OutError = TEXT("The selected LOD contains no rasterizable Impostor triangles.");
 			return false;
 		}
 
+		const TArray<FStaticMaterial>& SourceMaterials = SourceStaticMesh.GetStaticMaterials();
 		const double SharedCaptureHalfExtent = FMath::Max(InOutData.SharedCaptureHalfExtent, UE_DOUBLE_SMALL_NUMBER);
 		const FVector SharedCenter = InOutData.SourceBounds.Origin;
-		for (const FImpostorCaptureView& View : InOutData.Views)
+		const TArray<UE::FoliageBaker::PlaneCover::FCrackReductionProjection> NoCrackReductionProjections;
+		struct FDepthCorrectMaterialStorage
 		{
-			const int32 TilePixelCount = View.TileSize.X * View.TileSize.Y;
-			TArray<FVisibleFragment> VisibleFragments;
-			VisibleFragments.SetNum(TilePixelCount);
-			for (int32 TriangleIndex = 0; TriangleIndex < InOutData.Triangles.Num(); ++TriangleIndex)
+			UMaterialInterface* MaterialInterface = nullptr;
+			FMeshDescription MeshDescription;
+			TArray<FVector2D> CustomTileUVs;
+			TArray<int32> RasterSourceTriangleIndices;
+			FMeshData MeshSettings;
+		};
+		for (int32 ViewIndex = 0; ViewIndex < InOutData.Views.Num(); ++ViewIndex)
+		{
+			const FImpostorCaptureView& View = InOutData.Views[ViewIndex];
+			if (!InOutData.TileInfos.IsValidIndex(ViewIndex))
 			{
-				const FSourceTriangle& Triangle = InOutData.Triangles[TriangleIndex];
-				if (Triangle.Area <= 0.0)
-				{
-					continue;
-				}
-				const int32 MaterialIndex = FMath::Clamp(Triangle.MaterialIndex, 0, MaterialData.Num() - 1);
-				if (!MaterialData.IsValidIndex(MaterialIndex))
-				{
-					continue;
-				}
-				const FMaterialBakeData& BakeData = MaterialData[MaterialIndex];
-				++InOutData.Stats.RasterizedTriangleReferences;
-
-				FVector2D ProjectedPoints[3];
-				for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
-				{
-					const FVector LocalPosition = Triangle.Vertices[VertexIndex] - SharedCenter;
-					const double U = 0.5 + FVector::DotProduct(LocalPosition, View.AxisU) / (2.0 * View.ProjectionHalfExtentU);
-					const double V = 0.5 - FVector::DotProduct(LocalPosition, View.AxisV) / (2.0 * View.ProjectionHalfExtentV);
-					ProjectedPoints[VertexIndex] = FVector2D(U * View.TileSize.X, V * View.TileSize.Y);
-				}
-
-				const int32 MinX = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), 0, View.TileSize.X - 1);
-				const int32 MaxX = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].X, ProjectedPoints[1].X, ProjectedPoints[2].X)), 0, View.TileSize.X - 1);
-				const int32 MinY = FMath::Clamp(FMath::FloorToInt(FMath::Min3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), 0, View.TileSize.Y - 1);
-				const int32 MaxY = FMath::Clamp(FMath::CeilToInt(FMath::Max3(ProjectedPoints[0].Y, ProjectedPoints[1].Y, ProjectedPoints[2].Y)), 0, View.TileSize.Y - 1);
-
-				for (int32 Y = MinY; Y <= MaxY; ++Y)
-				{
-					for (int32 X = MinX; X <= MaxX; ++X)
-					{
-						double W0 = 0.0;
-						double W1 = 0.0;
-						double W2 = 0.0;
-						if (!ComputeBarycentric2D(FVector2D(X + 0.5, Y + 0.5), ProjectedPoints[0], ProjectedPoints[1], ProjectedPoints[2], W0, W1, W2))
-						{
-							continue;
-						}
-
-						const FVector2f SourceUV = Triangle.bHasUVs
-							? Triangle.UVs[0] * static_cast<float>(W0)
-								+ Triangle.UVs[1] * static_cast<float>(W1)
-								+ Triangle.UVs[2] * static_cast<float>(W2)
-							: FVector2f::ZeroVector;
-						if (Triangle.bHasUVs
-							&& BakeData.bUseTextureAlphaAsOpacity
-							&& BakeData.bHasReadableOpacityMaskTexture
-							&& BakeData.OpacityMaskTexture.IsValid())
-						{
-							const float Opacity = SampleOpacityMaskValue(BakeData.OpacityMaskTexture, SourceUV, BakeData.OpacityMaskChannel);
-							if (Opacity < BakeData.OpacityMaskClipValue)
-							{
-								++InOutData.Stats.OpacityRejectedPixels;
-								continue;
-							}
-						}
-
-						const FVector SourcePoint = Triangle.Vertices[0] * W0 + Triangle.Vertices[1] * W1 + Triangle.Vertices[2] * W2;
-						const float CaptureDepth = static_cast<float>(FVector::DotProduct(SourcePoint - SharedCenter, View.CaptureRayDirection));
-						const int32 PixelIndex = Y * View.TileSize.X + X;
-						if (CaptureDepth > VisibleFragments[PixelIndex].CaptureDepth + 1.0e-6f)
-						{
-							continue;
-						}
-
-						FVisibleFragment& Fragment = VisibleFragments[PixelIndex];
-						Fragment.Barycentric01 = FVector2f(static_cast<float>(W0), static_cast<float>(W1));
-						Fragment.CaptureDepth = CaptureDepth;
-						Fragment.TriangleIndex = TriangleIndex;
-					}
-				}
+				OutError = FString::Printf(TEXT("Impostor frame %d has no matching tile geometry."), ViewIndex);
+				return false;
 			}
+			const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo =
+				InOutData.TileInfos[ViewIndex];
+			const int32 TilePixelCount = View.TileSize.X * View.TileSize.Y;
+
+			TArray<TUniquePtr<FDepthCorrectMaterialStorage>> MaterialStorage;
+			MaterialStorage.Reserve(ReferencedMaterialIndices.Num());
+			FFoliageBakerDepthCorrectTileRequest DepthCorrectRequest;
+			DepthCorrectRequest.TextureSize = View.TileSize;
+			DepthCorrectRequest.CaptureRayDirection = View.CaptureRayDirection;
+			DepthCorrectRequest.SourceBounds = InOutData.SourceBounds;
+			DepthCorrectRequest.bBakeBaseColor = Settings.bBakeBaseColorSdf;
+			DepthCorrectRequest.bBakeObjectSpaceNormal = Settings.bBakeNormalDepth;
+			DepthCorrectRequest.bBakePackedMix = Settings.bBakeMix;
+			DepthCorrectRequest.Materials.Reserve(ReferencedMaterialIndices.Num());
+
+			for (const int32 MaterialIndex : ReferencedMaterialIndices)
+			{
+				TUniquePtr<FDepthCorrectMaterialStorage> Storage =
+					MakeUnique<FDepthCorrectMaterialStorage>();
+				Storage->MaterialInterface = SourceMaterials.IsValidIndex(MaterialIndex)
+					? SourceMaterials[MaterialIndex].MaterialInterface
+					: nullptr;
+				if (!Storage->MaterialInterface)
+				{
+					Storage->MaterialInterface = UMaterial::GetDefaultMaterial(MD_Surface);
+				}
+
+				UE::FoliageBaker::ProjectedMaterialBake::FPlaneSideBakeParams ProjectedBakeParams;
+				ProjectedBakeParams.TileSize = View.TileSize;
+				ProjectedBakeParams.CaptureRayDirection = View.CaptureRayDirection;
+				ProjectedBakeParams.AtlasVConvention =
+					UE::FoliageBaker::PlaneCover::EAtlasVConvention::GeometryMinVToTextureMaxV;
+				ProjectedBakeParams.MaterialIndexFilter = MaterialIndex;
+				ProjectedBakeParams.bBackSide = false;
+				ProjectedBakeParams.bBuildNormalBasisMap = false;
+
+				TArray<UE::FoliageBaker::ProjectedMaterialBake::FNormalBasisSample> UnusedNormalBasisMap;
+				int32 MatchingTriangleCount = 0;
+				FString ProjectedInputError;
+				const bool bBuiltPlaneSideBakeInputs =
+					UE::FoliageBaker::ProjectedMaterialBake::BuildPlaneSideBakeInputs(
+						InOutData.Triangles,
+						SourceTriangleIndices,
+						NoCrackReductionProjections,
+						PlaneInfo,
+						ProjectedBakeParams,
+						Storage->MeshDescription,
+						Storage->CustomTileUVs,
+						UnusedNormalBasisMap,
+						MatchingTriangleCount,
+						&ProjectedInputError,
+						&Storage->RasterSourceTriangleIndices);
+				if (MatchingTriangleCount == 0)
+				{
+					continue;
+				}
+				if (!bBuiltPlaneSideBakeInputs)
+				{
+					OutError = FString::Printf(
+						TEXT("Impostor depth-correct material input failed for frame %d, material %d: %s"),
+						ViewIndex,
+						MaterialIndex,
+						*ProjectedInputError);
+					return false;
+				}
+
+				InOutData.Stats.RasterizedTriangleReferences += MatchingTriangleCount;
+				if (Storage->MaterialInterface->GetBlendMode() == BLEND_Masked)
+				{
+					InOutData.Stats.MaskedTriangleReferences += MatchingTriangleCount;
+				}
+
+				Storage->MeshSettings.MeshDescription = &Storage->MeshDescription;
+				Storage->MeshSettings.Mesh = &SourceStaticMesh;
+				Storage->MeshSettings.MaterialIndices.Add(0);
+				Storage->MeshSettings.TextureCoordinateBox =
+					FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
+				Storage->MeshSettings.TextureCoordinateIndex = 0;
+				Storage->MeshSettings.LightMapIndex = 0;
+				Storage->MeshSettings.PrimitiveData = FPrimitiveData(InOutData.SourceBounds);
+				Storage->MeshSettings.CustomTextureCoordinates = MoveTemp(Storage->CustomTileUVs);
+				FDepthCorrectMaterialStorage* StoragePtr = Storage.Get();
+				MaterialStorage.Add(MoveTemp(Storage));
+
+				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput =
+					DepthCorrectRequest.Materials.AddDefaulted_GetRef();
+				MaterialInput.MaterialInterface = StoragePtr->MaterialInterface;
+				MaterialInput.MeshSettings = &StoragePtr->MeshSettings;
+				MaterialInput.RasterSourceTriangleIndices =
+					&StoragePtr->RasterSourceTriangleIndices;
+			}
+
+			if (DepthCorrectRequest.Materials.IsEmpty())
+			{
+				continue;
+			}
+
+			FFoliageBakerDepthCorrectTileResult DepthCorrectResult;
+			FString DepthCorrectError;
+			if (!FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
+					DepthCorrectRequest,
+					DepthCorrectResult,
+					&DepthCorrectError))
+			{
+				OutError = FString::Printf(
+					TEXT("Impostor depth-correct tile bake failed for frame %d: %s"),
+					ViewIndex,
+					*DepthCorrectError);
+				return false;
+			}
+			if (DepthCorrectResult.SourceTriangleIdAndDepth.Num() != TilePixelCount
+				|| (Settings.bBakeBaseColorSdf && DepthCorrectResult.BaseColor.Num() != TilePixelCount)
+				|| (Settings.bBakeNormalDepth && DepthCorrectResult.ObjectSpaceNormal.Num() != TilePixelCount)
+				|| (Settings.bBakeMix && DepthCorrectResult.PackedMix.Num() != TilePixelCount))
+			{
+				OutError = FString::Printf(
+					TEXT("Impostor depth-correct tile returned invalid sizes for frame %d: base=%d, id=%d, normal=%d, mix=%d, expected=%d."),
+					ViewIndex,
+					DepthCorrectResult.BaseColor.Num(),
+					DepthCorrectResult.SourceTriangleIdAndDepth.Num(),
+					DepthCorrectResult.ObjectSpaceNormal.Num(),
+					DepthCorrectResult.PackedMix.Num(),
+					TilePixelCount);
+				return false;
+			}
+			++InOutData.Stats.DepthCorrectTileCount;
 
 			for (int32 LocalY = 0; LocalY < View.TileSize.Y; ++LocalY)
 			{
@@ -498,35 +447,73 @@ namespace
 				for (int32 LocalX = 0; LocalX < View.TileSize.X; ++LocalX)
 				{
 					const int32 TileIndex = LocalY * View.TileSize.X + LocalX;
-					const FVisibleFragment& Fragment = VisibleFragments[TileIndex];
-					if (!Fragment.IsValid() || !InOutData.Triangles.IsValidIndex(Fragment.TriangleIndex))
+					const int32 TriangleIndex =
+						FFoliageBakerMaskedMaterialBaker::DecodeSourceTriangleId(
+							DepthCorrectResult.SourceTriangleIdAndDepth[TileIndex]);
+					if (TriangleIndex == INDEX_NONE)
 					{
 						continue;
 					}
+					if (!InOutData.Triangles.IsValidIndex(TriangleIndex))
+					{
+						OutError = FString::Printf(
+							TEXT("Impostor depth-correct tile decoded invalid triangle %d at pixel (%d,%d) for frame %d."),
+							TriangleIndex,
+							LocalX,
+							LocalY,
+							ViewIndex);
+						return false;
+					}
+
+					const FSourceTriangle& Triangle = InOutData.Triangles[TriangleIndex];
+					FVector2D ProjectedPoints[3];
+					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
+					{
+						const FVector LocalPosition = Triangle.Vertices[VertexIndex] - SharedCenter;
+						const double U = 0.5
+							+ FVector::DotProduct(LocalPosition, View.AxisU)
+								/ (2.0 * View.ProjectionHalfExtentU);
+						const double V = 0.5
+							- FVector::DotProduct(LocalPosition, View.AxisV)
+								/ (2.0 * View.ProjectionHalfExtentV);
+						ProjectedPoints[VertexIndex] = FVector2D(
+							U * View.TileSize.X,
+							V * View.TileSize.Y);
+					}
+
+					double W0 = 0.0;
+					double W1 = 0.0;
+					double W2 = 0.0;
+					if (!UE::FoliageBaker::ProjectedMaterialBake::ComputeGpuWinnerBarycentric2D(
+							FVector2D(LocalX + 0.5, LocalY + 0.5),
+							ProjectedPoints[0],
+							ProjectedPoints[1],
+							ProjectedPoints[2],
+							W0,
+							W1,
+							W2))
+					{
+						OutError = FString::Printf(
+							TEXT("Impostor depth-correct tile encountered a degenerate triangle %d at pixel (%d,%d) for frame %d."),
+							TriangleIndex,
+							LocalX,
+							LocalY,
+							ViewIndex);
+						return false;
+					}
+
+					const FVector SourcePoint = Triangle.Vertices[0] * W0
+						+ Triangle.Vertices[1] * W1
+						+ Triangle.Vertices[2] * W2;
+					const float CaptureDepth = static_cast<float>(FVector::DotProduct(
+						SourcePoint - SharedCenter,
+						View.CaptureRayDirection));
 					const int32 AtlasX = View.TilePixelMin.X + LocalX;
 					const int32 AtlasIndex = AtlasY * InOutData.Stats.AtlasWidth + AtlasX;
-					const FSourceTriangle& Triangle = InOutData.Triangles[Fragment.TriangleIndex];
-					const int32 MaterialIndex = FMath::Clamp(Triangle.MaterialIndex, 0, MaterialData.Num() - 1);
-					if (!MaterialData.IsValidIndex(MaterialIndex))
-					{
-						continue;
-					}
-					const FMaterialBakeData& BakeData = MaterialData[MaterialIndex];
-					const double W0 = Fragment.Barycentric01.X;
-					const double W1 = Fragment.Barycentric01.Y;
-					const double W2 = 1.0 - W0 - W1;
-					const FVector2f SourceUV = Triangle.bHasUVs
-						? Triangle.UVs[0] * static_cast<float>(W0)
-							+ Triangle.UVs[1] * static_cast<float>(W1)
-							+ Triangle.UVs[2] * static_cast<float>(W2)
-						: FVector2f::ZeroVector;
 
 					if (Settings.bBakeBaseColorSdf)
 					{
-						const FLinearColor BaseColor = BakeData.bHasReadableBaseColorTexture
-							? BakeData.BaseColorTexture.Sample(SourceUV)
-							: BakeData.BaseColor;
-						FColor Color = BaseColor.ToFColorSRGB();
+						FColor Color = DepthCorrectResult.BaseColor[TileIndex];
 						Color.A = 255;
 						InOutData.BaseColorPixels[AtlasIndex] = Color;
 					}
@@ -535,25 +522,20 @@ namespace
 
 					if (Settings.bBakeNormalDepth)
 					{
-						const float LinearDepth = FMath::Clamp(static_cast<float>((Fragment.CaptureDepth + SharedCaptureHalfExtent) / (2.0 * SharedCaptureHalfExtent)), 0.0f, 1.0f);
-						const uint8 EncodedDepth = UnitFloatToByte(LinearDepth);
-						const bool bFlipNormal = BakeData.bTwoSided
-							&& BakeData.bSourceTangentSpaceNormal
-							&& FVector::DotProduct(Triangle.Normal, View.CaptureRayDirection) < 0.0;
-						const FNormalBasis Basis = MakeNormalBasis(Triangle, W0, W1, W2, bFlipNormal);
-						InOutData.NormalDepthPixels[AtlasIndex] = BakeData.bHasReadableNormalTexture
-							? EncodeTangentNormalToObjectSpace(BakeData.NormalTexture.SampleRawColor(SourceUV), Basis, EncodedDepth)
-							: EncodeObjectSpaceNormal(Basis.Normal * static_cast<double>(Basis.OutputNormalSign), EncodedDepth);
+						const float LinearDepth = FMath::Clamp(
+							static_cast<float>((CaptureDepth + SharedCaptureHalfExtent)
+								/ (2.0 * SharedCaptureHalfExtent)),
+							0.0f,
+							1.0f);
+						FColor ObjectNormal = DepthCorrectResult.ObjectSpaceNormal[TileIndex];
+						ObjectNormal.A = UnitFloatToByte(LinearDepth);
+						InOutData.NormalDepthPixels[AtlasIndex] = ObjectNormal;
 						NormalCoverage[AtlasIndex] = true;
 					}
 
 					if (Settings.bBakeMix)
 					{
-						InOutData.MixPixels[AtlasIndex] = FColor(
-							UnitFloatToByte(SampleMaterialScalar(BakeData.AmbientOcclusion, SourceUV)),
-							UnitFloatToByte(SampleMaterialScalar(BakeData.Roughness, SourceUV)),
-							UnitFloatToByte(SampleMaterialScalar(BakeData.Metallic, SourceUV)),
-							UnitFloatToByte(SampleMaterialScalar(BakeData.Emission, SourceUV)));
+						InOutData.MixPixels[AtlasIndex] = DepthCorrectResult.PackedMix[TileIndex];
 					}
 					++InOutData.Stats.PaintedPixels;
 				}
@@ -613,7 +595,12 @@ namespace
 				&CoverageMask,
 				true);
 		}
-		return InOutData.Stats.PaintedPixels > 0;
+		if (InOutData.Stats.PaintedPixels <= 0)
+		{
+			OutError = TEXT("The Impostor RDG capture produced no visible pixels.");
+			return false;
+		}
+		return true;
 	}
 
 	constexpr int32 ImpostorCutoutTraceResolution = 16;
@@ -1113,7 +1100,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		BakeData.TileInfos,
 		BakeData.Stats,
 		BakeData.SharedCaptureHalfExtent);
-	if (!BakeViewAtlas(SourceStaticMesh, Settings.SourceLODIndex, Settings, BakeData, Error))
+	if (!BakeViewAtlas(SourceStaticMesh, Settings, BakeData, Error))
 	{
 		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), Error.IsEmpty() ? TEXT("no visible Impostor pixels were captured.") : *Error);
 		return Result;
@@ -1241,6 +1228,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		return Result;
 	}
 
+	Result.MaterialInstance->PreEditChange(nullptr);
 	const float FrameGridSize = static_cast<float>(FMath::Clamp(Settings.FrameGridSize, 3, 8));
 	Result.MaterialInstance->SetScalarParameterValueEditorOnly(
 		Settings.FramesParameterName,
@@ -1280,6 +1268,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	SetStaticSwitch(TEXT("Metallic_Channel_B"), true);
 	SetStaticSwitch(TEXT("Metallic_Channel_A"), false);
 	Result.MaterialInstance->PostEditChange();
+	Result.MaterialInstance->UpdateStaticPermutation();
 	Result.MaterialInstance->MarkPackageDirty();
 
 	if (MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
@@ -1361,7 +1350,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	const double TexelAreaDensityGain = FMath::Square(
 		static_cast<double>(BakeData.SourceBounds.SphereRadius) / BakeData.SharedCaptureHalfExtent);
 	Result.Report = FString::Printf(
-		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask object/local RGB + UE ImpostorBaker Depth A (near 0, far 1, empty 0.5)%s\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: UE ImpostorBaker-compatible XY cutout, center + 8 traced outline vertices, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, opacity rejects: %d\n  WPO/displacement: disabled by source material baking path\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
+		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask object/local RGB + UE ImpostorBaker Depth A (near 0, far 1, empty 0.5)%s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: UE ImpostorBaker-compatible XY cutout, center + 8 traced outline vertices, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
 		*SourceStaticMesh.GetName(),
 		Settings.SourceLODIndex,
 		Settings.Coverage == EFoliageBakerImpostorCoverage::FullSphere ? TEXT("full sphere") : TEXT("upper hemisphere"),
@@ -1383,7 +1372,8 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		AtlasPixelCount,
 		PaintedPixelPercent,
 		BakeData.Stats.RasterizedTriangleReferences,
-		BakeData.Stats.OpacityRejectedPixels,
+		BakeData.Stats.MaskedTriangleReferences,
+		BakeData.Stats.DepthCorrectTileCount,
 		*Result.MaterialInstance->GetPathName());
 	UE_LOG(LogFoliageBakerImpostor, Display, TEXT("\n%s"), *Result.Report);
 	return Result;

@@ -29,6 +29,15 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 		bool bBuildNormalBasisMap = true;
 	};
 
+	FOLIAGEBAKERCORE_API bool ComputeGpuWinnerBarycentric2D(
+		const FVector2D& Point,
+		const FVector2D& A,
+		const FVector2D& B,
+		const FVector2D& C,
+		double& OutA,
+		double& OutB,
+		double& OutC);
+
 	/**
 	 * Builds the projected material-bake mesh, custom tile UVs, and the matching
 	 * source TBN basis map in one operation. Both outputs use the same sorted

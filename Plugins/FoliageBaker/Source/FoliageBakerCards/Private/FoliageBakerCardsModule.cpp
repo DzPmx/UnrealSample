@@ -129,10 +129,6 @@ namespace
 				: Settings.CrossTextureResolution,
 			MinTextureResolution,
 			MaxTextureResolution);
-		Request.SourceMaterialBakeResolution = FMath::Clamp(
-			Settings.SourceMaterialBakeResolution,
-			MinTextureResolution,
-			MaxTextureResolution);
 		Request.AlphaCropGuardPixels = FMath::Clamp(
 			Settings.AlphaCropGuardPixels,
 			MinAlphaCropGuardPixels,
