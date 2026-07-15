@@ -17,7 +17,6 @@
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
-#include "Framework/Docking/TabManager.h"
 #include "IDetailCustomization.h"
 #include "IDetailsView.h"
 #include "MaterialDomain.h"
@@ -31,10 +30,9 @@
 #include "MaterialBakingStructures.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
+#include "ScopedTransaction.h"
 #include "StaticMeshResources.h"
 #include "Styling/AppStyle.h"
-#include "ToolMenus.h"
-#include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
@@ -66,8 +64,6 @@ namespace
 			DetailBuilder.EditCategory(TEXT("Material")).SetSortOrder(3);
 		}
 	};
-
-	const FName BillboardCloudsToolTabName(TEXT("BillboardCloudsTools"));
 
 	bool ComputeSourceTriangleBounds(
 		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
@@ -1247,10 +1243,14 @@ namespace
 		{
 			return false;
 		}
-		UMaterialInstanceConstant* TemplateMaterialInstance = EditorSettings.BillboardMaterialTemplate.LoadSynchronous();
+		const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
+			GetDefault<UFoliageBakerBillboardCloudsSettings>();
+		UMaterialInstanceConstant* TemplateMaterialInstance = EditorPreferences
+			? EditorPreferences->BillboardMaterialTemplate.LoadSynchronous()
+			: nullptr;
 		if (!TemplateMaterialInstance)
 		{
-			OutError = TEXT("Billboard material template instance is not set. Configure Billboard Material Template in the Billboard Clouds tool panel.");
+			OutError = TEXT("Billboard Clouds Parent Material Instance is not configured in Editor Preferences.");
 			return false;
 		}
 
@@ -1388,7 +1388,7 @@ namespace
 		MaterialParams.BaseColorOpacityTextureParameterName = EditorSettings.BaseColorOpacityTextureParameterName;
 		MaterialParams.NormalDepthTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
-		MaterialParams.MissingTemplateError = TEXT("Billboard material template instance is not set. Configure Billboard Material Template in the Billboard Clouds tool panel.");
+		MaterialParams.MissingTemplateError = TEXT("Billboard Clouds Parent Material Instance is not configured in Editor Preferences.");
 		OutData.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,
 			AssetTransaction,
@@ -1490,7 +1490,7 @@ namespace
 			*EditorSettings.MixTextureParameterName.ToString());
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  base/color SDF atlas: %s, RGB=BaseColor, A=whole-proxy signed distance field clipped inside each tile, range=%d px\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 0, far 1, uncovered 1); WPO disabled during material baking\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (copied from settings template; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  base/color SDF atlas: %s, RGB=BaseColor, A=whole-proxy signed distance field clipped inside each tile, range=%d px\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); WPO disabled during material baking\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  trunk/leaf mask: UV2 classification, trunk=(0,0), billboard/leaf=(1,0), trunk-white mask = 1 - UV2.x\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
@@ -1683,27 +1683,6 @@ void FFoliageBakerBillboardCloudsModule::ShutdownModule()
 	ToolSettings.Reset();
 }
 
-void FFoliageBakerBillboardCloudsModule::RegisterMenus()
-{
-	FToolMenuOwnerScoped OwnerScoped(this);
-
-	UToolMenu* ToolsMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Tools");
-	if (!ToolsMenu)
-	{
-		return;
-	}
-
-	FToolMenuSection& Section = ToolsMenu->FindOrAddSection("FoliageBaker");
-	Section.Label = LOCTEXT("FoliageBakerSection", "Foliage Baker");
-	Section.AddMenuEntry(
-		"BillboardCloudsTools",
-		LOCTEXT("CreatePlaneProxyMeshesLabel", "Billboard Clouds"),
-		LOCTEXT("CreatePlaneProxyMeshesTooltip", "Open the Billboard Clouds tool panel to configure and bake Static Mesh proxy geometry."),
-		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"),
-		FToolMenuExecuteAction::CreateRaw(this, &FFoliageBakerBillboardCloudsModule::ExecuteCreatePlaneProxyMeshes)
-	);
-}
-
 void FFoliageBakerBillboardCloudsModule::EnsureToolSettings()
 {
 	if (!ToolSettings.IsValid())
@@ -1720,7 +1699,16 @@ void FFoliageBakerBillboardCloudsModule::AddContentBrowserSelectionToTool()
 	{
 		return;
 	}
+	const bool bHasNewStaticMesh = SelectedStaticMeshes.ContainsByPredicate([this](const UStaticMesh* StaticMesh)
+	{
+		return !ToolSettings->SourceStaticMeshes.Contains(StaticMesh);
+	});
+	if (!bHasNewStaticMesh)
+	{
+		return;
+	}
 
+	const FScopedTransaction Transaction(LOCTEXT("AddBillboardCloudsSourceMeshesTransaction", "Add Foliage Baker BillboardClouds Source Meshes"));
 	ToolSettings->Modify();
 	for (UStaticMesh* StaticMesh : SelectedStaticMeshes)
 	{
@@ -1810,7 +1798,7 @@ TSharedRef<SWidget> FFoliageBakerBillboardCloudsModule::CreateFeaturePanel()
 			.Padding(0.0f, 0.0f, 12.0f, 0.0f)
 			[
 				SNew(STextBlock)
-				.Text(LOCTEXT("UnifiedBakeRequirementsHint", "Queue at least one Static Mesh, then configure the shared bake settings below."))
+				.Text(LOCTEXT("UnifiedBakeRequirementsHint", "Configure the Parent Material Instance in Editor Preferences, enable an atlas output, and queue at least one Static Mesh."))
 				.AutoWrapText(true)
 			]
 			+ SHorizontalBox::Slot()
@@ -1831,99 +1819,6 @@ TSharedRef<SWidget> FFoliageBakerBillboardCloudsModule::CreateFeaturePanel()
 		];
 }
 
-TSharedRef<SDockTab> FFoliageBakerBillboardCloudsModule::SpawnBillboardCloudsToolTab(const FSpawnTabArgs& SpawnTabArgs)
-{
-	(void)SpawnTabArgs;
-	EnsureToolSettings();
-
-	FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
-	FDetailsViewArgs DetailsViewArgs;
-	DetailsViewArgs.bAllowSearch = true;
-	DetailsViewArgs.bHideSelectionTip = true;
-	DetailsViewArgs.bLockable = false;
-	DetailsViewArgs.bShowOptions = false;
-	DetailsViewArgs.bShowPropertyMatrixButton = false;
-	DetailsViewArgs.bUpdatesFromSelection = false;
-	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
-	SettingsDetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
-	SettingsDetailsView->SetObject(ToolSettings.Get());
-
-	return SNew(SDockTab)
-		.TabRole(ETabRole::NomadTab)
-		[
-			SNew(SVerticalBox)
-
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(8.0f, 8.0f, 8.0f, 4.0f)
-			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(8.0f)
-				[
-					SNew(SHorizontalBox)
-
-					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-					.VAlign(VAlign_Center)
-					[
-						SNew(STextBlock)
-						.Text_Raw(this, &FFoliageBakerBillboardCloudsModule::GetSourceMeshCountText)
-					]
-
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(4.0f, 0.0f)
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("AddSelectedMeshesButton", "Add Content Browser Selection"))
-						.ToolTipText(LOCTEXT("AddSelectedMeshesTooltip", "Add selected Static Mesh assets without removing meshes already queued."))
-						.OnClicked_Raw(this, &FFoliageBakerBillboardCloudsModule::HandleAddSelectedMeshes)
-					]
-
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("ClearMeshesButton", "Clear"))
-						.ToolTipText(LOCTEXT("ClearMeshesTooltip", "Remove all queued Static Mesh assets."))
-						.OnClicked_Raw(this, &FFoliageBakerBillboardCloudsModule::HandleClearMeshes)
-					]
-				]
-			]
-
-			+ SVerticalBox::Slot()
-			.FillHeight(1.0f)
-			.Padding(8.0f, 4.0f)
-			[
-				SettingsDetailsView.ToSharedRef()
-			]
-
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				SNew(SSeparator)
-			]
-
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(8.0f)
-			.HAlign(HAlign_Right)
-			[
-				SNew(SBox)
-				.MinDesiredWidth(120.0f)
-				[
-					SNew(SButton)
-					.HAlign(HAlign_Center)
-					.Text(LOCTEXT("BakeBillboardCloudsButton", "Bake"))
-					.ToolTipText(LOCTEXT("BakeBillboardCloudsTooltip", "Bake Billboard Clouds assets for every queued Static Mesh."))
-					.IsEnabled_Raw(this, &FFoliageBakerBillboardCloudsModule::CanBake)
-					.OnClicked_Raw(this, &FFoliageBakerBillboardCloudsModule::HandleBake)
-				]
-			]
-		];
-}
-
 FReply FFoliageBakerBillboardCloudsModule::HandleAddSelectedMeshes()
 {
 	AddContentBrowserSelectionToTool();
@@ -1933,6 +1828,12 @@ FReply FFoliageBakerBillboardCloudsModule::HandleAddSelectedMeshes()
 FReply FFoliageBakerBillboardCloudsModule::HandleClearMeshes()
 {
 	EnsureToolSettings();
+	if (ToolSettings->SourceStaticMeshes.IsEmpty())
+	{
+		return FReply::Handled();
+	}
+
+	const FScopedTransaction Transaction(LOCTEXT("ClearBillboardCloudsSourceMeshesTransaction", "Clear Foliage Baker BillboardClouds Source Meshes"));
 	ToolSettings->Modify();
 	ToolSettings->SourceStaticMeshes.Reset();
 	ToolSettings->PostEditChange();
@@ -1945,7 +1846,12 @@ FReply FFoliageBakerBillboardCloudsModule::HandleClearMeshes()
 
 bool FFoliageBakerBillboardCloudsModule::CanBake() const
 {
-	if (!ToolSettings.IsValid())
+	const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
+		GetDefault<UFoliageBakerBillboardCloudsSettings>();
+	if (!ToolSettings.IsValid()
+		|| !EditorPreferences
+		|| EditorPreferences->BillboardMaterialTemplate.IsNull()
+		|| !BuildAtlasOutputSelection(*ToolSettings).HasAnyOutput())
 	{
 		return false;
 	}
@@ -1971,6 +1877,24 @@ FText FFoliageBakerBillboardCloudsModule::GetSourceMeshCountText() const
 FReply FFoliageBakerBillboardCloudsModule::HandleBake()
 {
 	EnsureToolSettings();
+	const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
+		GetDefault<UFoliageBakerBillboardCloudsSettings>();
+	if (!EditorPreferences
+		|| EditorPreferences->BillboardMaterialTemplate.IsNull()
+		|| !EditorPreferences->BillboardMaterialTemplate.LoadSynchronous())
+	{
+		FMessageDialog::Open(
+			EAppMsgType::Ok,
+			LOCTEXT("MissingBillboardCloudsParentMaterial", "Configure the Billboard Clouds Parent Material Instance in Editor Preferences before baking."));
+		return FReply::Handled();
+	}
+	if (!BuildAtlasOutputSelection(*ToolSettings).HasAnyOutput())
+	{
+		FMessageDialog::Open(
+			EAppMsgType::Ok,
+			LOCTEXT("NoBillboardCloudsAtlasOutputs", "Enable at least one Billboard Clouds atlas output before baking."));
+		return FReply::Handled();
+	}
 	TArray<UStaticMesh*> StaticMeshes;
 	for (UStaticMesh* StaticMesh : ToolSettings->SourceStaticMeshes)
 	{
@@ -1988,13 +1912,6 @@ FReply FFoliageBakerBillboardCloudsModule::HandleBake()
 
 	RunCreatePlaneProxyMeshes(StaticMeshes, *ToolSettings);
 	return FReply::Handled();
-}
-
-void FFoliageBakerBillboardCloudsModule::ExecuteCreatePlaneProxyMeshes(const FToolMenuContext& MenuContext)
-{
-	(void)MenuContext;
-	AddContentBrowserSelectionToTool();
-	FGlobalTabmanager::Get()->TryInvokeTab(BillboardCloudsToolTabName);
 }
 
 #undef LOCTEXT_NAMESPACE

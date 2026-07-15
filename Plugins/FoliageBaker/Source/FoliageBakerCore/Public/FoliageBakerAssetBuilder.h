@@ -96,7 +96,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	FName BaseColorOpacityTextureParameterName = NAME_None;
 	FName NormalDepthTextureParameterName = NAME_None;
 	FName MixTextureParameterName = NAME_None;
-	FString MissingTemplateError = TEXT("A Material Instance Constant template is required.");
+	FString MissingTemplateError = TEXT("A parent Material Instance Constant must be configured in Editor Preferences.");
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerStaticMeshAssetParams

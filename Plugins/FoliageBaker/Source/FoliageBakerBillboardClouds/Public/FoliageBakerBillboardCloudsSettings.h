@@ -31,13 +31,12 @@ enum class EBillboardCloudsTrunkCardAtlasScale : uint8
 	TwoX UMETA(DisplayName = "2.0x")
 };
 
-UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard Clouds"))
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard Clouds"))
 class FOLIAGEBAKERBILLBOARDCLOUDS_API UFoliageBakerBillboardCloudsSettings : public UObject
 {
 	GENERATED_BODY()
 
 public:
-	UFoliageBakerBillboardCloudsSettings();
 
 	UPROPERTY(EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets processed from the selected Source LOD when Bake is clicked. Add assets here directly or use Add Content Browser Selection in the BillboardClouds panel."))
 	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
@@ -123,7 +122,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Optional suffix added after the source Static Mesh name for the generated material instance."))
 	FString MaterialInstanceNameSuffix;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ToolTip = "Template material instance copied for every generated proxy. Enabled atlas outputs are assigned to the configured texture parameter names."))
+	UPROPERTY(config, EditDefaultsOnly, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Configured only in Editor Preferences. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
 	TSoftObjectPtr<UMaterialInstanceConstant> BillboardMaterialTemplate;
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter", ToolTip = "Texture parameter receiving the generated BaseColor/SDF atlas when that output is enabled."))

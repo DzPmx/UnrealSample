@@ -15,6 +15,7 @@
 #include "Misc/MessageDialog.h"
 #include "Misc/ScopedSlowTask.h"
 #include "PropertyEditorModule.h"
+#include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
@@ -177,7 +178,7 @@ TSharedRef<SWidget> FFoliageBakerImpostorModule::CreateFeaturePanel()
 			.Padding(0.0f, 0.0f, 12.0f, 0.0f)
 			[
 				SNew(STextBlock)
-				.Text(LOCTEXT("BakeRequirementsHint", "Select a Material Instance Constant template and queue at least one Static Mesh."))
+				.Text(LOCTEXT("BakeRequirementsHint", "Configure the Parent Material Instance in Editor Preferences and queue at least one Static Mesh."))
 				.AutoWrapText(true)
 			]
 			+ SHorizontalBox::Slot()
@@ -200,10 +201,23 @@ TSharedRef<SWidget> FFoliageBakerImpostorModule::CreateFeaturePanel()
 void FFoliageBakerImpostorModule::AddContentBrowserSelectionToTool()
 {
 	EnsureToolSettings();
-	for (UStaticMesh* StaticMesh : GetSelectedStaticMeshes())
+	const TArray<UStaticMesh*> SelectedStaticMeshes = GetSelectedStaticMeshes();
+	const bool bHasNewStaticMesh = SelectedStaticMeshes.ContainsByPredicate([this](const UStaticMesh* StaticMesh)
+	{
+		return !ToolSettings->SourceStaticMeshes.Contains(StaticMesh);
+	});
+	if (!bHasNewStaticMesh)
+	{
+		return;
+	}
+
+	const FScopedTransaction Transaction(LOCTEXT("AddImpostorSourceMeshesTransaction", "Add Foliage Baker Impostor Source Meshes"));
+	ToolSettings->Modify();
+	for (UStaticMesh* StaticMesh : SelectedStaticMeshes)
 	{
 		ToolSettings->SourceStaticMeshes.AddUnique(StaticMesh);
 	}
+	ToolSettings->PostEditChange();
 	if (DetailsView.IsValid())
 	{
 		DetailsView->ForceRefresh();
@@ -219,7 +233,15 @@ FReply FFoliageBakerImpostorModule::HandleAddSelectedMeshes()
 FReply FFoliageBakerImpostorModule::HandleClearMeshes()
 {
 	EnsureToolSettings();
+	if (ToolSettings->SourceStaticMeshes.IsEmpty())
+	{
+		return FReply::Handled();
+	}
+
+	const FScopedTransaction Transaction(LOCTEXT("ClearImpostorSourceMeshesTransaction", "Clear Foliage Baker Impostor Source Meshes"));
+	ToolSettings->Modify();
 	ToolSettings->SourceStaticMeshes.Reset();
+	ToolSettings->PostEditChange();
 	if (DetailsView.IsValid())
 	{
 		DetailsView->ForceRefresh();
@@ -229,8 +251,11 @@ FReply FFoliageBakerImpostorModule::HandleClearMeshes()
 
 bool FFoliageBakerImpostorModule::CanBake() const
 {
+	const UFoliageBakerImpostorSettings* EditorPreferences = GetDefault<UFoliageBakerImpostorSettings>();
 	return ToolSettings.IsValid()
-		&& !ToolSettings->MaterialInstanceTemplate.IsNull()
+		&& EditorPreferences
+		&& !EditorPreferences->MaterialInstanceTemplate.IsNull()
+		&& (ToolSettings->bBakeBaseColorSdf || ToolSettings->bBakeNormalDepth || ToolSettings->bBakeMix)
 		&& ToolSettings->SourceStaticMeshes.ContainsByPredicate([](const TObjectPtr<UStaticMesh>& StaticMesh)
 		{
 			return StaticMesh != nullptr;
@@ -253,10 +278,13 @@ FText FFoliageBakerImpostorModule::GetSourceMeshCountText() const
 FReply FFoliageBakerImpostorModule::HandleBake()
 {
 	EnsureToolSettings();
-	UMaterialInstanceConstant* MaterialTemplate = ToolSettings->MaterialInstanceTemplate.LoadSynchronous();
+	const UFoliageBakerImpostorSettings* EditorPreferences = GetDefault<UFoliageBakerImpostorSettings>();
+	UMaterialInstanceConstant* MaterialTemplate = EditorPreferences
+		? EditorPreferences->MaterialInstanceTemplate.LoadSynchronous()
+		: nullptr;
 	if (!MaterialTemplate)
 	{
-		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("MissingTemplate", "Select a Material Instance Constant template before baking."));
+		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("MissingTemplate", "Configure the Parent Material Instance in Editor Preferences before baking."));
 		return FReply::Handled();
 	}
 

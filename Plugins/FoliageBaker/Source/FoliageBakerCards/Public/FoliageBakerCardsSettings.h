@@ -24,7 +24,7 @@ enum class EFoliageBakerSingleCaptureAxis : uint8
 	NegativeY UMETA(DisplayName = "-Y")
 };
 
-UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard & Cross Cards"))
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard & Cross Cards"))
 class FOLIAGEBAKERCARDS_API UFoliageBakerCardsSettings : public UObject
 {
 	GENERATED_BODY()
@@ -99,7 +99,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MaterialInstanceNameSuffix;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ToolTip = "Material Instance Constant template duplicated for every generated proxy. The baker assigns the generated textures to the configured texture parameter names without creating or editing a material graph."))
+	UPROPERTY(config, EditDefaultsOnly, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Configured only in Editor Preferences. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
 	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and the whole-vegetation Union SDF in A."))
@@ -112,7 +112,7 @@ public:
 	FName MixTextureParameterName = TEXT("Mix");
 };
 
-UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Single Billboard"))
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Single Billboard"))
 class FOLIAGEBAKERCARDS_API UFoliageBakerSingleBillboardSettings final : public UFoliageBakerCardsSettings
 {
 	GENERATED_BODY()
@@ -121,7 +121,7 @@ public:
 	UFoliageBakerSingleBillboardSettings();
 };
 
-UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Cross Cards"))
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Cross Cards"))
 class FOLIAGEBAKERCARDS_API UFoliageBakerCrossCardsSettings final : public UFoliageBakerCardsSettings
 {
 	GENERATED_BODY()

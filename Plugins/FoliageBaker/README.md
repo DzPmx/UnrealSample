@@ -47,8 +47,8 @@ float Coverage = smoothstep(AlphaThreshold - EdgeWidth, AlphaThreshold + EdgeWid
 - RGB 保存 object/local-space Normal。
 - Single Billboard 和 Cross Cards 的 A 通道保存可见源材质分类：背景为 `0`、树干为 `0.5`、树叶为 `1`。
 - 树干分类使用材质实例名称或父材质名称关键字，默认关键字为 `Trunk`。
-- Impostor 的 A 通道保存与 UE ImpostorBaker 一致的共享范围线性深度：最近点为 `0`、最远点为 `1`、未覆盖像素为 `0.5`。
-- BillboardClouds 的 A 通道继续保存所有视角共享范围的线性深度：全局最近点为 `0`、全局最远点为 `1`、未覆盖像素为 `1`。
+- Impostor 的 A 通道保存与 UE ImpostorBaker 一致的共享范围线性深度：最近点为 `1`、最远点为 `0`、未覆盖像素为 `0.5`。
+- BillboardClouds 的 A 通道保存所有视角共享范围的线性深度：全局最近点为 `1`、全局最远点为 `0`、未覆盖像素为 `1`。
 
 Single Billboard 和 Cross Cards 的分类 Mask：
 
@@ -78,14 +78,9 @@ Mix 输出为可选项，RGBA 分别保存：
 
 ## 材质模板
 
-插件只接受 Material Instance Constant 模板，不创建或修改材质图。烘焙完成后会复制模板，并把已启用的纹理写入用户指定的纹理参数名称。
+插件不提供硬编码的材质模板默认值。四种功能的 `Parent Material Instance` 必须分别在 `Editor Preferences > Plugins` 的 Foliage Baker 设置中配置。
 
-内置默认模板：
-
-- Single Billboard：`/FoliageBaker/Materials/MR_Foliage_Billboard`
-- Cross Cards：`/FoliageBaker/Materials/MR_Foliage_Cross`
-- Impostor：`/FoliageBaker/Materials/MR_Foliage_Impostor`
-- BillboardClouds：`/FoliageBaker/Materials/MR_Foliage_BillboardClouds`
+插件不创建或修改材质图。烘焙完成后会新建一个 Material Instance Constant，以 Editor Preferences 中选择的 MI 作为 Parent，并只在生成的子实例上写入烘焙纹理和必要的运行时参数。重新烘焙会复用生成资产，但会先清除旧的本地纹理、数值、Static Switch 和 Base Property Override，避免残留模板副本数据。
 
 默认纹理参数名称：
 
@@ -156,7 +151,7 @@ Normal A 的深度沿相机到模型的拍摄射线映射，使用 `lerp(-Shared
 2. 选择 `Single Billboard`、`Cross Cards`、`Impostor` 或 `BillboardClouds` 标签。
 3. 在 Content Browser 中选择一个或多个 Static Mesh，然后点击 `Add Content Browser Selection`，也可以直接在 Mesh 列表中指定资产。
 4. 设置 Source LOD、网格输出方式和功能参数。
-5. 选择 Material Instance Constant 模板并确认纹理参数名称。
+5. 在 Editor Preferences 中为当前功能配置 Parent Material Instance，并在工具中确认纹理参数名称。
 6. 点击当前功能的 Bake 按钮。
 
 ## 模块结构

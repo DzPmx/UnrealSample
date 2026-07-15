@@ -1090,7 +1090,7 @@ namespace
 		UMaterialInstanceConstant* TemplateMaterialInstance = EditorSettings.MaterialTemplate;
 		if (!TemplateMaterialInstance)
 		{
-			OutError = TEXT("A Material Instance Constant template is required.");
+			OutError = TEXT("A parent Material Instance Constant must be configured in Editor Preferences.");
 			return false;
 		}
 
@@ -1363,7 +1363,7 @@ namespace
 			*Request.MixTextureParameterName.ToString());
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  base/color SDF atlas: %s, RGB=BaseColor, A=whole-vegetation Union SDF (outside 0, contour 0.5, inside 1), SDF range=%d px\n  normal/trunk-leaf atlas: %s, RGB=object/local-space normal, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; Single Billboard uses one baked side\n  material instance: %s (copied from the supplied MIC template; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  base/color SDF atlas: %s, RGB=BaseColor, A=whole-vegetation Union SDF (outside 0, contour 0.5, inside 1), SDF range=%d px\n  normal/trunk-leaf atlas: %s, RGB=object/local-space normal, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; Single Billboard uses one baked side\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
@@ -1497,7 +1497,7 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 	}
 	if (!Request.MaterialTemplate)
 	{
-		OutResult.Report = FString::Printf(TEXT("%s\n  failed: a Material Instance Constant template is required."), *Request.SourceStaticMesh->GetName());
+		OutResult.Report = FString::Printf(TEXT("%s\n  failed: a parent Material Instance Constant must be configured in Editor Preferences."), *Request.SourceStaticMesh->GetName());
 		return OutResult;
 	}
 	if (!Request.bBakeBaseColorOpacity && !Request.bBakeNormalDepth && !Request.bBakeMix)

@@ -79,7 +79,7 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 		PluginsSettingsCategoryName,
 		SingleBillboardSettingsSectionName,
 		LOCTEXT("SingleBillboardSettingsName", "Foliage Baker - Single Billboard"),
-		LOCTEXT("SingleBillboardSettingsDescription", "Configure the default settings used by the Foliage Baker Single Billboard tool."),
+		LOCTEXT("SingleBillboardSettingsDescription", "Configure Single Billboard preferences, including its required Parent Material Instance."),
 		GetMutableDefault<UFoliageBakerSingleBillboardSettings>());
 
 	SettingsModule.RegisterSettings(
@@ -87,7 +87,7 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 		PluginsSettingsCategoryName,
 		CrossCardsSettingsSectionName,
 		LOCTEXT("CrossCardsSettingsName", "Foliage Baker - Cross Cards"),
-		LOCTEXT("CrossCardsSettingsDescription", "Configure the default settings used by the Foliage Baker Cross Cards tool."),
+		LOCTEXT("CrossCardsSettingsDescription", "Configure Cross Cards preferences, including its required Parent Material Instance."),
 		GetMutableDefault<UFoliageBakerCrossCardsSettings>());
 
 	SettingsModule.RegisterSettings(
@@ -95,7 +95,7 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 		PluginsSettingsCategoryName,
 		ImpostorSettingsSectionName,
 		LOCTEXT("ImpostorSettingsName", "Foliage Baker - Impostor"),
-		LOCTEXT("ImpostorSettingsDescription", "Configure the default settings used by the Foliage Baker Impostor tool."),
+		LOCTEXT("ImpostorSettingsDescription", "Configure Impostor preferences, including its required Parent Material Instance."),
 		GetMutableDefault<UFoliageBakerImpostorSettings>());
 
 	SettingsModule.RegisterSettings(
@@ -103,7 +103,7 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 		PluginsSettingsCategoryName,
 		BillboardCloudsSettingsSectionName,
 		LOCTEXT("BillboardCloudsSettingsName", "Foliage Baker - Billboard Clouds"),
-		LOCTEXT("BillboardCloudsSettingsDescription", "Configure the default settings used by the Foliage Baker Billboard Clouds tool."),
+		LOCTEXT("BillboardCloudsSettingsDescription", "Configure Billboard Clouds preferences, including its required Parent Material Instance."),
 		GetMutableDefault<UFoliageBakerBillboardCloudsSettings>());
 }
 

@@ -79,5 +79,5 @@ void MainPS(
 	ApplyPixelDepthOffsetToMaterialParameters(MaterialParameters, PixelMaterialInputs, OutDepth);
 #endif
 	GetMaterialCoverageAndClipping(MaterialParameters, PixelMaterialInputs);
-	OutColor = float4(GetMaterialEmissive(PixelMaterialInputs), saturate(1.0 - SvPosition.z));
+	OutColor = float4(GetMaterialEmissive(PixelMaterialInputs), saturate(SvPosition.z));
 }

@@ -74,6 +74,41 @@ namespace
 		}
 	}
 
+	void ResetMaterialInstanceOverridesToDefaults(UMaterialInstanceConstant& MaterialInstance)
+	{
+		const UMaterialInstanceConstant* Defaults = GetDefault<UMaterialInstanceConstant>();
+		MaterialInstance.PhysMaterial = Defaults->PhysMaterial;
+		MaterialInstance.PhysMaterialMask = Defaults->PhysMaterialMask;
+		for (int32 MaterialIndex = 0; MaterialIndex < EPhysicalMaterialMaskColor::MAX; ++MaterialIndex)
+		{
+			MaterialInstance.PhysicalMaterialMap[MaterialIndex] = Defaults->PhysicalMaterialMap[MaterialIndex];
+		}
+
+		MaterialInstance.NaniteOverrideMaterial = Defaults->NaniteOverrideMaterial;
+		MaterialInstance.SubsurfaceProfile = Defaults->SubsurfaceProfile;
+		MaterialInstance.SubsurfaceProfiles = Defaults->SubsurfaceProfiles;
+		MaterialInstance.SpecularProfiles = Defaults->SpecularProfiles;
+		MaterialInstance.SpecularProfileOverride = Defaults->SpecularProfileOverride;
+		MaterialInstance.NeuralProfile = Defaults->NeuralProfile;
+		MaterialInstance.bOverrideSubsurfaceProfile = Defaults->bOverrideSubsurfaceProfile;
+		MaterialInstance.bOverrideSpecularProfile = Defaults->bOverrideSpecularProfile;
+
+		MaterialInstance.bOverrideBlendableLocation = Defaults->bOverrideBlendableLocation;
+		MaterialInstance.bOverrideBlendablePriority = Defaults->bOverrideBlendablePriority;
+		MaterialInstance.BlendableLocationOverride = Defaults->BlendableLocationOverride;
+		MaterialInstance.BlendablePriorityOverride = Defaults->BlendablePriorityOverride;
+		MaterialInstance.UserSceneTextureOverrides = Defaults->UserSceneTextureOverrides;
+
+		MaterialInstance.SetOverrideCastShadowAsMasked(Defaults->GetOverrideCastShadowAsMasked());
+		MaterialInstance.SetCastShadowAsMasked(Defaults->GetCastShadowAsMasked());
+		MaterialInstance.SetOverrideEmissiveBoost(Defaults->GetOverrideEmissiveBoost());
+		MaterialInstance.SetEmissiveBoost(Defaults->GetEmissiveBoost());
+		MaterialInstance.SetOverrideDiffuseBoost(Defaults->GetOverrideDiffuseBoost());
+		MaterialInstance.SetDiffuseBoost(Defaults->GetDiffuseBoost());
+		MaterialInstance.SetOverrideExportResolutionScale(Defaults->GetOverrideExportResolutionScale());
+		MaterialInstance.SetExportResolutionScale(Defaults->GetExportResolutionScale());
+	}
+
 	int32 EnsureProxyMaterialSlot(UStaticMesh& StaticMesh, UMaterialInterface* ProxyMaterial, const FName MaterialSlotName)
 	{
 		UMaterialInterface* Material = ProxyMaterial ? ProxyMaterial : UMaterial::GetDefaultMaterial(MD_Surface);
@@ -959,6 +994,13 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 			return nullptr;
 		}
 	}
+	if (MaterialInstance == TemplateMaterialInstance)
+	{
+		OutError = FString::Printf(
+			TEXT("Cannot use %s as both the generated material instance and its parent."),
+			*ObjectPath);
+		return nullptr;
+	}
 
 	UPackage* Package = MaterialInstance ? MaterialInstance->GetOutermost() : CreatePackage(*PackageName);
 	if (!Package)
@@ -971,10 +1013,13 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 	const bool bReplacingExistingMaterialInstance = MaterialInstance != nullptr;
 	if (!MaterialInstance)
 	{
-		MaterialInstance = DuplicateObject<UMaterialInstanceConstant>(TemplateMaterialInstance, Package, *AssetName);
+		MaterialInstance = NewObject<UMaterialInstanceConstant>(
+			Package,
+			*AssetName,
+			RF_Public | RF_Standalone | RF_Transactional);
 		if (!MaterialInstance)
 		{
-			OutError = FString::Printf(TEXT("Could not duplicate material instance %s."), *TemplateMaterialInstance->GetPathName());
+			OutError = FString::Printf(TEXT("Could not create Material Instance Constant %s."), *ObjectPath);
 			return nullptr;
 		}
 		AssetTransaction.Track(MaterialInstance);
@@ -987,13 +1032,17 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		}
 		MaterialInstance->Modify();
 	}
-
 	MaterialInstance->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
 	MaterialInstance->ClearFlags(RF_Transient);
 	MaterialInstance->PreEditChange(nullptr);
+	MaterialInstance->SetParentEditorOnly(TemplateMaterialInstance, false);
 	if (bReplacingExistingMaterialInstance)
 	{
-		UEngine::CopyPropertiesForUnrelatedObjects(TemplateMaterialInstance, MaterialInstance);
+		FMaterialInstanceParameterUpdateContext ResetContext(
+			MaterialInstance,
+			EMaterialInstanceClearParameterFlag::All);
+		ResetContext.SetBasePropertyOverrides(FMaterialInstanceBasePropertyOverrides());
+		ResetMaterialInstanceOverridesToDefaults(*MaterialInstance);
 	}
 	if (BaseColorOpacityTexture)
 	{

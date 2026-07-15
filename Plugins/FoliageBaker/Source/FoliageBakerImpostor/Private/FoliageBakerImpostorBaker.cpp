@@ -327,6 +327,7 @@ namespace
 			DepthCorrectRequest.bBakeBaseColor = Settings.bBakeBaseColorSdf;
 			DepthCorrectRequest.bBakeObjectSpaceNormal = Settings.bBakeNormalDepth;
 			DepthCorrectRequest.bBakePackedMix = Settings.bBakeMix;
+			DepthCorrectRequest.bReverseTwoSidedNormalFacing = true;
 			DepthCorrectRequest.Materials.Reserve(ReferencedMaterialIndices.Num());
 
 			for (const int32 MaterialIndex : ReferencedMaterialIndices)
@@ -523,7 +524,7 @@ namespace
 					if (Settings.bBakeNormalDepth)
 					{
 						const float LinearDepth = FMath::Clamp(
-							static_cast<float>((CaptureDepth + SharedCaptureHalfExtent)
+							static_cast<float>((SharedCaptureHalfExtent - CaptureDepth)
 								/ (2.0 * SharedCaptureHalfExtent)),
 							0.0f,
 							1.0f);
@@ -892,7 +893,7 @@ namespace
 		};
 		const FVector FaceNormal = FVector::UpVector;
 		const FVector FaceTangent = FVector::ForwardVector;
-		const FVector FaceBinormal = FVector::CrossProduct(FaceNormal, FaceTangent).GetSafeNormal();
+		const FVector FaceBinormal = FVector::RightVector;
 		TArray<FVertexID> VertexIDs;
 		VertexIDs.Reserve(Outline.Num() + 1);
 		const FVertexID CenterVertexID = OutMeshDescription.CreateVertex();
@@ -901,16 +902,16 @@ namespace
 		for (const FVector2D& UV : Outline)
 		{
 			const FVertexID VertexID = OutMeshDescription.CreateVertex();
-			VertexPositions[VertexID] = FVector3f(Center + FVector(
-				((UV.X - 0.5) * 2.0 * HalfExtent) / 10.0,
-				((UV.Y - 0.5) * 2.0 * HalfExtent) / 10.0,
-				0.0));
+			const double LocalU = ((UV.X - 0.5) * 2.0 * HalfExtent) / 10.0;
+			const double LocalV = ((UV.Y - 0.5) * 2.0 * HalfExtent) / 10.0;
+			VertexPositions[VertexID] = FVector3f(
+				Center + FaceTangent * LocalU + FaceBinormal * LocalV);
 			VertexIDs.Add(VertexID);
 		}
 		for (int32 OutlineIndex = 0; OutlineIndex < Outline.Num(); ++OutlineIndex)
 		{
 			const int32 NextOutlineIndex = (OutlineIndex + 1) % Outline.Num();
-			const int32 CornerIndices[3] = { NextOutlineIndex + 1, OutlineIndex + 1, 0 };
+			const int32 CornerIndices[3] = { OutlineIndex + 1, NextOutlineIndex + 1, 0 };
 			TArray<FVertexInstanceID> VertexInstanceIDs;
 			VertexInstanceIDs.Reserve(3);
 			for (int32 CornerIndex = 0; CornerIndex < 3; ++CornerIndex)
@@ -1252,21 +1253,6 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	SetStaticSwitch(
 		Settings.UpperHemisphereStaticSwitchParameterName,
 		Settings.Coverage == EFoliageBakerImpostorCoverage::UpperHemisphere);
-	SetStaticSwitch(TEXT("UseAmbientOcclusionTexture"), Settings.bBakeMix);
-	SetStaticSwitch(TEXT("AmbientOcclusion_Channel_R"), true);
-	SetStaticSwitch(TEXT("AmbientOcclusion_Channel_G"), false);
-	SetStaticSwitch(TEXT("AmbientOcclusion_Channel_B"), false);
-	SetStaticSwitch(TEXT("AmbientOcclusion_Channel_A"), false);
-	SetStaticSwitch(TEXT("UseRoughnessTexture"), Settings.bBakeMix);
-	SetStaticSwitch(TEXT("Roughness_Channel_R"), false);
-	SetStaticSwitch(TEXT("Roughness_Channel_G"), true);
-	SetStaticSwitch(TEXT("Roughness_Channel_B"), false);
-	SetStaticSwitch(TEXT("Roughness_Channel_A"), false);
-	SetStaticSwitch(TEXT("UseMetallicTexture"), Settings.bBakeMix);
-	SetStaticSwitch(TEXT("Metallic_Channel_R"), false);
-	SetStaticSwitch(TEXT("Metallic_Channel_G"), false);
-	SetStaticSwitch(TEXT("Metallic_Channel_B"), true);
-	SetStaticSwitch(TEXT("Metallic_Channel_A"), false);
 	Result.MaterialInstance->PostEditChange();
 	Result.MaterialInstance->UpdateStaticPermutation();
 	Result.MaterialInstance->MarkPackageDirty();
@@ -1350,7 +1336,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	const double TexelAreaDensityGain = FMath::Square(
 		static_cast<double>(BakeData.SourceBounds.SphereRadius) / BakeData.SharedCaptureHalfExtent);
 	Result.Report = FString::Printf(
-		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask object/local RGB + UE ImpostorBaker Depth A (near 0, far 1, empty 0.5)%s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: UE ImpostorBaker-compatible XY cutout, center + 8 traced outline vertices, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
+		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask object/local RGB + UE ImpostorBaker Depth A (near 1, far 0, empty 0.5)%s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: UE ImpostorBaker-compatible XY cutout, center + 8 traced outline vertices, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
 		*SourceStaticMesh.GetName(),
 		Settings.SourceLODIndex,
 		Settings.Coverage == EFoliageBakerImpostorCoverage::FullSphere ? TEXT("full sphere") : TEXT("upper hemisphere"),

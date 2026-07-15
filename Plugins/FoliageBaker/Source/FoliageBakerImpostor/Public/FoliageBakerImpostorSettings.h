@@ -15,13 +15,12 @@ enum class EFoliageBakerImpostorCoverage : uint8
 	FullSphere UMETA(DisplayName = "Full Sphere")
 };
 
-UCLASS(config = EditorPerProjectUserSettings, defaultconfig, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Impostor"))
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Impostor"))
 class FOLIAGEBAKERIMPOSTOR_API UFoliageBakerImpostorSettings final : public UObject
 {
 	GENERATED_BODY()
 
 public:
-	UFoliageBakerImpostorSettings();
 
 	UPROPERTY(EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets baked from the selected Source LOD. Add assets directly or use Add Content Browser Selection."))
 	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
@@ -44,7 +43,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / SDF", ToolTip = "RGB stores BaseColor. A stores a whole-vegetation SDF: outside 0, contour 0.5, inside 1."))
 	bool bBakeBaseColorSdf = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Depth", ToolTip = "RGB stores object/local-space Normal. A stores UE ImpostorBaker-compatible shared-range linear depth: near 0, far 1, uncovered 0.5."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Depth", ToolTip = "RGB stores object/local-space Normal. A stores UE ImpostorBaker-compatible shared-range linear depth: near 1, far 0, uncovered 0.5."))
 	bool bBakeNormalDepth = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission."))
@@ -74,7 +73,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MaterialInstanceNameSuffix = TEXT("_Impostor");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ToolTip = "Material Instance Constant template duplicated for every generated proxy. The baker assigns textures and runtime metadata without creating or editing a material graph."))
+	UPROPERTY(config, EditDefaultsOnly, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Configured only in Editor Preferences. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
 	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter"))

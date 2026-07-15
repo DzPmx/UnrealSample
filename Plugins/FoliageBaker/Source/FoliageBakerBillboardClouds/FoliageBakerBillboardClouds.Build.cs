@@ -22,7 +22,6 @@ public class FoliageBakerBillboardClouds : ModuleRules
 				"Slate",
 				"SlateCore",
 				"UnrealEd",
-				"ToolMenus",
 				"AssetRegistry",
 				"ContentBrowser",
 				"PropertyEditor",

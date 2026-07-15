@@ -221,7 +221,8 @@ namespace
 
 	FGuid MakeMaskedOutputMaterialId(
 		const FGuid& SourceMaterialId,
-		const EFoliageBakerMaskedOutput Output)
+		const EFoliageBakerMaskedOutput Output,
+		const bool bReverseTwoSidedNormalFacing)
 	{
 		// Each direct proxy needs a stable plugin-specific material id. Its masked
 		// base-pass shader contains the source custom outputs and must not reuse an
@@ -240,7 +241,7 @@ namespace
 				SourceMaterialId.A ^ 0x46424E32u, // "FBN2"
 				SourceMaterialId.B ^ 0x4F424A45u, // "OBJE"
 				SourceMaterialId.C ^ 0x43544E4Fu, // "CTNO"
-				SourceMaterialId.D ^ 0x524D414Cu); // "RMAL"
+				SourceMaterialId.D ^ (bReverseTwoSidedNormalFacing ? 0x524D4932u : 0x524D414Cu));
 		}
 		if (Output == EFoliageBakerMaskedOutput::AmbientOcclusion)
 		{
@@ -291,7 +292,8 @@ namespace
 	public:
 		FFoliageBakerMaskedMaterialProxy(
 			UMaterialInterface& InMaterialInterface,
-			const EFoliageBakerMaskedOutput InOutput)
+			const EFoliageBakerMaskedOutput InOutput,
+			const bool bInReverseTwoSidedNormalFacing = false)
 			: FMaterial()
 			, FMaterialRenderProxy(GetPathNameSafe(InMaterialInterface.GetMaterial()))
 			, MaterialInterface(&InMaterialInterface)
@@ -300,6 +302,7 @@ namespace
 			, ReferencedTextureCollections(InMaterialInterface.GetReferencedTextureCollections())
 			, Output(InOutput)
 			, bUseSourceMaskedClip(InMaterialInterface.GetBlendMode() == BLEND_Masked)
+			, bReverseTwoSidedNormalFacing(bInReverseTwoSidedNormalFacing)
 		{
 			SetQualityLevelProperties(GMaxRHIShaderPlatform);
 			const FMaterialResource* Resource = InMaterialInterface.GetMaterialResource(GMaxRHIShaderPlatform);
@@ -308,7 +311,10 @@ namespace
 				return;
 			}
 
-			MaskedOutputMaterialId = MakeMaskedOutputMaterialId(Material->StateId, Output);
+			MaskedOutputMaterialId = MakeMaskedOutputMaterialId(
+				Material->StateId,
+				Output,
+				bReverseTwoSidedNormalFacing);
 			FMaterialShaderMapId ResourceId;
 			Resource->BuildShaderMapId(ResourceId, nullptr);
 
@@ -499,7 +505,12 @@ namespace
 				// here so the encoded local normal matches the source shaded surface.
 				if (Material && Material->bTangentSpaceNormal && MaterialInterface->IsTwoSided())
 				{
-					ObjectSpaceNormal = Compiler->Mul(ObjectSpaceNormal, Compiler->TwoSidedSign());
+					int32 TwoSidedSign = Compiler->TwoSidedSign();
+					if (bReverseTwoSidedNormalFacing)
+					{
+						TwoSidedSign = Compiler->Mul(TwoSidedSign, Compiler->Constant(-1.0f));
+					}
+					ObjectSpaceNormal = Compiler->Mul(ObjectSpaceNormal, TwoSidedSign);
 				}
 				ObjectSpaceNormal = Compiler->TransformVector(MCB_World, MCB_Local, ObjectSpaceNormal);
 				ObjectSpaceNormal = Compiler->Normalize(ObjectSpaceNormal);
@@ -667,6 +678,7 @@ namespace
 		FGuid MaskedOutputMaterialId;
 		EFoliageBakerMaskedOutput Output = EFoliageBakerMaskedOutput::SourceTriangleId;
 		bool bUseSourceMaskedClip = false;
+		bool bReverseTwoSidedNormalFacing = false;
 		bool bShaderCacheSucceeded = false;
 	};
 
@@ -1171,7 +1183,8 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 		{
 			Resource.ObjectSpaceNormalProxy = new FFoliageBakerMaskedMaterialProxy(
 				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::ObjectSpaceNormal);
+				EFoliageBakerMaskedOutput::ObjectSpaceNormal,
+				Request.bReverseTwoSidedNormalFacing);
 			if (!FinishProxy(*Resource.ObjectSpaceNormalProxy, TEXT("object-space-normal")))
 			{
 				FlushRenderingCommands();
