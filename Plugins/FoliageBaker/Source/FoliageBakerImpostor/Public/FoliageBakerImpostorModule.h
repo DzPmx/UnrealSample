@@ -3,8 +3,7 @@
 #include "Modules/ModuleManager.h"
 #include "UObject/StrongObjectPtr.h"
 
-class FReply;
-class IDetailsView;
+class FFoliageBakerFeatureController;
 class SWidget;
 class UFoliageBakerImpostorSettings;
 
@@ -17,13 +16,9 @@ public:
 
 private:
 	void EnsureToolSettings();
-	void AddContentBrowserSelectionToTool();
-	FReply HandleAddSelectedMeshes();
-	FReply HandleClearMeshes();
-	FReply HandleBake();
+	void Bake();
 	bool CanBake() const;
-	FText GetSourceMeshCountText() const;
 
 	TStrongObjectPtr<UFoliageBakerImpostorSettings> ToolSettings;
-	TSharedPtr<IDetailsView> DetailsView;
+	TSharedPtr<FFoliageBakerFeatureController> FeatureController;
 };

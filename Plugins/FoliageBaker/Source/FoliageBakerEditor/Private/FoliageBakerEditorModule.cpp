@@ -18,6 +18,7 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
 #include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerEditorModule"
@@ -26,16 +27,141 @@ namespace
 {
 	const FName FoliageBakerToolTabName(TEXT("FoliageBakerTools"));
 	constexpr int32 SingleBillboardFeatureIndex = 0;
-	constexpr int32 CrossCardsFeatureIndex = 1;
-	constexpr int32 ImpostorFeatureIndex = 2;
-	constexpr int32 BillboardCloudsFeatureIndex = 3;
-	constexpr int32 FeatureCount = 4;
 	const FName EditorSettingsContainerName(TEXT("Editor"));
 	const FName PluginsSettingsCategoryName(TEXT("Plugins"));
 	const FName SingleBillboardSettingsSectionName(TEXT("FoliageBakerSingleBillboard"));
 	const FName CrossCardsSettingsSectionName(TEXT("FoliageBakerCrossCards"));
 	const FName ImpostorSettingsSectionName(TEXT("FoliageBakerImpostor"));
 	const FName BillboardCloudsSettingsSectionName(TEXT("FoliageBakerBillboardClouds"));
+
+	enum class EFoliageBakerFeatureKind : uint8
+	{
+		SingleBillboard,
+		CrossCards,
+		Impostor,
+		BillboardClouds
+	};
+
+	struct FFoliageBakerFeatureDescriptor
+	{
+		EFoliageBakerFeatureKind Kind = EFoliageBakerFeatureKind::SingleBillboard;
+		FText TabLabel;
+		FText Title;
+		FText Description;
+		FText Metadata;
+	};
+
+	const TArray<FFoliageBakerFeatureDescriptor>& GetFeatureDescriptors()
+	{
+		static const TArray<FFoliageBakerFeatureDescriptor> Descriptors =
+		{
+			{
+				EFoliageBakerFeatureKind::SingleBillboard,
+				LOCTEXT("SingleBillboardTab", "Single Billboard"),
+				LOCTEXT("SingleBillboardFeatureTitle", "Single Billboard"),
+				LOCTEXT(
+					"SingleBillboardFeatureDescription",
+					"Bake one vertical billboard from a user-selected +X, -X, +Y, or -Y capture axis."),
+				LOCTEXT(
+					"SingleBillboardFeatureMetadata",
+					"Selectable source LOD  |  one plane  |  one baked side  |  1024 default")
+			},
+			{
+				EFoliageBakerFeatureKind::CrossCards,
+				LOCTEXT("CrossCardsTab", "Cross Cards"),
+				LOCTEXT("CrossCardsFeatureTitle", "Cross Cards"),
+				LOCTEXT(
+					"CrossCardsFeatureDescription",
+					"Bake 2-5 equally spaced vertical cards. Every angle is cropped independently and captures both front and back."),
+				LOCTEXT(
+					"CrossCardsFeatureMetadata",
+					"Selectable source LOD  |  2-5 planes  |  front + back  |  2048 default")
+			},
+			{
+				EFoliageBakerFeatureKind::Impostor,
+				LOCTEXT("ImpostorTab", "Impostor"),
+				LOCTEXT("ImpostorFeatureTitle", "Impostor"),
+				LOCTEXT(
+					"ImpostorFeatureDescription",
+					"Bake an octahedrally encoded upper-hemisphere or full-sphere view atlas and a camera-facing cutout proxy."),
+				LOCTEXT(
+					"ImpostorFeatureMetadata",
+					"Selectable source LOD  |  fixed N x N direction grid  |  shared projection and depth range")
+			},
+			{
+				EFoliageBakerFeatureKind::BillboardClouds,
+				LOCTEXT("BillboardCloudsTab", "BillboardClouds"),
+				LOCTEXT("BillboardCloudsFeatureTitle", "BillboardClouds"),
+				LOCTEXT(
+					"BillboardCloudsFeatureDescription",
+					"Generate an adaptive cloud of planes using the existing BillboardClouds workflow."),
+				LOCTEXT(
+					"BillboardCloudsFeatureMetadata",
+					"Selectable source LOD  |  adaptive plane cloud  |  existing output workflow")
+			}
+		};
+		return Descriptors;
+	}
+
+	const FFoliageBakerFeatureDescriptor& GetFeatureDescriptor(const int32 Index)
+	{
+		const TArray<FFoliageBakerFeatureDescriptor>& Descriptors = GetFeatureDescriptors();
+		return Descriptors[FMath::Clamp(Index, 0, Descriptors.Num() - 1)];
+	}
+
+	struct FFoliageBakerEditorPreferenceDescriptor
+	{
+		FName SectionName;
+		FText DisplayName;
+		FText Description;
+		UObject* (*GetSettingsObject)() = nullptr;
+	};
+
+	template <typename SettingsType>
+	UObject* GetMutableSettingsObject()
+	{
+		return GetMutableDefault<SettingsType>();
+	}
+
+	const TArray<FFoliageBakerEditorPreferenceDescriptor>& GetEditorPreferenceDescriptors()
+	{
+		static const TArray<FFoliageBakerEditorPreferenceDescriptor> Descriptors =
+		{
+			{
+				SingleBillboardSettingsSectionName,
+				LOCTEXT("SingleBillboardSettingsName", "Foliage Baker - Single Billboard"),
+				LOCTEXT(
+					"SingleBillboardSettingsDescription",
+					"Configure Single Billboard preferences, including its required Parent Material Instance."),
+				&GetMutableSettingsObject<UFoliageBakerSingleBillboardSettings>
+			},
+			{
+				CrossCardsSettingsSectionName,
+				LOCTEXT("CrossCardsSettingsName", "Foliage Baker - Cross Cards"),
+				LOCTEXT(
+					"CrossCardsSettingsDescription",
+					"Configure Cross Cards preferences, including its required Parent Material Instance."),
+				&GetMutableSettingsObject<UFoliageBakerCrossCardsSettings>
+			},
+			{
+				ImpostorSettingsSectionName,
+				LOCTEXT("ImpostorSettingsName", "Foliage Baker - Impostor"),
+				LOCTEXT(
+					"ImpostorSettingsDescription",
+					"Configure Impostor preferences, including its required Parent Material Instance."),
+				&GetMutableSettingsObject<UFoliageBakerImpostorSettings>
+			},
+			{
+				BillboardCloudsSettingsSectionName,
+				LOCTEXT("BillboardCloudsSettingsName", "Foliage Baker - Billboard Clouds"),
+				LOCTEXT(
+					"BillboardCloudsSettingsDescription",
+					"Configure Billboard Clouds preferences, including its required Parent Material Instance."),
+				&GetMutableSettingsObject<UFoliageBakerBillboardCloudsSettings>
+			}
+		};
+		return Descriptors;
+	}
 }
 
 void FFoliageBakerEditorModule::StartupModule()
@@ -73,48 +199,31 @@ void FFoliageBakerEditorModule::ShutdownModule()
 void FFoliageBakerEditorModule::RegisterEditorPreferences()
 {
 	ISettingsModule& SettingsModule = FModuleManager::LoadModuleChecked<ISettingsModule>(TEXT("Settings"));
-
-	SettingsModule.RegisterSettings(
-		EditorSettingsContainerName,
-		PluginsSettingsCategoryName,
-		SingleBillboardSettingsSectionName,
-		LOCTEXT("SingleBillboardSettingsName", "Foliage Baker - Single Billboard"),
-		LOCTEXT("SingleBillboardSettingsDescription", "Configure Single Billboard preferences, including its required Parent Material Instance."),
-		GetMutableDefault<UFoliageBakerSingleBillboardSettings>());
-
-	SettingsModule.RegisterSettings(
-		EditorSettingsContainerName,
-		PluginsSettingsCategoryName,
-		CrossCardsSettingsSectionName,
-		LOCTEXT("CrossCardsSettingsName", "Foliage Baker - Cross Cards"),
-		LOCTEXT("CrossCardsSettingsDescription", "Configure Cross Cards preferences, including its required Parent Material Instance."),
-		GetMutableDefault<UFoliageBakerCrossCardsSettings>());
-
-	SettingsModule.RegisterSettings(
-		EditorSettingsContainerName,
-		PluginsSettingsCategoryName,
-		ImpostorSettingsSectionName,
-		LOCTEXT("ImpostorSettingsName", "Foliage Baker - Impostor"),
-		LOCTEXT("ImpostorSettingsDescription", "Configure Impostor preferences, including its required Parent Material Instance."),
-		GetMutableDefault<UFoliageBakerImpostorSettings>());
-
-	SettingsModule.RegisterSettings(
-		EditorSettingsContainerName,
-		PluginsSettingsCategoryName,
-		BillboardCloudsSettingsSectionName,
-		LOCTEXT("BillboardCloudsSettingsName", "Foliage Baker - Billboard Clouds"),
-		LOCTEXT("BillboardCloudsSettingsDescription", "Configure Billboard Clouds preferences, including its required Parent Material Instance."),
-		GetMutableDefault<UFoliageBakerBillboardCloudsSettings>());
+	for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
+		GetEditorPreferenceDescriptors())
+	{
+		SettingsModule.RegisterSettings(
+			EditorSettingsContainerName,
+			PluginsSettingsCategoryName,
+			Descriptor.SectionName,
+			Descriptor.DisplayName,
+			Descriptor.Description,
+			TWeakObjectPtr<UObject>(Descriptor.GetSettingsObject()));
+	}
 }
 
 void FFoliageBakerEditorModule::UnregisterEditorPreferences()
 {
 	if (ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>(TEXT("Settings")))
 	{
-		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, SingleBillboardSettingsSectionName);
-		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, CrossCardsSettingsSectionName);
-		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, ImpostorSettingsSectionName);
-		SettingsModule->UnregisterSettings(EditorSettingsContainerName, PluginsSettingsCategoryName, BillboardCloudsSettingsSectionName);
+		for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
+			GetEditorPreferenceDescriptors())
+		{
+			SettingsModule->UnregisterSettings(
+				EditorSettingsContainerName,
+				PluginsSettingsCategoryName,
+				Descriptor.SectionName);
+		}
 	}
 }
 
@@ -154,20 +263,43 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 		.Value_Lambda([this]() { return GetActiveFeatureIndex(); })
 		.OnValueChanged_Lambda([this](const int32 NewFeatureIndex) { HandleFeatureChanged(NewFeatureIndex); })
 		.UniformPadding(FMargin(22.0f, 7.0f))
-		.MaxSegmentsPerLine(FeatureCount);
+		.MaxSegmentsPerLine(GetFeatureDescriptors().Num());
 
-	FeatureTabs->AddSlot(SingleBillboardFeatureIndex)
-		.HAlign(HAlign_Center)
-		.Text(LOCTEXT("SingleBillboardTab", "Single Billboard"));
-	FeatureTabs->AddSlot(CrossCardsFeatureIndex)
-		.HAlign(HAlign_Center)
-		.Text(LOCTEXT("CrossCardsTab", "Cross Cards"));
-	FeatureTabs->AddSlot(ImpostorFeatureIndex)
-		.HAlign(HAlign_Center)
-		.Text(LOCTEXT("ImpostorTab", "Impostor"));
-	FeatureTabs->AddSlot(BillboardCloudsFeatureIndex)
-		.HAlign(HAlign_Center)
-		.Text(LOCTEXT("BillboardCloudsTab", "BillboardClouds"));
+	for (int32 FeatureIndex = 0; FeatureIndex < GetFeatureDescriptors().Num(); ++FeatureIndex)
+	{
+		FeatureTabs->AddSlot(FeatureIndex)
+			.HAlign(HAlign_Center)
+			.Text(GetFeatureDescriptors()[FeatureIndex].TabLabel);
+	}
+
+	SAssignNew(FeatureSwitcher, SWidgetSwitcher);
+	for (const FFoliageBakerFeatureDescriptor& Descriptor : GetFeatureDescriptors())
+	{
+		TSharedRef<SWidget> FeaturePanel =
+			[&CardsModule, &ImpostorModule, &BillboardCloudsModule, &Descriptor]()
+			{
+				switch (Descriptor.Kind)
+				{
+				case EFoliageBakerFeatureKind::SingleBillboard:
+					return CardsModule.CreateFeaturePanel(
+						EFoliageBakerCardMode::SingleBillboard);
+				case EFoliageBakerFeatureKind::CrossCards:
+					return CardsModule.CreateFeaturePanel(
+						EFoliageBakerCardMode::CrossCards);
+				case EFoliageBakerFeatureKind::Impostor:
+					return ImpostorModule.CreateFeaturePanel();
+				case EFoliageBakerFeatureKind::BillboardClouds:
+					return BillboardCloudsModule.CreateFeaturePanel();
+				default:
+					checkNoEntry();
+					return SNullWidget::NullWidget;
+				}
+			}();
+		FeatureSwitcher->AddSlot()
+		[
+			FeaturePanel
+		];
+	}
 
 	TSharedRef<SDockTab> ToolTab = SNew(SDockTab)
 		.TabRole(ETabRole::NomadTab)
@@ -270,23 +402,7 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				.Padding(1.0f)
 				[
-					SAssignNew(FeatureSwitcher, SWidgetSwitcher)
-					+ SWidgetSwitcher::Slot()
-					[
-						CardsModule.CreateFeaturePanel(EFoliageBakerCardMode::SingleBillboard)
-					]
-					+ SWidgetSwitcher::Slot()
-					[
-						CardsModule.CreateFeaturePanel(EFoliageBakerCardMode::CrossCards)
-					]
-					+ SWidgetSwitcher::Slot()
-					[
-						ImpostorModule.CreateFeaturePanel()
-					]
-					+ SWidgetSwitcher::Slot()
-					[
-						BillboardCloudsModule.CreateFeaturePanel()
-					]
+					FeatureSwitcher.ToSharedRef()
 				]
 			]
 		];
@@ -297,50 +413,17 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 
 FText FFoliageBakerEditorModule::GetActiveFeatureTitle() const
 {
-	switch (ActiveFeatureIndex)
-	{
-	case CrossCardsFeatureIndex:
-		return LOCTEXT("CrossCardsFeatureTitle", "Cross Cards");
-	case ImpostorFeatureIndex:
-		return LOCTEXT("ImpostorFeatureTitle", "Impostor");
-	case BillboardCloudsFeatureIndex:
-		return LOCTEXT("BillboardCloudsFeatureTitle", "BillboardClouds");
-	case SingleBillboardFeatureIndex:
-	default:
-		return LOCTEXT("SingleBillboardFeatureTitle", "Single Billboard");
-	}
+	return GetFeatureDescriptor(ActiveFeatureIndex).Title;
 }
 
 FText FFoliageBakerEditorModule::GetActiveFeatureDescription() const
 {
-	switch (ActiveFeatureIndex)
-	{
-	case CrossCardsFeatureIndex:
-		return LOCTEXT("CrossCardsFeatureDescription", "Bake 2-5 equally spaced vertical cards. Every angle is cropped independently and captures both front and back.");
-	case ImpostorFeatureIndex:
-		return LOCTEXT("ImpostorFeatureDescription", "Bake an octahedrally encoded upper-hemisphere or full-sphere view atlas and a camera-facing cutout proxy.");
-	case BillboardCloudsFeatureIndex:
-		return LOCTEXT("BillboardCloudsFeatureDescription", "Generate an adaptive cloud of planes using the existing BillboardClouds workflow.");
-	case SingleBillboardFeatureIndex:
-	default:
-		return LOCTEXT("SingleBillboardFeatureDescription", "Bake one vertical billboard from a user-selected +X, -X, +Y, or -Y capture axis.");
-	}
+	return GetFeatureDescriptor(ActiveFeatureIndex).Description;
 }
 
 FText FFoliageBakerEditorModule::GetActiveFeatureMetadata() const
 {
-	switch (ActiveFeatureIndex)
-	{
-	case CrossCardsFeatureIndex:
-		return LOCTEXT("CrossCardsFeatureMetadata", "Selectable source LOD  |  2-5 planes  |  front + back  |  2048 default");
-	case ImpostorFeatureIndex:
-		return LOCTEXT("ImpostorFeatureMetadata", "Selectable source LOD  |  fixed N x N direction grid  |  shared projection and depth range");
-	case BillboardCloudsFeatureIndex:
-		return LOCTEXT("BillboardCloudsFeatureMetadata", "Selectable source LOD  |  adaptive plane cloud  |  existing output workflow");
-	case SingleBillboardFeatureIndex:
-	default:
-		return LOCTEXT("SingleBillboardFeatureMetadata", "Selectable source LOD  |  one plane  |  one baked side  |  1024 default");
-	}
+	return GetFeatureDescriptor(ActiveFeatureIndex).Metadata;
 }
 
 int32 FFoliageBakerEditorModule::GetActiveFeatureIndex() const
@@ -350,7 +433,10 @@ int32 FFoliageBakerEditorModule::GetActiveFeatureIndex() const
 
 void FFoliageBakerEditorModule::HandleFeatureChanged(const int32 NewFeatureIndex)
 {
-	ActiveFeatureIndex = FMath::Clamp(NewFeatureIndex, 0, FeatureCount - 1);
+	ActiveFeatureIndex = FMath::Clamp(
+		NewFeatureIndex,
+		0,
+		GetFeatureDescriptors().Num() - 1);
 	if (FeatureSwitcher.IsValid())
 	{
 		FeatureSwitcher->SetActiveWidgetIndex(ActiveFeatureIndex);

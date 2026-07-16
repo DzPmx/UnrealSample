@@ -22,11 +22,17 @@
 			"LoadingPhase": "PostConfigInit"
 		},
 		{
+			"Name": "FoliageBakerEditorCommon",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "FoliageBakerCards",
 			"Type": "Editor",
 			"LoadingPhase": "Default",
 			"AdditionalDependencies": [
-				"FoliageBakerCore"
+				"FoliageBakerCore",
+				"FoliageBakerEditorCommon"
 			]
 		},
 		{
@@ -34,7 +40,8 @@
 			"Type": "Editor",
 			"LoadingPhase": "Default",
 			"AdditionalDependencies": [
-				"FoliageBakerCore"
+				"FoliageBakerCore",
+				"FoliageBakerEditorCommon"
 			]
 		},
 		{
@@ -42,7 +49,8 @@
 			"Type": "Editor",
 			"LoadingPhase": "Default",
 			"AdditionalDependencies": [
-				"FoliageBakerCore"
+				"FoliageBakerCore",
+				"FoliageBakerEditorCommon"
 			]
 		},
 		{
@@ -50,7 +58,6 @@
 			"Type": "Editor",
 			"LoadingPhase": "Default",
 			"AdditionalDependencies": [
-				"FoliageBakerCore",
 				"FoliageBakerCards",
 				"FoliageBakerImpostor",
 				"FoliageBakerBillboardClouds"

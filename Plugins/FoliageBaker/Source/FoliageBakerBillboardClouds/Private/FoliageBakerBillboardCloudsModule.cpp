@@ -1,44 +1,26 @@
 #include "FoliageBakerBillboardCloudsModule.h"
 
-#include "AssetRegistry/AssetData.h"
-#include "AssetSelection.h"
-#include "DetailCategoryBuilder.h"
-#include "DetailLayoutBuilder.h"
 #include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerBillboardCloudsSettings.h"
 #include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerAtlasTools.h"
+#include "FoliageBakerFeatureTool.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerKMeansPlaneCover.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedMaterialBake.h"
-#include "DetailsViewArgs.h"
-#include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
-#include "IDetailCustomization.h"
-#include "IDetailsView.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MaterialShared.h"
-#include "Misc/MessageDialog.h"
-#include "Misc/ScopedSlowTask.h"
 #include "MeshDescription.h"
 #include "MaterialBakingStructures.h"
 #include "Modules/ModuleManager.h"
-#include "PropertyEditorModule.h"
-#include "ScopedTransaction.h"
 #include "StaticMeshResources.h"
-#include "Styling/AppStyle.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SSeparator.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerBillboardCloudsModule"
 
@@ -47,23 +29,6 @@ DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerBillboardClouds, Log, All);
 namespace
 {
 	using UE::FoliageBaker::ProjectedMaterialBake::EncodeObjectSpaceNormalToColor;
-
-	class FFoliageBakerCategoryOrderCustomization final : public IDetailCustomization
-	{
-	public:
-		static TSharedRef<IDetailCustomization> MakeInstance()
-		{
-			return MakeShared<FFoliageBakerCategoryOrderCustomization>();
-		}
-
-		virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override
-		{
-			DetailBuilder.EditCategory(TEXT("Mesh")).SetSortOrder(0);
-			DetailBuilder.EditCategory(TEXT("Feature")).SetSortOrder(1);
-			DetailBuilder.EditCategory(TEXT("Asset")).SetSortOrder(2);
-			DetailBuilder.EditCategory(TEXT("Material")).SetSortOrder(3);
-		}
-	};
 
 	bool ComputeSourceTriangleBounds(
 		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
@@ -85,23 +50,6 @@ namespace
 
 		OutBounds = FBoxSphereBounds(Bounds);
 		return true;
-	}
-
-	TArray<UStaticMesh*> GetSelectedStaticMeshes()
-	{
-		TArray<FAssetData> SelectedAssets;
-		AssetSelectionUtils::GetSelectedAssets(SelectedAssets);
-
-		TArray<UStaticMesh*> StaticMeshes;
-		for (const FAssetData& AssetData : SelectedAssets)
-		{
-			if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(AssetData.GetAsset()))
-			{
-				StaticMeshes.Add(StaticMesh);
-			}
-		}
-
-		return StaticMeshes;
 	}
 
 	UE::FoliageBaker::PlaneCover::FPlaneProxySettings BuildSettingsForMesh(const FBoxSphereBounds& SourceLODBounds, const UFoliageBakerBillboardCloudsSettings& EditorSettings)
@@ -990,12 +938,6 @@ namespace
 		UMaterialInstanceConstant* Material = nullptr;
 	};
 
-	struct FProxyBatchBuildResult
-	{
-		FString Report;
-		TArray<UObject*> CreatedAssets;
-	};
-
 	FProxyAssetBuildResult MakeProxyBuildFailure(const UStaticMesh& StaticMesh, const FString& Error)
 	{
 		FProxyAssetBuildResult Result;
@@ -1531,67 +1473,21 @@ namespace
 		}
 	}
 
-	FProxyBatchBuildResult BuildBillboardCloudProxyAssetsForSelection(
-		const TArray<UStaticMesh*>& StaticMeshes,
+	FFoliageBakerFeatureBakeItemResult BuildBillboardCloudProxyFeatureItem(
+		UStaticMesh& StaticMesh,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings)
 	{
-		FProxyBatchBuildResult BatchResult;
-
-		FScopedSlowTask SlowTask(StaticMeshes.Num(), LOCTEXT("CreatePlaneProxyMeshesSlowTask", "Creating Billboard Clouds plane proxy meshes..."));
-		SlowTask.MakeDialog();
-
-		for (UStaticMesh* StaticMesh : StaticMeshes)
+		const FProxyAssetBuildResult BuildResult =
+			BuildBillboardCloudProxyAsset(StaticMesh, EditorSettings);
+		FFoliageBakerFeatureBakeItemResult ItemResult;
+		ItemResult.bSucceeded = BuildResult.bSucceeded;
+		ItemResult.bCancelled = BuildResult.bCancelled;
+		ItemResult.Report = BuildResult.Report;
+		if (BuildResult.bSucceeded)
 		{
-			if (!StaticMesh)
-			{
-				continue;
-			}
-
-			SlowTask.EnterProgressFrame(1.0f, FText::FromString(StaticMesh->GetName()));
-
-			const FProxyAssetBuildResult BuildResult = BuildBillboardCloudProxyAsset(*StaticMesh, EditorSettings);
-			BatchResult.Report += BuildResult.Report + TEXT("\n\n");
-			if (BuildResult.bSucceeded)
-			{
-				AppendProxyCreatedAssets(BuildResult, BatchResult.CreatedAssets);
-			}
-			if (BuildResult.bCancelled)
-			{
-				break;
-			}
+			AppendProxyCreatedAssets(BuildResult, ItemResult.CreatedAssets);
 		}
-
-		return BatchResult;
-	}
-
-	void SyncCreatedProxyAssetsToContentBrowser(const TArray<UObject*>& CreatedAssets)
-	{
-		if (!CreatedAssets.IsEmpty() && GEditor)
-		{
-			GEditor->SyncBrowserToObjects(CreatedAssets);
-		}
-	}
-
-	void ShowNoStaticMeshSelectionMessage()
-	{
-		FMessageDialog::Open(
-			EAppMsgType::Ok,
-			LOCTEXT("NoStaticMeshSelectionForProxy", "Add one or more Static Mesh assets to the Billboard Clouds tool panel before clicking Bake.")
-		);
-	}
-
-	void ShowProxyBuildReport(const FString& Report)
-	{
-		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Report));
-	}
-
-	void RunCreatePlaneProxyMeshes(
-		const TArray<UStaticMesh*>& StaticMeshes,
-		const UFoliageBakerBillboardCloudsSettings& EditorSettings)
-	{
-		const FProxyBatchBuildResult BatchResult = BuildBillboardCloudProxyAssetsForSelection(StaticMeshes, EditorSettings);
-		SyncCreatedProxyAssetsToContentBrowser(BatchResult.CreatedAssets);
-		ShowProxyBuildReport(BatchResult.Report);
+		return ItemResult;
 	}
 }
 
@@ -1602,7 +1498,7 @@ void FFoliageBakerBillboardCloudsModule::StartupModule()
 
 void FFoliageBakerBillboardCloudsModule::ShutdownModule()
 {
-	SettingsDetailsView.Reset();
+	FeatureController.Reset();
 	ToolSettings.Reset();
 }
 
@@ -1610,194 +1506,59 @@ void FFoliageBakerBillboardCloudsModule::EnsureToolSettings()
 {
 	if (!ToolSettings.IsValid())
 	{
-		ToolSettings.Reset(NewObject<UFoliageBakerBillboardCloudsSettings>(GetTransientPackage(), NAME_None, RF_Transactional));
-	}
-}
-
-void FFoliageBakerBillboardCloudsModule::AddContentBrowserSelectionToTool()
-{
-	EnsureToolSettings();
-	const TArray<UStaticMesh*> SelectedStaticMeshes = GetSelectedStaticMeshes();
-	if (SelectedStaticMeshes.IsEmpty())
-	{
-		return;
-	}
-	const bool bHasNewStaticMesh = SelectedStaticMeshes.ContainsByPredicate([this](const UStaticMesh* StaticMesh)
-	{
-		return !ToolSettings->SourceStaticMeshes.Contains(StaticMesh);
-	});
-	if (!bHasNewStaticMesh)
-	{
-		return;
-	}
-
-	const FScopedTransaction Transaction(LOCTEXT("AddBillboardCloudsSourceMeshesTransaction", "Add Foliage Baker BillboardClouds Source Meshes"));
-	ToolSettings->Modify();
-	for (UStaticMesh* StaticMesh : SelectedStaticMeshes)
-	{
-		ToolSettings->SourceStaticMeshes.AddUnique(StaticMesh);
-	}
-	ToolSettings->PostEditChange();
-	if (SettingsDetailsView.IsValid())
-	{
-		SettingsDetailsView->ForceRefresh();
+		FFoliageBakerFeatureTool::EnsureTransientSettings(ToolSettings);
 	}
 }
 
 TSharedRef<SWidget> FFoliageBakerBillboardCloudsModule::CreateFeaturePanel()
 {
 	EnsureToolSettings();
-
-	FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
-	FDetailsViewArgs DetailsViewArgs;
-	DetailsViewArgs.bAllowSearch = true;
-	DetailsViewArgs.bHideSelectionTip = true;
-	DetailsViewArgs.bLockable = false;
-	DetailsViewArgs.bShowOptions = false;
-	DetailsViewArgs.bShowPropertyMatrixButton = false;
-	DetailsViewArgs.bUpdatesFromSelection = false;
-	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
-	SettingsDetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
-	SettingsDetailsView->RegisterInstancedCustomPropertyLayout(
-		ToolSettings->GetClass(),
-		FOnGetDetailCustomizationInstance::CreateStatic(&FFoliageBakerCategoryOrderCustomization::MakeInstance));
-	SettingsDetailsView->SetObject(ToolSettings.Get());
-
-	return SNew(SVerticalBox)
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(8.0f, 8.0f, 8.0f, 4.0f)
-		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(8.0f)
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.FillWidth(1.0f)
-				.VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text_Raw(this, &FFoliageBakerBillboardCloudsModule::GetSourceMeshCountText)
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(4.0f, 0.0f)
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("UnifiedAddSelectedMeshesButton", "Add Content Browser Selection"))
-					.ToolTipText(LOCTEXT("UnifiedAddSelectedMeshesTooltip", "Add selected Static Mesh assets without removing meshes already queued."))
-					.OnClicked_Raw(this, &FFoliageBakerBillboardCloudsModule::HandleAddSelectedMeshes)
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("UnifiedClearMeshesButton", "Clear"))
-					.ToolTipText(LOCTEXT("UnifiedClearMeshesTooltip", "Remove all queued Static Mesh assets."))
-					.OnClicked_Raw(this, &FFoliageBakerBillboardCloudsModule::HandleClearMeshes)
-				]
-			]
-		]
-		+ SVerticalBox::Slot()
-		.FillHeight(1.0f)
-		.Padding(8.0f, 4.0f)
-		[
-			SettingsDetailsView.ToSharedRef()
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		[
-			SNew(SSeparator)
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(8.0f)
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			.VAlign(VAlign_Center)
-			.Padding(0.0f, 0.0f, 12.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("UnifiedBakeRequirementsHint", "Configure the Parent Material Instance in Editor Preferences, enable an atlas output, and queue at least one Static Mesh."))
-				.AutoWrapText(true)
-			]
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(SBox)
-				.MinDesiredWidth(200.0f)
-				[
-					SNew(SButton)
-					.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
-					.HAlign(HAlign_Center)
-					.Text(LOCTEXT("UnifiedBakeBillboardCloudsButton", "Bake BillboardClouds"))
-					.ToolTipText(LOCTEXT("UnifiedBakeBillboardCloudsTooltip", "Bake BillboardClouds assets for every queued Static Mesh."))
-					.IsEnabled_Raw(this, &FFoliageBakerBillboardCloudsModule::CanBake)
-					.OnClicked_Raw(this, &FFoliageBakerBillboardCloudsModule::HandleBake)
-				]
-			]
-		];
-}
-
-FReply FFoliageBakerBillboardCloudsModule::HandleAddSelectedMeshes()
-{
-	AddContentBrowserSelectionToTool();
-	return FReply::Handled();
-}
-
-FReply FFoliageBakerBillboardCloudsModule::HandleClearMeshes()
-{
-	EnsureToolSettings();
-	if (ToolSettings->SourceStaticMeshes.IsEmpty())
-	{
-		return FReply::Handled();
-	}
-
-	const FScopedTransaction Transaction(LOCTEXT("ClearBillboardCloudsSourceMeshesTransaction", "Clear Foliage Baker BillboardClouds Source Meshes"));
-	ToolSettings->Modify();
-	ToolSettings->SourceStaticMeshes.Reset();
-	ToolSettings->PostEditChange();
-	if (SettingsDetailsView.IsValid())
-	{
-		SettingsDetailsView->ForceRefresh();
-	}
-	return FReply::Handled();
+	FFoliageBakerFeatureControllerArgs ControllerArgs;
+	ControllerArgs.SettingsObject = ToolSettings.Get();
+	ControllerArgs.SourceStaticMeshes = &ToolSettings->SourceStaticMeshes;
+	ControllerArgs.BakeButtonText =
+		LOCTEXT("UnifiedBakeBillboardCloudsButton", "Bake BillboardClouds");
+	ControllerArgs.BakeButtonTooltip = LOCTEXT(
+		"UnifiedBakeBillboardCloudsTooltip",
+		"Bake BillboardClouds assets for every queued Static Mesh.");
+	ControllerArgs.RequirementsHint = LOCTEXT(
+		"UnifiedBakeRequirementsHint",
+		"Configure the Parent Material Instance in Editor Preferences, enable an atlas output, and queue at least one Static Mesh.");
+	ControllerArgs.AddMeshesTransactionText = LOCTEXT(
+		"AddBillboardCloudsSourceMeshesTransaction",
+		"Add Foliage Baker BillboardClouds Source Meshes");
+	ControllerArgs.ClearMeshesTransactionText = LOCTEXT(
+		"ClearBillboardCloudsSourceMeshesTransaction",
+		"Clear Foliage Baker BillboardClouds Source Meshes");
+	ControllerArgs.bShowDetailsOptions = false;
+	ControllerArgs.bShowPropertyMatrixButton = false;
+	ControllerArgs.CanBake =
+		FFoliageBakerFeaturePredicateDelegate::CreateRaw(
+			this,
+			&FFoliageBakerBillboardCloudsModule::CanBake);
+	ControllerArgs.Bake =
+		FFoliageBakerFeatureActionDelegate::CreateRaw(
+			this,
+			&FFoliageBakerBillboardCloudsModule::Bake);
+	FeatureController = FFoliageBakerFeatureController::Create(ControllerArgs);
+	return FeatureController->GetWidget();
 }
 
 bool FFoliageBakerBillboardCloudsModule::CanBake() const
 {
-	const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
-		GetDefault<UFoliageBakerBillboardCloudsSettings>();
-	if (!ToolSettings.IsValid()
-		|| !EditorPreferences
-		|| EditorPreferences->BillboardMaterialTemplate.IsNull()
-		|| !BuildAtlasOutputSelection(*ToolSettings).HasAnyOutput())
+	if (!ToolSettings.IsValid())
 	{
 		return false;
 	}
-	return ToolSettings->SourceStaticMeshes.ContainsByPredicate([](const TObjectPtr<UStaticMesh>& StaticMesh)
-	{
-		return StaticMesh != nullptr;
-	});
+	const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
+		GetDefault<UFoliageBakerBillboardCloudsSettings>();
+	return FFoliageBakerFeatureTool::CanBakeFeature(
+		EditorPreferences && !EditorPreferences->BillboardMaterialTemplate.IsNull(),
+		BuildAtlasOutputSelection(*ToolSettings).HasAnyOutput(),
+		ToolSettings->SourceStaticMeshes);
 }
 
-FText FFoliageBakerBillboardCloudsModule::GetSourceMeshCountText() const
-{
-	int32 ValidMeshCount = 0;
-	if (ToolSettings.IsValid())
-	{
-		for (const UStaticMesh* StaticMesh : ToolSettings->SourceStaticMeshes)
-		{
-			ValidMeshCount += StaticMesh != nullptr ? 1 : 0;
-		}
-	}
-	return FText::Format(LOCTEXT("QueuedStaticMeshCount", "Static Meshes queued: {0}"), FText::AsNumber(ValidMeshCount));
-}
-
-FReply FFoliageBakerBillboardCloudsModule::HandleBake()
+void FFoliageBakerBillboardCloudsModule::Bake()
 {
 	EnsureToolSettings();
 	const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
@@ -1806,35 +1567,42 @@ FReply FFoliageBakerBillboardCloudsModule::HandleBake()
 		|| EditorPreferences->BillboardMaterialTemplate.IsNull()
 		|| !EditorPreferences->BillboardMaterialTemplate.LoadSynchronous())
 	{
-		FMessageDialog::Open(
-			EAppMsgType::Ok,
+		FFoliageBakerFeatureTool::ShowMessage(
 			LOCTEXT("MissingBillboardCloudsParentMaterial", "Configure the Billboard Clouds Parent Material Instance in Editor Preferences before baking."));
-		return FReply::Handled();
+		return;
 	}
 	if (!BuildAtlasOutputSelection(*ToolSettings).HasAnyOutput())
 	{
-		FMessageDialog::Open(
-			EAppMsgType::Ok,
+		FFoliageBakerFeatureTool::ShowMessage(
 			LOCTEXT("NoBillboardCloudsAtlasOutputs", "Enable at least one Billboard Clouds atlas output before baking."));
-		return FReply::Handled();
+		return;
 	}
-	TArray<UStaticMesh*> StaticMeshes;
-	for (UStaticMesh* StaticMesh : ToolSettings->SourceStaticMeshes)
+	if (!FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
+			ToolSettings->SourceStaticMeshes))
 	{
-		if (StaticMesh)
-		{
-			StaticMeshes.AddUnique(StaticMesh);
-		}
+		FFoliageBakerFeatureTool::ShowMessage(LOCTEXT(
+			"NoStaticMeshSelectionForProxy",
+			"Add one or more Static Mesh assets to the Billboard Clouds tool panel before clicking Bake."));
+		return;
 	}
 
-	if (StaticMeshes.IsEmpty())
-	{
-		ShowNoStaticMeshSelectionMessage();
-		return FReply::Handled();
-	}
-
-	RunCreatePlaneProxyMeshes(StaticMeshes, *ToolSettings);
-	return FReply::Handled();
+	const FFoliageBakerFeatureBatchResult BatchResult =
+		FFoliageBakerFeatureTool::RunBakeBatch(
+			ToolSettings->SourceStaticMeshes,
+			LOCTEXT(
+				"CreatePlaneProxyMeshesSlowTask",
+				"Creating Billboard Clouds plane proxy meshes..."),
+			false,
+			TEXT("\n\n"),
+			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
+				[this](UStaticMesh& StaticMesh)
+				{
+					return BuildBillboardCloudProxyFeatureItem(
+						StaticMesh,
+						*ToolSettings);
+				}));
+	FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(BatchResult.CreatedAssets);
+	FFoliageBakerFeatureTool::ShowMessage(FText::FromString(BatchResult.Report));
 }
 
 #undef LOCTEXT_NAMESPACE

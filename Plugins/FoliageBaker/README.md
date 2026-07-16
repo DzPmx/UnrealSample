@@ -157,10 +157,11 @@ Normal A 的深度沿相机到模型的拍摄射线映射，使用 `lerp(-Shared
 ## 模块结构
 
 - `FoliageBakerCore`：公共网格、Atlas、源材质解析与属性烘焙、原子资产写入服务。
-- `FoliageBakerCards`：Single Billboard 与 Cross Cards 的设置、界面和请求组装。
+- `FoliageBakerEditorCommon`：四种功能共用的编辑器工具壳层，包括 Details 面板、Mesh 队列、撤销事务、CanBake 前置条件、批处理进度、结果汇总与 Content Browser 同步。
+- `FoliageBakerCards`：Single Billboard 与 Cross Cards 的设置、请求组装和功能专属烘焙逻辑。
 - `FoliageBakerImpostor`：半球/全球八面体方向采样、固定网格 Atlas、单 Sprite 代理与资产组装。
 - `FoliageBakerBillboardClouds`：K-Means BillboardClouds 功能。
-- `FoliageBakerEditor`：统一工具窗口和四种功能标签。
+- `FoliageBakerEditor`：数据驱动的统一工具窗口、四种功能标签、菜单和 Editor Preferences 注册。
 
 ## 当前限制
 

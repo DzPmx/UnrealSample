@@ -1,8 +1,8 @@
 using UnrealBuildTool;
 
-public class FoliageBakerEditor : ModuleRules
+public class FoliageBakerEditorCommon : ModuleRules
 {
-	public FoliageBakerEditor(ReadOnlyTargetRules Target) : base(Target)
+	public FoliageBakerEditorCommon(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
@@ -17,13 +17,12 @@ public class FoliageBakerEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"AssetRegistry",
+				"Engine",
 				"Slate",
 				"SlateCore",
-				"ToolMenus",
-				"Settings",
-				"FoliageBakerCards",
-				"FoliageBakerImpostor",
-				"FoliageBakerBillboardClouds",
+				"UnrealEd",
+				"PropertyEditor",
 			}
 		);
 	}

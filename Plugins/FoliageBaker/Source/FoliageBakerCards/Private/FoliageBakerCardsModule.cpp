@@ -1,50 +1,15 @@
 #include "FoliageBakerCardsModule.h"
 
-#include "AssetRegistry/AssetData.h"
-#include "AssetSelection.h"
-#include "DetailCategoryBuilder.h"
-#include "DetailLayoutBuilder.h"
-#include "DetailsViewArgs.h"
-#include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "FoliageBakerCardBaker.h"
 #include "FoliageBakerCardsSettings.h"
-#include "IDetailCustomization.h"
-#include "IDetailsView.h"
+#include "FoliageBakerFeatureTool.h"
 #include "Materials/MaterialInstanceConstant.h"
-#include "Misc/MessageDialog.h"
-#include "Misc/ScopedSlowTask.h"
-#include "PropertyEditorModule.h"
-#include "ScopedTransaction.h"
-#include "Styling/AppStyle.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SSeparator.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerCardsModule"
 
 namespace
 {
-	class FFoliageBakerCategoryOrderCustomization final : public IDetailCustomization
-	{
-	public:
-		static TSharedRef<IDetailCustomization> MakeInstance()
-		{
-			return MakeShared<FFoliageBakerCategoryOrderCustomization>();
-		}
-
-		virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override
-		{
-			DetailBuilder.EditCategory(TEXT("Mesh")).SetSortOrder(0);
-			DetailBuilder.EditCategory(TEXT("Feature")).SetSortOrder(1);
-			DetailBuilder.EditCategory(TEXT("Asset")).SetSortOrder(2);
-			DetailBuilder.EditCategory(TEXT("Material")).SetSortOrder(3);
-		}
-	};
-
 	constexpr int32 MinCardPlaneCount = 2;
 	constexpr int32 MaxCardPlaneCount = 5;
 	constexpr int32 MinTextureResolution = 256;
@@ -66,36 +31,6 @@ namespace
 			return GetDefault<UFoliageBakerSingleBillboardSettings>();
 		}
 		return GetDefault<UFoliageBakerCrossCardsSettings>();
-	}
-
-	TArray<UStaticMesh*> GetSelectedStaticMeshes()
-	{
-		TArray<FAssetData> SelectedAssets;
-		AssetSelectionUtils::GetSelectedAssets(SelectedAssets);
-
-		TArray<UStaticMesh*> StaticMeshes;
-		for (const FAssetData& AssetData : SelectedAssets)
-		{
-			if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(AssetData.GetAsset()))
-			{
-				StaticMeshes.AddUnique(StaticMesh);
-			}
-		}
-		return StaticMeshes;
-	}
-
-	TArray<UStaticMesh*> GetUniqueValidStaticMeshes(const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes)
-	{
-		TArray<UStaticMesh*> StaticMeshes;
-		StaticMeshes.Reserve(SourceStaticMeshes.Num());
-		for (const TObjectPtr<UStaticMesh>& StaticMesh : SourceStaticMeshes)
-		{
-			if (StaticMesh)
-			{
-				StaticMeshes.AddUnique(StaticMesh.Get());
-			}
-		}
-		return StaticMeshes;
 	}
 
 	EFoliageBakerCardBakeMode ToCoreMode(const EFoliageBakerCardMode Mode)
@@ -168,8 +103,8 @@ namespace
 
 void FFoliageBakerCardsModule::ShutdownModule()
 {
-	SingleBillboardDetailsView.Reset();
-	CrossCardsDetailsView.Reset();
+	SingleBillboardController.Reset();
+	CrossCardsController.Reset();
 	SingleBillboardSettings.Reset();
 	CrossCardsSettings.Reset();
 }
@@ -183,17 +118,19 @@ void FFoliageBakerCardsModule::EnsureToolSettings(const EFoliageBakerCardMode Mo
 	{
 		if (IsSingleBillboardMode(Mode))
 		{
-			Settings.Reset(NewObject<UFoliageBakerSingleBillboardSettings>(
-				GetTransientPackage(),
-				FName(TEXT("FoliageBakerSingleBillboardSettings")),
-				RF_Transactional));
+			FFoliageBakerFeatureTool::EnsureTransientSettings<
+				UFoliageBakerCardsSettings,
+				UFoliageBakerSingleBillboardSettings>(
+					Settings,
+					FName(TEXT("FoliageBakerSingleBillboardSettings")));
 		}
 		else
 		{
-			Settings.Reset(NewObject<UFoliageBakerCrossCardsSettings>(
-				GetTransientPackage(),
-				FName(TEXT("FoliageBakerCrossCardsSettings")),
-				RF_Transactional));
+			FFoliageBakerFeatureTool::EnsureTransientSettings<
+				UFoliageBakerCardsSettings,
+				UFoliageBakerCrossCardsSettings>(
+					Settings,
+					FName(TEXT("FoliageBakerCrossCardsSettings")));
 		}
 	}
 	Settings->Mode = Mode;
@@ -206,11 +143,12 @@ UFoliageBakerCardsSettings* FFoliageBakerCardsModule::GetToolSettings(const EFol
 		: CrossCardsSettings.Get();
 }
 
-TSharedPtr<IDetailsView>& FFoliageBakerCardsModule::GetDetailsView(const EFoliageBakerCardMode Mode)
+TSharedPtr<FFoliageBakerFeatureController>& FFoliageBakerCardsModule::GetFeatureController(
+	const EFoliageBakerCardMode Mode)
 {
 	return IsSingleBillboardMode(Mode)
-		? SingleBillboardDetailsView
-		: CrossCardsDetailsView;
+		? SingleBillboardController
+		: CrossCardsController;
 }
 
 TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageBakerCardMode Mode)
@@ -218,201 +156,51 @@ TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageB
 	EnsureToolSettings(Mode);
 	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
 
-	FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
-	FDetailsViewArgs DetailsViewArgs;
-	DetailsViewArgs.bAllowSearch = true;
-	DetailsViewArgs.bHideSelectionTip = true;
-	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
-	TSharedPtr<IDetailsView>& DetailsView = GetDetailsView(Mode);
-	DetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
-	DetailsView->RegisterInstancedCustomPropertyLayout(
-		Settings->GetClass(),
-		FOnGetDetailCustomizationInstance::CreateStatic(&FFoliageBakerCategoryOrderCustomization::MakeInstance));
-	DetailsView->SetObject(Settings);
-
-	const FText BakeButtonText = IsSingleBillboardMode(Mode)
+	FFoliageBakerFeatureControllerArgs ControllerArgs;
+	ControllerArgs.SettingsObject = Settings;
+	ControllerArgs.SourceStaticMeshes = &Settings->SourceStaticMeshes;
+	ControllerArgs.BakeButtonText = IsSingleBillboardMode(Mode)
 		? LOCTEXT("BakeSingleBillboardButton", "Bake Single Billboard")
 		: LOCTEXT("BakeCrossCardsButton", "Bake Cross Cards");
-	const FText BakeButtonTooltip = IsSingleBillboardMode(Mode)
+	ControllerArgs.BakeButtonTooltip = IsSingleBillboardMode(Mode)
 		? LOCTEXT("BakeSingleBillboardTooltip", "Bake one Single Billboard asset for every queued Static Mesh.")
 		: LOCTEXT("BakeCrossCardsTooltip", "Bake one Cross Cards asset for every queued Static Mesh.");
+	ControllerArgs.RequirementsHint = LOCTEXT(
+		"BakeRequirementsHint",
+		"Configure the Parent Material Instance in Editor Preferences and queue at least one Static Mesh.");
+	ControllerArgs.AddMeshesTransactionText =
+		LOCTEXT("AddCardsSourceMeshesTransaction", "Add Foliage Baker Card Source Meshes");
+	ControllerArgs.ClearMeshesTransactionText =
+		LOCTEXT("ClearCardsSourceMeshesTransaction", "Clear Foliage Baker Card Source Meshes");
+	ControllerArgs.CanBake =
+		FFoliageBakerFeaturePredicateDelegate::CreateLambda(
+			[this, Mode]() { return CanBake(Mode); });
+	ControllerArgs.Bake =
+		FFoliageBakerFeatureActionDelegate::CreateLambda(
+			[this, Mode]() { Bake(Mode); });
 
-	return SNew(SVerticalBox)
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(8.0f, 8.0f, 8.0f, 4.0f)
-		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(10.0f)
-			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("SourceMeshesSectionTitle", "Source Static Meshes"))
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-					.VAlign(VAlign_Center)
-					[
-						SNew(STextBlock)
-						.Text_Lambda([this, Mode]() { return GetSourceMeshCountText(Mode); })
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(8.0f, 0.0f)
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("AddSelectedMeshes", "Add Content Browser Selection"))
-						.ToolTipText(LOCTEXT("AddSelectedMeshesTooltip", "Add selected Static Mesh assets without removing meshes already queued."))
-						.OnClicked_Lambda([this, Mode]() { return HandleAddSelectedMeshes(Mode); })
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("ClearMeshes", "Clear"))
-						.ToolTipText(LOCTEXT("ClearMeshesTooltip", "Remove all queued Static Mesh assets from this feature."))
-						.OnClicked_Lambda([this, Mode]() { return HandleClearMeshes(Mode); })
-					]
-				]
-			]
-		]
-		+ SVerticalBox::Slot()
-		.FillHeight(1.0f)
-		.Padding(8.0f, 4.0f)
-		[
-			DetailsView.ToSharedRef()
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		[
-			SNew(SSeparator)
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(8.0f)
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			.VAlign(VAlign_Center)
-			.Padding(0.0f, 0.0f, 12.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("BakeRequirementsHint", "Configure the Parent Material Instance in Editor Preferences and queue at least one Static Mesh."))
-				.AutoWrapText(true)
-			]
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(SBox)
-				.MinDesiredWidth(200.0f)
-				[
-					SNew(SButton)
-					.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
-					.HAlign(HAlign_Center)
-					.Text(BakeButtonText)
-					.ToolTipText(BakeButtonTooltip)
-					.IsEnabled_Lambda([this, Mode]() { return CanBake(Mode); })
-					.OnClicked_Lambda([this, Mode]() { return HandleBake(Mode); })
-				]
-			]
-		];
-}
-
-void FFoliageBakerCardsModule::AddContentBrowserSelectionToTool(const EFoliageBakerCardMode Mode)
-{
-	EnsureToolSettings(Mode);
-	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
-	const TArray<UStaticMesh*> SelectedStaticMeshes = GetSelectedStaticMeshes();
-	const bool bHasNewStaticMesh = SelectedStaticMeshes.ContainsByPredicate([Settings](const UStaticMesh* StaticMesh)
-	{
-		return !Settings->SourceStaticMeshes.Contains(StaticMesh);
-	});
-	if (!bHasNewStaticMesh)
-	{
-		return;
-	}
-
-	const FScopedTransaction Transaction(LOCTEXT("AddCardsSourceMeshesTransaction", "Add Foliage Baker Card Source Meshes"));
-	Settings->Modify();
-	for (UStaticMesh* StaticMesh : SelectedStaticMeshes)
-	{
-		Settings->SourceStaticMeshes.AddUnique(StaticMesh);
-	}
-	Settings->PostEditChange();
-	if (TSharedPtr<IDetailsView>& DetailsView = GetDetailsView(Mode); DetailsView.IsValid())
-	{
-		DetailsView->ForceRefresh();
-	}
-}
-
-FReply FFoliageBakerCardsModule::HandleAddSelectedMeshes(const EFoliageBakerCardMode Mode)
-{
-	AddContentBrowserSelectionToTool(Mode);
-	return FReply::Handled();
-}
-
-FReply FFoliageBakerCardsModule::HandleClearMeshes(const EFoliageBakerCardMode Mode)
-{
-	EnsureToolSettings(Mode);
-	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
-	if (Settings->SourceStaticMeshes.IsEmpty())
-	{
-		return FReply::Handled();
-	}
-
-	const FScopedTransaction Transaction(LOCTEXT("ClearCardsSourceMeshesTransaction", "Clear Foliage Baker Card Source Meshes"));
-	Settings->Modify();
-	Settings->SourceStaticMeshes.Reset();
-	Settings->PostEditChange();
-	if (TSharedPtr<IDetailsView>& DetailsView = GetDetailsView(Mode); DetailsView.IsValid())
-	{
-		DetailsView->ForceRefresh();
-	}
-	return FReply::Handled();
+	TSharedPtr<FFoliageBakerFeatureController>& Controller = GetFeatureController(Mode);
+	Controller = FFoliageBakerFeatureController::Create(ControllerArgs);
+	return Controller->GetWidget();
 }
 
 bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 {
 	const UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
 	const UFoliageBakerCardsSettings* EditorPreferences = GetEditorPreferences(Mode);
-	if (!Settings
-		|| !EditorPreferences
-		|| EditorPreferences->MaterialInstanceTemplate.IsNull()
-		|| (!Settings->bBakeBaseColorOpacity && !Settings->bBakeNormalDepth && !Settings->bBakeMix))
+	if (!Settings)
 	{
 		return false;
 	}
-	return Settings->SourceStaticMeshes.ContainsByPredicate([](const TObjectPtr<UStaticMesh>& StaticMesh)
-	{
-		return StaticMesh != nullptr;
-	});
+	return FFoliageBakerFeatureTool::CanBakeFeature(
+		EditorPreferences && !EditorPreferences->MaterialInstanceTemplate.IsNull(),
+		Settings->bBakeBaseColorOpacity
+			|| Settings->bBakeNormalDepth
+			|| Settings->bBakeMix,
+		Settings->SourceStaticMeshes);
 }
 
-FText FFoliageBakerCardsModule::GetSourceMeshCountText(const EFoliageBakerCardMode Mode) const
-{
-	int32 Count = 0;
-	if (const UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode))
-	{
-		for (const TObjectPtr<UStaticMesh>& StaticMesh : Settings->SourceStaticMeshes)
-		{
-			Count += StaticMesh ? 1 : 0;
-		}
-	}
-	return FText::Format(LOCTEXT("QueuedMeshCount", "{0} Static Mesh asset(s) queued"), FText::AsNumber(Count));
-}
-
-FReply FFoliageBakerCardsModule::HandleBake(const EFoliageBakerCardMode Mode)
+void FFoliageBakerCardsModule::Bake(const EFoliageBakerCardMode Mode)
 {
 	EnsureToolSettings(Mode);
 	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
@@ -422,49 +210,33 @@ FReply FFoliageBakerCardsModule::HandleBake(const EFoliageBakerCardMode Mode)
 		: nullptr;
 	if (!MaterialTemplate)
 	{
-		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("MissingTemplate", "Configure the Parent Material Instance in Editor Preferences before baking."));
-		return FReply::Handled();
+		FFoliageBakerFeatureTool::ShowMessage(LOCTEXT(
+			"MissingTemplate",
+			"Configure the Parent Material Instance in Editor Preferences before baking."));
+		return;
 	}
 
-	const TArray<UStaticMesh*> StaticMeshes = GetUniqueValidStaticMeshes(Settings->SourceStaticMeshes);
+	const FFoliageBakerFeatureBatchResult BatchResult =
+		FFoliageBakerFeatureTool::RunBakeBatch(
+			Settings->SourceStaticMeshes,
+			LOCTEXT("BakeCardsSlowTask", "Baking foliage cards..."),
+			true,
+			TEXT("\n"),
+			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
+				[Settings, MaterialTemplate](UStaticMesh& StaticMesh)
+				{
+					const FFoliageBakerCardBakeResult Result =
+						FFoliageBakerCardBaker::Bake(
+							BuildRequest(StaticMesh, *MaterialTemplate, *Settings));
+					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);
+				}));
 
-	FScopedSlowTask SlowTask(StaticMeshes.Num(), LOCTEXT("BakeCardsSlowTask", "Baking foliage cards..."));
-	SlowTask.MakeDialog(true);
-	TArray<UObject*> CreatedAssets;
-	FString Report;
-	int32 SuccessCount = 0;
-	for (UStaticMesh* StaticMesh : StaticMeshes)
-	{
-		if (SlowTask.ShouldCancel())
-		{
-			break;
-		}
-		SlowTask.EnterProgressFrame(1.0f, FText::FromString(StaticMesh->GetName()));
-		FFoliageBakerCardBakeResult Result = FFoliageBakerCardBaker::Bake(BuildRequest(*StaticMesh, *MaterialTemplate, *Settings));
-		Report += Result.Report + TEXT("\n");
-		if (Result.bSucceeded)
-		{
-			++SuccessCount;
-			CreatedAssets.Append(Result.CreatedAssets);
-		}
-		if (Result.bCancelled)
-		{
-			break;
-		}
-	}
-
-	if (!CreatedAssets.IsEmpty() && GEditor)
-	{
-		GEditor->SyncBrowserToObjects(CreatedAssets);
-	}
-	FMessageDialog::Open(
-		EAppMsgType::Ok,
-		FText::Format(
-			LOCTEXT("BakeCardsSummary", "Foliage Baker completed {0} of {1} asset(s).\n\n{2}"),
-			FText::AsNumber(SuccessCount),
-			FText::AsNumber(StaticMeshes.Num()),
-			FText::FromString(Report)));
-	return FReply::Handled();
+	FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(BatchResult.CreatedAssets);
+	FFoliageBakerFeatureTool::ShowBatchSummary(
+		BatchResult,
+		LOCTEXT(
+			"BakeCardsSummary",
+			"Foliage Baker completed {0} of {1} asset(s).\n\n{2}"));
 }
 
 IMPLEMENT_MODULE(FFoliageBakerCardsModule, FoliageBakerCards)
