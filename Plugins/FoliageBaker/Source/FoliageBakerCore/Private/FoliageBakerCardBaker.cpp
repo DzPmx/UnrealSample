@@ -311,14 +311,11 @@ namespace
 						}
 
 						UE::FoliageBaker::ProjectedMaterialBake::FPlaneSideBakeParams ProjectedBakeParams;
-						ProjectedBakeParams.TileSize = TileSize;
 						ProjectedBakeParams.CaptureRayDirection = CaptureRayDirection;
 						ProjectedBakeParams.AtlasVConvention = Settings.AtlasVConvention;
 						ProjectedBakeParams.MaterialIndexFilter = MaterialIndex;
 						ProjectedBakeParams.bBackSide = bBackSide;
-						ProjectedBakeParams.bBuildNormalBasisMap = false;
 
-						TArray<UE::FoliageBaker::ProjectedMaterialBake::FNormalBasisSample> UnusedNormalBasisMap;
 						int32 MatchingTriangleCount = 0;
 						FString ProjectedInputError;
 						if (!UE::FoliageBaker::ProjectedMaterialBake::BuildPlaneSideBakeInputs(
@@ -329,7 +326,6 @@ namespace
 								ProjectedBakeParams,
 								Storage->MeshDescription,
 								Storage->CustomTileUVs,
-								UnusedNormalBasisMap,
 								MatchingTriangleCount,
 								&ProjectedInputError,
 								&Storage->RasterSourceTriangleIndices))
@@ -835,15 +831,15 @@ namespace
 			OutError);
 	}
 
-	const TCHAR* GetMeshOutputModeText(const EFoliageBakerMeshOutputMode OutputMode)
+	const TCHAR* GetMeshOutputModeText(const EFoliageBakerMeshAssetOutputMode OutputMode)
 	{
 		switch (OutputMode)
 		{
-		case EFoliageBakerMeshOutputMode::AddToSourceMeshLOD:
+		case EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD:
 			return TEXT("added to source mesh LODs");
-		case EFoliageBakerMeshOutputMode::ReplaceSourceMeshLOD:
+		case EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD:
 			return TEXT("replaced source mesh LOD");
-		case EFoliageBakerMeshOutputMode::SeparateMeshAsset:
+		case EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset:
 		default:
 			return TEXT("separate mesh asset");
 		}
@@ -885,7 +881,7 @@ namespace
 		bool bCancelled = false;
 		FString Report;
 		UStaticMesh* ProxyMesh = nullptr;
-		EFoliageBakerMeshOutputMode MeshOutputMode = EFoliageBakerMeshOutputMode::SeparateMeshAsset;
+		EFoliageBakerMeshAssetOutputMode MeshOutputMode = EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
 		int32 SourceMeshLODIndex = INDEX_NONE;
 		UTexture2D* AtlasTexture = nullptr;
 		UTexture2D* NormalAtlasTexture = nullptr;
@@ -932,39 +928,13 @@ namespace
 		}
 	}
 
-	EFoliageBakerMeshAssetOutputMode ToAssetOutputMode(const EFoliageBakerMeshOutputMode OutputMode)
-	{
-		switch (OutputMode)
-		{
-		case EFoliageBakerMeshOutputMode::AddToSourceMeshLOD:
-			return EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD;
-		case EFoliageBakerMeshOutputMode::ReplaceSourceMeshLOD:
-			return EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD;
-		case EFoliageBakerMeshOutputMode::SeparateMeshAsset:
-		default:
-			return EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
-		}
-	}
-
-	EFoliageBakerMeshOutputMode ToCardOutputMode(const EFoliageBakerMeshAssetOutputMode OutputMode)
-	{
-		switch (OutputMode)
-		{
-		case EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD:
-			return EFoliageBakerMeshOutputMode::AddToSourceMeshLOD;
-		case EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD:
-			return EFoliageBakerMeshOutputMode::ReplaceSourceMeshLOD;
-		case EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset:
-		default:
-			return EFoliageBakerMeshOutputMode::SeparateMeshAsset;
-		}
-	}
-
-	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(const FFoliageBakerCardBakeRequest& Request)
+	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(
+		const FFoliageBakerCardBakeRequest& Request,
+		const FFoliageBakerMeshOutputSelection& OutputSelection)
 	{
 		FFoliageBakerSourceLODAssetParams Params;
-		Params.OutputMode = ToAssetOutputMode(Request.MeshOutputMode);
-		Params.RequestedReplaceLODIndex = Request.ReplaceSourceLODIndex;
+		Params.OutputMode = OutputSelection.OutputMode;
+		Params.RequestedReplaceLODIndex = OutputSelection.ReplaceLODIndex;
 		Params.SourceLODIndex = Request.SourceLODIndex;
 		Params.DesiredUVChannelCount = 2;
 		Params.RebuildLODMetadataKey = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
@@ -1271,15 +1241,16 @@ namespace
 	bool CreateProxyMeshAssetBundle(
 		UStaticMesh& StaticMesh,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyMeshBuildData& MeshData,
 		const FProxyTextureBuildData& TextureData,
 		FProxyAssetBuildResult& OutResult,
 		FString& OutError)
 	{
-		OutResult.MeshOutputMode = EditorSettings.MeshOutputMode;
+		OutResult.MeshOutputMode = MeshOutputSelection.OutputMode;
 
-		if (EditorSettings.MeshOutputMode == EFoliageBakerMeshOutputMode::SeparateMeshAsset)
+		if (MeshOutputSelection.OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 		{
 			FFoliageBakerStaticMeshAssetParams MeshParams;
 			MeshParams.AssetNameSuffix = EditorSettings.Mode == EFoliageBakerCardBakeMode::SingleBillboard
@@ -1302,7 +1273,8 @@ namespace
 		else
 		{
 			int32 InstalledLODIndex = INDEX_NONE;
-			const FFoliageBakerSourceLODAssetParams LODParams = BuildSourceLODAssetParams(EditorSettings);
+			const FFoliageBakerSourceLODAssetParams LODParams =
+				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection);
 			if (!FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 				StaticMesh,
 				AssetTransaction,
@@ -1350,10 +1322,10 @@ namespace
 		const FString BaseAtlasPath = TextureData.AtlasTexture ? TextureData.AtlasTexture->GetPathName() : TEXT("disabled");
 		const FString NormalAtlasPath = TextureData.NormalAtlasTexture ? TextureData.NormalAtlasTexture->GetPathName() : TEXT("disabled");
 		const FString MixAtlasPath = TextureData.MixAtlasTexture ? TextureData.MixAtlasTexture->GetPathName() : TEXT("disabled");
-		const FString MeshOutputDetails = AssetResult.MeshOutputMode == EFoliageBakerMeshOutputMode::SeparateMeshAsset
+		const FString MeshOutputDetails = AssetResult.MeshOutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
 			? FString::Printf(TEXT("%s: %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), *AssetResult.ProxyMesh->GetPathName())
 			: FString::Printf(TEXT("%s %d on %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), AssetResult.SourceMeshLODIndex, *AssetResult.ProxyMesh->GetPathName());
-		const TCHAR* MeshBuildPathDetails = AssetResult.MeshOutputMode == EFoliageBakerMeshOutputMode::SeparateMeshAsset
+		const TCHAR* MeshBuildPathDetails = AssetResult.MeshOutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
 			? TEXT("BuildFromMeshDescriptions full build path")
 			: TEXT("source StaticMesh LOD MeshDescription commit");
 		const FString MaterialParameterDetails = FString::Printf(
@@ -1400,7 +1372,7 @@ namespace
 
 	FProxyAssetBuildResult BuildCardProxyAsset(
 		UStaticMesh& StaticMesh,
-		FFoliageBakerCardBakeRequest EditorSettings)
+		const FFoliageBakerCardBakeRequest& EditorSettings)
 	{
 		FString Error;
 		FProxyPlaneCoverBuildData CoverData;
@@ -1428,19 +1400,25 @@ namespace
 		{
 			return MakeProxyBuildCancelled(StaticMesh);
 		}
-		EditorSettings.MeshOutputMode = ToCardOutputMode(MeshOutputSelection->OutputMode);
-		EditorSettings.ReplaceSourceLODIndex = MeshOutputSelection->ReplaceLODIndex;
-		if (EditorSettings.MeshOutputMode != EFoliageBakerMeshOutputMode::SeparateMeshAsset
+		if (MeshOutputSelection->OutputMode != EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
 			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
 				StaticMesh,
-				BuildSourceLODAssetParams(EditorSettings),
+				BuildSourceLODAssetParams(EditorSettings, *MeshOutputSelection),
 				Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
 
 		FProxyAssetBuildResult Result;
-		if (!CreateProxyMeshAssetBundle(StaticMesh, EditorSettings, AssetTransaction, MeshData, TextureData, Result, Error))
+		if (!CreateProxyMeshAssetBundle(
+			StaticMesh,
+			EditorSettings,
+			*MeshOutputSelection,
+			AssetTransaction,
+			MeshData,
+			TextureData,
+			Result,
+			Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
@@ -1454,7 +1432,7 @@ namespace
 
 	void AppendCardCreatedAssets(const FProxyAssetBuildResult& BuildResult, TArray<UObject*>& OutCreatedAssets)
 	{
-		if (BuildResult.MeshOutputMode == EFoliageBakerMeshOutputMode::SeparateMeshAsset && BuildResult.ProxyMesh)
+		if (BuildResult.MeshOutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset && BuildResult.ProxyMesh)
 		{
 			OutCreatedAssets.Add(BuildResult.ProxyMesh);
 		}

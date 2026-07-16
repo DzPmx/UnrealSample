@@ -11,7 +11,6 @@ class UFoliageBakerImpostorSettings;
 class FOLIAGEBAKERIMPOSTOR_API FFoliageBakerImpostorModule final : public IModuleInterface
 {
 public:
-	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 
 	TSharedRef<SWidget> CreateFeaturePanel();

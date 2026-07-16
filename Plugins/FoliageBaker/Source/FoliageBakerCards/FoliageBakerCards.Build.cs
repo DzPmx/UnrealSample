@@ -22,7 +22,6 @@ public class FoliageBakerCards : ModuleRules
 				"Slate",
 				"SlateCore",
 				"UnrealEd",
-				"ToolMenus",
 				"ContentBrowser",
 				"PropertyEditor",
 			}

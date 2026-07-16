@@ -20,14 +20,6 @@ enum class EFoliageBakerCaptureAxis : uint8
 	NegativeY
 };
 
-enum class EFoliageBakerMeshOutputMode : uint8
-{
-	SeparateMeshAsset,
-	AddToSourceMeshLOD,
-	ReplaceSourceMeshLOD
-};
-
-
 struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 {
 	UStaticMesh* SourceStaticMesh = nullptr;
@@ -38,9 +30,6 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	EFoliageBakerCaptureAxis SingleCaptureAxis = EFoliageBakerCaptureAxis::PositiveX;
 	int32 CrossCardPlaneCount = 2;
 	TArray<FString> TrunkMaterialKeywords = { TEXT("Trunk") };
-
-	EFoliageBakerMeshOutputMode MeshOutputMode = EFoliageBakerMeshOutputMode::SeparateMeshAsset;
-	int32 ReplaceSourceLODIndex = 1;
 
 	int32 TextureResolution = 1024;
 	int32 AlphaCropGuardPixels = 2;

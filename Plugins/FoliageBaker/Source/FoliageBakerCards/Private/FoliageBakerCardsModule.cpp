@@ -166,10 +166,6 @@ namespace
 	}
 }
 
-void FFoliageBakerCardsModule::StartupModule()
-{
-}
-
 void FFoliageBakerCardsModule::ShutdownModule()
 {
 	SingleBillboardDetailsView.Reset();

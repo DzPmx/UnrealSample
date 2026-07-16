@@ -344,76 +344,6 @@ namespace
 		FString MaterialAlphaPolicyDetails;
 	};
 
-
-	bool IsPointInsidePlaneProxyEnvelope(const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo, const FVector& Point, const double Tolerance)
-	{
-		const double U = FVector::DotProduct(Point, PlaneInfo.AxisU);
-		const double V = FVector::DotProduct(Point, PlaneInfo.AxisV);
-		const double SignedDistance = FVector::DotProduct(PlaneInfo.Normal, Point) - PlaneInfo.Rho;
-		return U >= PlaneInfo.EnvelopeMinU - Tolerance
-			&& U <= PlaneInfo.EnvelopeMaxU + Tolerance
-			&& V >= PlaneInfo.EnvelopeMinV - Tolerance
-			&& V <= PlaneInfo.EnvelopeMaxV + Tolerance
-			&& SignedDistance >= PlaneInfo.EnvelopeMinSignedDistance - Tolerance
-			&& SignedDistance <= PlaneInfo.EnvelopeMaxSignedDistance + Tolerance;
-	}
-
-	double ComputePlaneProxyEnvelopeBoundaryDistance(const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo, const FVector& Point)
-	{
-		const double U = FVector::DotProduct(Point, PlaneInfo.AxisU);
-		const double V = FVector::DotProduct(Point, PlaneInfo.AxisV);
-		const double SignedDistance = FVector::DotProduct(PlaneInfo.Normal, Point) - PlaneInfo.Rho;
-		return FMath::Min3(
-			FMath::Min(U - PlaneInfo.EnvelopeMinU, PlaneInfo.EnvelopeMaxU - U),
-			FMath::Min(V - PlaneInfo.EnvelopeMinV, PlaneInfo.EnvelopeMaxV - V),
-			FMath::Min(SignedDistance - PlaneInfo.EnvelopeMinSignedDistance, PlaneInfo.EnvelopeMaxSignedDistance - SignedDistance));
-	}
-
-	bool IsPointNearPlaneProxyEnvelopeBoundary(
-		const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
-		const FVector& Point,
-		const double BoundaryWidth,
-		const double Tolerance)
-	{
-		const double BoundaryDistance = ComputePlaneProxyEnvelopeBoundaryDistance(PlaneInfo, Point);
-		return BoundaryDistance >= -Tolerance
-			&& BoundaryDistance <= FMath::Max(BoundaryWidth, Tolerance);
-	}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 	int32 GetSourceMeshMaxUVChannelCount(const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles)
 	{
 		int32 ChannelCount = 1;
@@ -448,7 +378,6 @@ namespace
 		Result.Sort();
 		return Result;
 	}
-
 
 	bool BakeBillboardAtlasGPU(
 		const UStaticMesh& SourceStaticMesh,
@@ -613,15 +542,12 @@ namespace
 						Storage->MaterialInterface->GetBlendMode() == BLEND_Masked;
 
 					UE::FoliageBaker::ProjectedMaterialBake::FPlaneSideBakeParams ProjectedBakeParams;
-					ProjectedBakeParams.TileSize = TileSize;
 					ProjectedBakeParams.CaptureRayDirection = CaptureRayDirection;
 					ProjectedBakeParams.AtlasVConvention = Settings.AtlasVConvention;
 					ProjectedBakeParams.MaterialIndexFilter = MaterialIndex;
 					ProjectedBakeParams.NumSourceUVChannels = NumSourceUVChannels;
 					ProjectedBakeParams.bBackSide = bBackSide;
-					ProjectedBakeParams.bBuildNormalBasisMap = false;
 
-					TArray<UE::FoliageBaker::ProjectedMaterialBake::FNormalBasisSample> UnusedNormalBasisMap;
 					int32 MatchingTriangleCount = 0;
 					FString ProjectedInputError;
 					const bool bBuiltPlaneSideBakeInputs =
@@ -633,7 +559,6 @@ namespace
 							ProjectedBakeParams,
 							Storage->MeshDescription,
 							Storage->CustomTileUVs,
-							UnusedNormalBasisMap,
 							MatchingTriangleCount,
 							&ProjectedInputError,
 							&Storage->RasterSourceTriangleIndices);
@@ -1067,7 +992,6 @@ namespace
 
 	struct FProxyBatchBuildResult
 	{
-		bool bCancelled = false;
 		FString Report;
 		TArray<UObject*> CreatedAssets;
 	};
@@ -1633,7 +1557,6 @@ namespace
 			}
 			if (BuildResult.bCancelled)
 			{
-				BatchResult.bCancelled = true;
 				break;
 			}
 		}

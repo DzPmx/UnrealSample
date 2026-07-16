@@ -308,17 +308,6 @@ namespace UE::FoliageBaker::PlaneCover
 				&& FMath::IsFinite(OutMaxV);
 		}
 
-		int32 RoundUpToPowerOfTwoWithinLimit(const int32 Value, const int32 MaxValue)
-		{
-			const int32 ClampedValue = FMath::Max(1, Value);
-			int32 PowerOfTwo = 1;
-			while (PowerOfTwo < ClampedValue && PowerOfTwo < MaxValue)
-			{
-				PowerOfTwo <<= 1;
-			}
-			return PowerOfTwo <= MaxValue ? PowerOfTwo : 0;
-		}
-
 		double ComputeSourceBoundsMaxDimension(const TArray<FSourceTriangle>& Triangles)
 		{
 			FBox Bounds(ForceInit);
@@ -902,19 +891,6 @@ namespace UE::FoliageBaker::PlaneCover
 				OutMinSignedDistance = 0.0;
 				OutMaxSignedDistance = 0.0;
 			}
-		}
-
-		bool IsPointInsidePreparedPlaneEnvelope(const FPreparedProxyPlane& Plane, const FVector& Point, const double Tolerance)
-		{
-			const double U = FVector::DotProduct(Point, Plane.AxisU);
-			const double V = FVector::DotProduct(Point, Plane.AxisV);
-			const double SignedDistance = FVector::DotProduct(Plane.OrientedNormal, Point) - Plane.OrientedRho;
-			return U >= Plane.EnvelopeMinU - Tolerance
-				&& U <= Plane.EnvelopeMaxU + Tolerance
-				&& V >= Plane.EnvelopeMinV - Tolerance
-				&& V <= Plane.EnvelopeMaxV + Tolerance
-				&& SignedDistance >= Plane.EnvelopeMinSignedDistance - Tolerance
-				&& SignedDistance <= Plane.EnvelopeMaxSignedDistance + Tolerance;
 		}
 
 		double GetPreparedPlaneEnvelopeCoordinate(const FPreparedProxyPlane& Plane, const FVector& Point, const int32 AxisIndex)

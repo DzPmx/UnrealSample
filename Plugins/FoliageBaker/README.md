@@ -150,9 +150,9 @@ Normal A 的深度沿相机到模型的拍摄射线映射，使用 `lerp(-Shared
 1. 在 Unreal Editor 主菜单中打开 `Tools > Foliage Baker`。
 2. 选择 `Single Billboard`、`Cross Cards`、`Impostor` 或 `BillboardClouds` 标签。
 3. 在 Content Browser 中选择一个或多个 Static Mesh，然后点击 `Add Content Browser Selection`，也可以直接在 Mesh 列表中指定资产。
-4. 设置 Source LOD、网格输出方式和功能参数。
+4. 设置 Source LOD 和功能参数。
 5. 在 Editor Preferences 中为当前功能配置 Parent Material Instance，并在工具中确认纹理参数名称。
-6. 点击当前功能的 Bake 按钮。
+6. 点击当前功能的 Bake 按钮；烘焙完成后在弹窗中选择网格输出方式。
 
 ## 模块结构
 

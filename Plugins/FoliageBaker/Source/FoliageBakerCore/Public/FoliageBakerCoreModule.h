@@ -6,5 +6,4 @@ class FOLIAGEBAKERCORE_API FFoliageBakerCoreModule final : public IModuleInterfa
 {
 public:
 	virtual void StartupModule() override;
-	virtual void ShutdownModule() override;
 };

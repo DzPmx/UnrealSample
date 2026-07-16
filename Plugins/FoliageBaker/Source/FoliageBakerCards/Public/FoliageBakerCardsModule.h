@@ -12,9 +12,7 @@ enum class EFoliageBakerCardMode : uint8;
 class FOLIAGEBAKERCARDS_API FFoliageBakerCardsModule final : public IModuleInterface
 {
 public:
-	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
-
 
 	TSharedRef<SWidget> CreateFeaturePanel(EFoliageBakerCardMode Mode);
 

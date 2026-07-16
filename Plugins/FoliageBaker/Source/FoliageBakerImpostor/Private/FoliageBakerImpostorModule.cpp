@@ -74,10 +74,6 @@ namespace
 	}
 }
 
-void FFoliageBakerImpostorModule::StartupModule()
-{
-}
-
 void FFoliageBakerImpostorModule::ShutdownModule()
 {
 	DetailsView.Reset();

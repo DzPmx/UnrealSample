@@ -318,7 +318,7 @@ FText FFoliageBakerEditorModule::GetActiveFeatureDescription() const
 	case CrossCardsFeatureIndex:
 		return LOCTEXT("CrossCardsFeatureDescription", "Bake 2-5 equally spaced vertical cards. Every angle is cropped independently and captures both front and back.");
 	case ImpostorFeatureIndex:
-		return LOCTEXT("ImpostorFeatureDescription", "Bake a fixed-grid upper-hemisphere or full-sphere view atlas and an octahedral proxy.");
+		return LOCTEXT("ImpostorFeatureDescription", "Bake an octahedrally encoded upper-hemisphere or full-sphere view atlas and a camera-facing cutout proxy.");
 	case BillboardCloudsFeatureIndex:
 		return LOCTEXT("BillboardCloudsFeatureDescription", "Generate an adaptive cloud of planes using the existing BillboardClouds workflow.");
 	case SingleBillboardFeatureIndex:
@@ -334,7 +334,7 @@ FText FFoliageBakerEditorModule::GetActiveFeatureMetadata() const
 	case CrossCardsFeatureIndex:
 		return LOCTEXT("CrossCardsFeatureMetadata", "Selectable source LOD  |  2-5 planes  |  front + back  |  2048 default");
 	case ImpostorFeatureIndex:
-		return LOCTEXT("ImpostorFeatureMetadata", "Selectable source LOD  |  per-view fitted projection  |  shared depth range");
+		return LOCTEXT("ImpostorFeatureMetadata", "Selectable source LOD  |  fixed N x N direction grid  |  shared projection and depth range");
 	case BillboardCloudsFeatureIndex:
 		return LOCTEXT("BillboardCloudsFeatureMetadata", "Selectable source LOD  |  adaptive plane cloud  |  existing output workflow");
 	case SingleBillboardFeatureIndex:

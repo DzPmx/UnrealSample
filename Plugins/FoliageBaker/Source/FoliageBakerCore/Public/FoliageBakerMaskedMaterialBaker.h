@@ -21,7 +21,6 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileRequest
 	bool bBakeBaseColor = true;
 	bool bBakeObjectSpaceNormal = true;
 	bool bBakePackedMix = false;
-	bool bReverseTwoSidedNormalFacing = false;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileResult

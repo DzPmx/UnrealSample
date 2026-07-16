@@ -327,7 +327,6 @@ namespace
 			DepthCorrectRequest.bBakeBaseColor = Settings.bBakeBaseColorSdf;
 			DepthCorrectRequest.bBakeObjectSpaceNormal = Settings.bBakeNormalDepth;
 			DepthCorrectRequest.bBakePackedMix = Settings.bBakeMix;
-			DepthCorrectRequest.bReverseTwoSidedNormalFacing = true;
 			DepthCorrectRequest.Materials.Reserve(ReferencedMaterialIndices.Num());
 
 			for (const int32 MaterialIndex : ReferencedMaterialIndices)
@@ -343,15 +342,12 @@ namespace
 				}
 
 				UE::FoliageBaker::ProjectedMaterialBake::FPlaneSideBakeParams ProjectedBakeParams;
-				ProjectedBakeParams.TileSize = View.TileSize;
 				ProjectedBakeParams.CaptureRayDirection = View.CaptureRayDirection;
 				ProjectedBakeParams.AtlasVConvention =
 					UE::FoliageBaker::PlaneCover::EAtlasVConvention::GeometryMinVToTextureMaxV;
 				ProjectedBakeParams.MaterialIndexFilter = MaterialIndex;
 				ProjectedBakeParams.bBackSide = false;
-				ProjectedBakeParams.bBuildNormalBasisMap = false;
 
-				TArray<UE::FoliageBaker::ProjectedMaterialBake::FNormalBasisSample> UnusedNormalBasisMap;
 				int32 MatchingTriangleCount = 0;
 				FString ProjectedInputError;
 				const bool bBuiltPlaneSideBakeInputs =
@@ -363,7 +359,6 @@ namespace
 						ProjectedBakeParams,
 						Storage->MeshDescription,
 						Storage->CustomTileUVs,
-						UnusedNormalBasisMap,
 						MatchingTriangleCount,
 						&ProjectedInputError,
 						&Storage->RasterSourceTriangleIndices);
