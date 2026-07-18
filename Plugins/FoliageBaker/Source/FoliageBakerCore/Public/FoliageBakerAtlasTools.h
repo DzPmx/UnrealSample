@@ -5,6 +5,7 @@
 
 namespace UE::FoliageBaker::Atlas
 {
+	FOLIAGEBAKERCORE_API uint8 EncodeTrunkLeafAlpha(bool bIsTrunk);
 
 	FOLIAGEBAKERCORE_API void NormalizeEncodedObjectSpaceNormals(TArray<FColor>& Pixels);
 

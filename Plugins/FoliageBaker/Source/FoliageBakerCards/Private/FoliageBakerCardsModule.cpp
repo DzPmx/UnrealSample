@@ -16,8 +16,6 @@ namespace
 	constexpr int32 MaxTextureResolution = 4096;
 	constexpr int32 MinAlphaCropGuardPixels = 2;
 	constexpr int32 MaxAlphaCropGuardPixels = 16;
-	constexpr int32 MinOpacitySdfRangePixels = 1;
-	constexpr int32 MaxOpacitySdfRangePixels = 64;
 
 	bool IsSingleBillboardMode(const EFoliageBakerCardMode Mode)
 	{
@@ -52,6 +50,13 @@ namespace
 		}
 	}
 
+	EFoliageBakerCrossCardGeometryMode ToCoreGeometryMode(const EFoliageBakerCrossCardFaceMode FaceMode)
+	{
+		return FaceMode == EFoliageBakerCrossCardFaceMode::SeparateOneSidedFaces
+			? EFoliageBakerCrossCardGeometryMode::SeparateOneSidedFaces
+			: EFoliageBakerCrossCardGeometryMode::TwoSidedTwoUVs;
+	}
+
 	FFoliageBakerCardBakeRequest BuildRequest(
 		UStaticMesh& StaticMesh,
 		UMaterialInstanceConstant& MaterialTemplate,
@@ -67,6 +72,7 @@ namespace
 			Settings.CrossCardPlaneCount,
 			MinCardPlaneCount,
 			MaxCardPlaneCount);
+		Request.CrossCardGeometryMode = ToCoreGeometryMode(Settings.CrossCardFaceMode);
 		Request.TrunkMaterialKeywords = Settings.TrunkMaterialKeywords;
 		Request.TextureResolution = FMath::Clamp(
 			IsSingleBillboardMode(Settings.Mode)
@@ -78,10 +84,6 @@ namespace
 			Settings.AlphaCropGuardPixels,
 			MinAlphaCropGuardPixels,
 			MaxAlphaCropGuardPixels);
-		Request.OpacitySdfRangePixels = FMath::Clamp(
-			Settings.OpacitySdfRangePixels,
-			MinOpacitySdfRangePixels,
-			MaxOpacitySdfRangePixels);
 		Request.bTrimUnusedAtlasSpace = Settings.bTrimUnusedAtlasSpace;
 		Request.bBakeBaseColorOpacity = Settings.bBakeBaseColorOpacity;
 		Request.bBakeNormalDepth = Settings.bBakeNormalDepth;
@@ -89,6 +91,10 @@ namespace
 		Request.BaseColorOpacityTextureParameterName = Settings.BaseColorOpacityTextureParameterName;
 		Request.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;
+		Request.LeafRoughnessParameterName = Settings.LeafRoughnessParameterName;
+		Request.LeafSpecularParameterName = Settings.LeafSpecularParameterName;
+		Request.TrunkRoughnessParameterName = Settings.TrunkRoughnessParameterName;
+		Request.TrunkSpecularParameterName = Settings.TrunkSpecularParameterName;
 		Request.TextureOutputFolderName = Settings.TextureOutputFolderName;
 		Request.MaterialOutputFolderName = Settings.MaterialOutputFolderName;
 		Request.TextureNamePrefix = Settings.TextureNamePrefix;

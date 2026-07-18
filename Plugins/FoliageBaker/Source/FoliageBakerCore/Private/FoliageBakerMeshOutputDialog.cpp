@@ -33,6 +33,7 @@ namespace
 			ParentWindow = InArgs._ParentWindow;
 			const int32 LastLODIndex = GetLastLODIndex();
 			ReplaceLODIndex = LastLODIndex > 0 ? LastLODIndex : 0;
+			InsertAfterLODIndex = FMath::Clamp(SourceLODIndex, 0, FMath::Max(LastLODIndex, 0));
 
 			ChildSlot
 			[
@@ -98,6 +99,41 @@ namespace
 							.AutoHeight()
 							[
 								SNew(STextBlock).Text(FText::FromString(TEXT("Reuse the previously generated feature LOD or append a new LOD.")))
+							]
+						]
+					]
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						[
+							SNew(SButton)
+							.ContentPadding(FMargin(12.0f, 8.0f))
+							.IsEnabled(this, &SFoliageBakerMeshOutputDialog::CanInsertAfterSelectedLOD)
+							.ToolTipText(this, &SFoliageBakerMeshOutputDialog::GetInsertLODToolTip)
+							.OnClicked(this, &SFoliageBakerMeshOutputDialog::ChooseInsertLOD)
+							[
+								SNew(STextBlock).Text(FText::FromString(TEXT("Insert After LOD")))
+							]
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(SBox)
+							.WidthOverride(90.0f)
+							[
+								SNew(SNumericEntryBox<int32>)
+								.MinValue(FMath::Clamp(SourceLODIndex, 0, FMath::Max(GetLastLODIndex(), 0)))
+								.MaxValue(FMath::Max(GetLastLODIndex(), 0))
+								.MinSliderValue(FMath::Clamp(SourceLODIndex, 0, FMath::Max(GetLastLODIndex(), 0)))
+								.MaxSliderValue(FMath::Max(GetLastLODIndex(), 0))
+								.Value(this, &SFoliageBakerMeshOutputDialog::GetInsertAfterLODIndex)
+								.OnValueChanged(this, &SFoliageBakerMeshOutputDialog::SetInsertAfterLODIndex)
 							]
 						]
 					]
@@ -196,6 +232,14 @@ namespace
 			return CanReplaceLOD(ReplaceLODIndex);
 		}
 
+		bool CanInsertAfterSelectedLOD() const
+		{
+			return SourceStaticMesh
+				&& GetLODCount() < MAX_STATIC_MESH_LODS
+				&& SourceStaticMesh->IsSourceModelValid(InsertAfterLODIndex)
+				&& InsertAfterLODIndex >= SourceLODIndex;
+		}
+
 		bool CanReplaceLastLOD() const
 		{
 			const int32 LastLODIndex = GetLastLODIndex();
@@ -210,6 +254,34 @@ namespace
 		void SetReplaceLODIndex(const int32 Value)
 		{
 			ReplaceLODIndex = Value;
+		}
+
+		TOptional<int32> GetInsertAfterLODIndex() const
+		{
+			return InsertAfterLODIndex;
+		}
+
+		void SetInsertAfterLODIndex(const int32 Value)
+		{
+			InsertAfterLODIndex = Value;
+		}
+
+		FText GetInsertLODToolTip() const
+		{
+			if (GetLODCount() >= MAX_STATIC_MESH_LODS)
+			{
+				return FText::FromString(FString::Printf(
+					TEXT("Unavailable because Static Meshes support at most %d LODs."),
+					MAX_STATIC_MESH_LODS));
+			}
+			if (InsertAfterLODIndex < SourceLODIndex)
+			{
+				return FText::FromString(TEXT("Choose the selected source LOD or a later LOD so the source LOD is not renumbered."));
+			}
+			return FText::FromString(FString::Printf(
+				TEXT("Insert the generated proxy as LOD%d and shift the existing LOD%d and every later LOD back by one."),
+				InsertAfterLODIndex + 1,
+				InsertAfterLODIndex + 1));
 		}
 
 		FText GetReplaceLastLODText() const
@@ -236,22 +308,30 @@ namespace
 
 		FReply ChooseSeparateMesh()
 		{
-			return Confirm(EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset, INDEX_NONE);
+			return Confirm(EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset, INDEX_NONE, INDEX_NONE);
 		}
 
 		FReply ChooseAddLOD()
 		{
-			return Confirm(EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD, INDEX_NONE);
+			return Confirm(EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD, INDEX_NONE, INDEX_NONE);
+		}
+
+		FReply ChooseInsertLOD()
+		{
+			return Confirm(
+				EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD,
+				INDEX_NONE,
+				InsertAfterLODIndex);
 		}
 
 		FReply ChooseReplaceLOD()
 		{
-			return Confirm(EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD, ReplaceLODIndex);
+			return Confirm(EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD, ReplaceLODIndex, INDEX_NONE);
 		}
 
 		FReply ChooseReplaceLastLOD()
 		{
-			return Confirm(EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD, GetLastLODIndex());
+			return Confirm(EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD, GetLastLODIndex(), INDEX_NONE);
 		}
 
 		FReply Cancel()
@@ -263,11 +343,15 @@ namespace
 			return FReply::Handled();
 		}
 
-		FReply Confirm(const EFoliageBakerMeshAssetOutputMode OutputMode, const int32 ReplaceIndex)
+		FReply Confirm(
+			const EFoliageBakerMeshAssetOutputMode OutputMode,
+			const int32 ReplaceIndex,
+			const int32 InsertAfterIndex)
 		{
 			FFoliageBakerMeshOutputSelection ResolvedSelection;
 			ResolvedSelection.OutputMode = OutputMode;
 			ResolvedSelection.ReplaceLODIndex = ReplaceIndex;
+			ResolvedSelection.InsertAfterLODIndex = InsertAfterIndex;
 			Selection = ResolvedSelection;
 			return Cancel();
 		}
@@ -275,6 +359,7 @@ namespace
 		const UStaticMesh* SourceStaticMesh = nullptr;
 		int32 SourceLODIndex = 0;
 		int32 ReplaceLODIndex = 0;
+		int32 InsertAfterLODIndex = 0;
 		TWeakPtr<SWindow> ParentWindow;
 		TOptional<FFoliageBakerMeshOutputSelection> Selection;
 	};

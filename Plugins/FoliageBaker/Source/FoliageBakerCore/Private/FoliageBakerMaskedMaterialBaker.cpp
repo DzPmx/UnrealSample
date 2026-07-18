@@ -177,6 +177,7 @@ namespace
 		SourceTriangleId,
 		AmbientOcclusion,
 		Roughness,
+		Specular,
 		Metallic,
 		Emission,
 	};
@@ -189,6 +190,7 @@ namespace
 		case EFoliageBakerMaskedOutput::SourceTriangleId: return TEXT("SourceTriangleId");
 		case EFoliageBakerMaskedOutput::AmbientOcclusion: return TEXT("AmbientOcclusion");
 		case EFoliageBakerMaskedOutput::Roughness: return TEXT("Roughness");
+		case EFoliageBakerMaskedOutput::Specular: return TEXT("Specular");
 		case EFoliageBakerMaskedOutput::Metallic: return TEXT("Metallic");
 		case EFoliageBakerMaskedOutput::Emission: return TEXT("Emission");
 		case EFoliageBakerMaskedOutput::ObjectSpaceNormal:
@@ -209,6 +211,8 @@ namespace
 			return EMaterialShaderMapUsage::MaterialExportAO;
 		case EFoliageBakerMaskedOutput::Roughness:
 			return EMaterialShaderMapUsage::MaterialExportRoughness;
+		case EFoliageBakerMaskedOutput::Specular:
+			return EMaterialShaderMapUsage::MaterialExportSpecular;
 		case EFoliageBakerMaskedOutput::Metallic:
 			return EMaterialShaderMapUsage::MaterialExportMetallic;
 		case EFoliageBakerMaskedOutput::Emission:
@@ -257,6 +261,14 @@ namespace
 				SourceMaterialId.B ^ 0x5547484Eu,
 				SourceMaterialId.C ^ 0x45535330u,
 				SourceMaterialId.D ^ 0x4D495831u);
+		}
+		if (Output == EFoliageBakerMaskedOutput::Specular)
+		{
+			return FGuid(
+				SourceMaterialId.A ^ 0x46425350u,
+				SourceMaterialId.B ^ 0x4543554Cu,
+				SourceMaterialId.C ^ 0x41523030u,
+				SourceMaterialId.D ^ 0x41564731u);
 		}
 		if (Output == EFoliageBakerMaskedOutput::Metallic)
 		{
@@ -448,6 +460,7 @@ namespace
 				}
 				if (Output == EFoliageBakerMaskedOutput::AmbientOcclusion
 					|| Output == EFoliageBakerMaskedOutput::Roughness
+					|| Output == EFoliageBakerMaskedOutput::Specular
 					|| Output == EFoliageBakerMaskedOutput::Metallic
 					|| Output == EFoliageBakerMaskedOutput::Emission)
 				{
@@ -457,6 +470,14 @@ namespace
 						SourceProperty = MP_Roughness;
 						Compiler->SetSubstrateMaterialExportType(
 							SME_Roughness,
+							ESubstrateMaterialExportContext::SMEC_Opaque,
+							BLEND_Opaque);
+					}
+					else if (Output == EFoliageBakerMaskedOutput::Specular)
+					{
+						SourceProperty = MP_Specular;
+						Compiler->SetSubstrateMaterialExportType(
+							SME_Specular,
 							ESubstrateMaterialExportContext::SMEC_Opaque,
 							BLEND_Opaque);
 					}
@@ -892,6 +913,7 @@ namespace
 		FFoliageBakerMaskedMaterialProxy* ObjectSpaceNormalProxy = nullptr;
 		FFoliageBakerMaskedMaterialProxy* AmbientOcclusionProxy = nullptr;
 		FFoliageBakerMaskedMaterialProxy* RoughnessProxy = nullptr;
+		FFoliageBakerMaskedMaterialProxy* SpecularProxy = nullptr;
 		FFoliageBakerMaskedMaterialProxy* MetallicProxy = nullptr;
 		FFoliageBakerMaskedMaterialProxy* EmissionProxy = nullptr;
 	};
@@ -1037,8 +1059,10 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	TStrongObjectPtr<UTextureRenderTarget2D> ObjectSpaceNormalTarget;
 	TStrongObjectPtr<UTextureRenderTarget2D> AmbientOcclusionTarget;
 	TStrongObjectPtr<UTextureRenderTarget2D> RoughnessTarget;
+	TStrongObjectPtr<UTextureRenderTarget2D> SpecularTarget;
 	TStrongObjectPtr<UTextureRenderTarget2D> MetallicTarget;
 	TStrongObjectPtr<UTextureRenderTarget2D> EmissionTarget;
+	const bool bBakeRoughness = Request.bBakePackedMix || Request.bBakeRoughnessSpecular;
 	if (Request.bBakeBaseColor)
 	{
 		BaseColorTarget = CreateDepthCorrectTileRenderTarget(Request.TextureSize, FLinearColor::Black, true);
@@ -1050,16 +1074,24 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	if (Request.bBakePackedMix)
 	{
 		AmbientOcclusionTarget = CreateDepthCorrectTileRenderTarget(Request.TextureSize, FLinearColor::White, false);
-		RoughnessTarget = CreateDepthCorrectTileRenderTarget(Request.TextureSize, FLinearColor(0.5f, 0.5f, 0.5f), false);
 		MetallicTarget = CreateDepthCorrectTileRenderTarget(Request.TextureSize, FLinearColor::Black, false);
 		EmissionTarget = CreateDepthCorrectTileRenderTarget(Request.TextureSize, FLinearColor::Black, false);
+	}
+	if (bBakeRoughness)
+	{
+		RoughnessTarget = CreateDepthCorrectTileRenderTarget(Request.TextureSize, FLinearColor(0.5f, 0.5f, 0.5f), false);
+	}
+	if (Request.bBakeRoughnessSpecular)
+	{
+		SpecularTarget = CreateDepthCorrectTileRenderTarget(Request.TextureSize, FLinearColor(0.5f, 0.5f, 0.5f), false);
 	}
 	if (!SourceTriangleIdTarget.IsValid()
 		|| (Request.bBakeBaseColor && !BaseColorTarget.IsValid())
 		|| (Request.bBakeObjectSpaceNormal && !ObjectSpaceNormalTarget.IsValid())
+		|| (bBakeRoughness && !RoughnessTarget.IsValid())
+		|| (Request.bBakeRoughnessSpecular && !SpecularTarget.IsValid())
 		|| (Request.bBakePackedMix
 			&& (!AmbientOcclusionTarget.IsValid()
-				|| !RoughnessTarget.IsValid()
 				|| !MetallicTarget.IsValid()
 				|| !EmissionTarget.IsValid())))
 	{
@@ -1097,6 +1129,11 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 			{
 				FMaterial::DeferredDelete(Resource.RoughnessProxy);
 				Resource.RoughnessProxy = nullptr;
+			}
+			if (Resource.SpecularProxy)
+			{
+				FMaterial::DeferredDelete(Resource.SpecularProxy);
+				Resource.SpecularProxy = nullptr;
 			}
 			if (Resource.MetallicProxy)
 			{
@@ -1186,9 +1223,6 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 			Resource.AmbientOcclusionProxy = new FFoliageBakerMaskedMaterialProxy(
 				*Input.MaterialInterface,
 				EFoliageBakerMaskedOutput::AmbientOcclusion);
-			Resource.RoughnessProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::Roughness);
 			Resource.MetallicProxy = new FFoliageBakerMaskedMaterialProxy(
 				*Input.MaterialInterface,
 				EFoliageBakerMaskedOutput::Metallic);
@@ -1196,9 +1230,32 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 				*Input.MaterialInterface,
 				EFoliageBakerMaskedOutput::Emission);
 			if (!FinishProxy(*Resource.AmbientOcclusionProxy, TEXT("ambient-occlusion"))
-				|| !FinishProxy(*Resource.RoughnessProxy, TEXT("roughness"))
 				|| !FinishProxy(*Resource.MetallicProxy, TEXT("metallic"))
 				|| !FinishProxy(*Resource.EmissionProxy, TEXT("emission")))
+			{
+				FlushRenderingCommands();
+				ReleaseResources();
+				return false;
+			}
+		}
+		if (bBakeRoughness)
+		{
+			Resource.RoughnessProxy = new FFoliageBakerMaskedMaterialProxy(
+				*Input.MaterialInterface,
+				EFoliageBakerMaskedOutput::Roughness);
+			if (!FinishProxy(*Resource.RoughnessProxy, TEXT("roughness")))
+			{
+				FlushRenderingCommands();
+				ReleaseResources();
+				return false;
+			}
+		}
+		if (Request.bBakeRoughnessSpecular)
+		{
+			Resource.SpecularProxy = new FFoliageBakerMaskedMaterialProxy(
+				*Input.MaterialInterface,
+				EFoliageBakerMaskedOutput::Specular);
+			if (!FinishProxy(*Resource.SpecularProxy, TEXT("specular")))
 			{
 				FlushRenderingCommands();
 				ReleaseResources();
@@ -1212,6 +1269,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	UTextureRenderTarget2D* ObjectSpaceNormalTargetPtr = ObjectSpaceNormalTarget.Get();
 	UTextureRenderTarget2D* AmbientOcclusionTargetPtr = AmbientOcclusionTarget.Get();
 	UTextureRenderTarget2D* RoughnessTargetPtr = RoughnessTarget.Get();
+	UTextureRenderTarget2D* SpecularTargetPtr = SpecularTarget.Get();
 	UTextureRenderTarget2D* MetallicTargetPtr = MetallicTarget.Get();
 	UTextureRenderTarget2D* EmissionTargetPtr = EmissionTarget.Get();
 	TArray<FFoliageBakerDepthCorrectTileMaterialResources>* ResourcesPtr = &Resources;
@@ -1222,6 +1280,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 		 ObjectSpaceNormalTargetPtr,
 		 AmbientOcclusionTargetPtr,
 		 RoughnessTargetPtr,
+		 SpecularTargetPtr,
 		 MetallicTargetPtr,
 		 EmissionTargetPtr,
 		 ResourcesPtr,
@@ -1271,9 +1330,21 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 					Resource.AmbientOcclusionProxy->UpdateUniformExpressionCacheIfNeeded(
 						RHICmdList,
 						View.GetFeatureLevel());
+				}
+				if (Resource.RoughnessProxy)
+				{
 					Resource.RoughnessProxy->UpdateUniformExpressionCacheIfNeeded(
 						RHICmdList,
 						View.GetFeatureLevel());
+				}
+				if (Resource.SpecularProxy)
+				{
+					Resource.SpecularProxy->UpdateUniformExpressionCacheIfNeeded(
+						RHICmdList,
+						View.GetFeatureLevel());
+				}
+				if (Resource.MetallicProxy)
+				{
 					Resource.MetallicProxy->UpdateUniformExpressionCacheIfNeeded(
 						RHICmdList,
 						View.GetFeatureLevel());
@@ -1289,6 +1360,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 			TArray<FMeshBatch> ObjectSpaceNormalBatches;
 			TArray<FMeshBatch> AmbientOcclusionBatches;
 			TArray<FMeshBatch> RoughnessBatches;
+			TArray<FMeshBatch> SpecularBatches;
 			TArray<FMeshBatch> MetallicBatches;
 			TArray<FMeshBatch> EmissionBatches;
 			SourceTriangleIdBatches.Reserve(ResourcesPtr->Num());
@@ -1296,6 +1368,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 			ObjectSpaceNormalBatches.Reserve(ResourcesPtr->Num());
 			AmbientOcclusionBatches.Reserve(ResourcesPtr->Num());
 			RoughnessBatches.Reserve(ResourcesPtr->Num());
+			SpecularBatches.Reserve(ResourcesPtr->Num());
 			MetallicBatches.Reserve(ResourcesPtr->Num());
 			EmissionBatches.Reserve(ResourcesPtr->Num());
 			for (int32 ResourceIndex = 0; ResourceIndex < ResourcesPtr->Num(); ++ResourceIndex)
@@ -1326,9 +1399,21 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 					AmbientOcclusionBatches.Add(Resource.Mesh->MakeMeshBatch(
 						*Resource.AmbientOcclusionProxy,
 						ResourceIndex));
+				}
+				if (Resource.RoughnessProxy)
+				{
 					RoughnessBatches.Add(Resource.Mesh->MakeMeshBatch(
 						*Resource.RoughnessProxy,
 						ResourceIndex));
+				}
+				if (Resource.SpecularProxy)
+				{
+					SpecularBatches.Add(Resource.Mesh->MakeMeshBatch(
+						*Resource.SpecularProxy,
+						ResourceIndex));
+				}
+				if (Resource.MetallicProxy)
+				{
 					MetallicBatches.Add(Resource.Mesh->MakeMeshBatch(
 						*Resource.MetallicProxy,
 						ResourceIndex));
@@ -1354,6 +1439,9 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 				: nullptr;
 			FRDGTextureRef RoughnessTexture = RoughnessTargetPtr
 				? RoughnessTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+				: nullptr;
+			FRDGTextureRef SpecularTexture = SpecularTargetPtr
+				? SpecularTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
 			FRDGTextureRef MetallicTexture = MetallicTargetPtr
 				? MetallicTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
@@ -1439,7 +1527,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 						ViewRect,
 						ObjectSpaceNormalBatches);
 				}
-				auto AddMixAttributePass = [&](const TCHAR* PassName, FRDGTextureRef Target, const TArray<FMeshBatch>& Batches)
+				auto AddAttributePass = [&](const TCHAR* PassName, FRDGTextureRef Target, const TArray<FMeshBatch>& Batches)
 				{
 					if (!Target)
 					{
@@ -1460,19 +1548,23 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 						ViewRect,
 						Batches);
 				};
-				AddMixAttributePass(
+				AddAttributePass(
 					TEXT("FoliageBaker.DepthCorrectTile.AmbientOcclusion"),
 					AmbientOcclusionTexture,
 					AmbientOcclusionBatches);
-				AddMixAttributePass(
+				AddAttributePass(
 					TEXT("FoliageBaker.DepthCorrectTile.Roughness"),
 					RoughnessTexture,
 					RoughnessBatches);
-				AddMixAttributePass(
+				AddAttributePass(
+					TEXT("FoliageBaker.DepthCorrectTile.Specular"),
+					SpecularTexture,
+					SpecularBatches);
+				AddAttributePass(
 					TEXT("FoliageBaker.DepthCorrectTile.Metallic"),
 					MetallicTexture,
 					MetallicBatches);
-				AddMixAttributePass(
+				AddAttributePass(
 					TEXT("FoliageBaker.DepthCorrectTile.Emission"),
 					EmissionTexture,
 					EmissionBatches);
@@ -1499,15 +1591,24 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 		|| ReadPixels(*ObjectSpaceNormalTarget.Get(), OutResult.ObjectSpaceNormal);
 	TArray<FColor> AmbientOcclusionPixels;
 	TArray<FColor> RoughnessPixels;
+	TArray<FColor> SpecularPixels;
 	TArray<FColor> MetallicPixels;
 	TArray<FColor> EmissionPixels;
+	const bool bReadRoughness = !bBakeRoughness
+		|| ReadPixels(*RoughnessTarget.Get(), RoughnessPixels);
+	const bool bReadSpecular = !Request.bBakeRoughnessSpecular
+		|| ReadPixels(*SpecularTarget.Get(), SpecularPixels);
 	const bool bReadPackedMix = !Request.bBakePackedMix
 		|| (ReadPixels(*AmbientOcclusionTarget.Get(), AmbientOcclusionPixels)
-			&& ReadPixels(*RoughnessTarget.Get(), RoughnessPixels)
 			&& ReadPixels(*MetallicTarget.Get(), MetallicPixels)
 			&& ReadPixels(*EmissionTarget.Get(), EmissionPixels));
 	ReleaseResources();
-	if (!bReadSourceTriangleId || !bReadBaseColor || !bReadObjectSpaceNormal || !bReadPackedMix)
+	if (!bReadSourceTriangleId
+		|| !bReadBaseColor
+		|| !bReadObjectSpaceNormal
+		|| !bReadRoughness
+		|| !bReadSpecular
+		|| !bReadPackedMix)
 	{
 		OutResult = FFoliageBakerDepthCorrectTileResult();
 		SetMaskedBakeError(OutError, TEXT("Depth-correct tile GPU readback failed or returned an invalid size."));
@@ -1525,6 +1626,11 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 				MetallicPixels[PixelIndex].R,
 				FMath::Max3(Emission.R, Emission.G, Emission.B));
 		}
+	}
+	if (Request.bBakeRoughnessSpecular)
+	{
+		OutResult.Roughness = MoveTemp(RoughnessPixels);
+		OutResult.Specular = MoveTemp(SpecularPixels);
 	}
 	return true;
 }

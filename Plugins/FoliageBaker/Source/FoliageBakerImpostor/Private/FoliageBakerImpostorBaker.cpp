@@ -599,238 +599,266 @@ namespace
 		return true;
 	}
 
-	constexpr int32 ImpostorCutoutTraceResolution = 16;
 	constexpr int32 ImpostorCutoutOutlineVertexCount = 8;
-	constexpr double ImpostorCutoutTraceThreshold = 0.25;
+	constexpr int32 ImpostorCutoutOrientationSampleCount = 32;
+	constexpr double ImpostorCutoutGuardPixels = 2.0;
 
-	struct FCutoutTraceAnchors
+	double ComputeCutoutOutlineArea(const TArray<FVector2D>& Outline)
 	{
-		FVector2D X = FVector2D::ZeroVector;
-		FVector2D Y = FVector2D::ZeroVector;
-	};
+		double TwiceArea = 0.0;
+		for (int32 Index = 0; Index < Outline.Num(); ++Index)
+		{
+			const FVector2D& A = Outline[Index];
+			const FVector2D& B = Outline[(Index + 1) % Outline.Num()];
+			TwiceArea += A.X * B.Y - A.Y * B.X;
+		}
+		return FMath::Abs(TwiceArea) * 0.5;
+	}
 
-	struct FCutoutTraceSegment
+	bool IntersectCutoutSupportLines(
+		const FVector2D& NormalA,
+		const double SupportA,
+		const FVector2D& NormalB,
+		const double SupportB,
+		FVector2D& OutPoint)
 	{
-		FVector2D A = FVector2D::ZeroVector;
-		FVector2D B = FVector2D::ZeroVector;
-	};
+		const double Determinant = NormalA.X * NormalB.Y - NormalA.Y * NormalB.X;
+		if (FMath::IsNearlyZero(Determinant, UE_DOUBLE_SMALL_NUMBER))
+		{
+			return false;
+		}
+		OutPoint = FVector2D(
+			(SupportA * NormalB.Y - NormalA.Y * SupportB) / Determinant,
+			(NormalA.X * SupportB - SupportA * NormalB.X) / Determinant);
+		return FMath::IsFinite(OutPoint.X) && FMath::IsFinite(OutPoint.Y);
+	}
 
-	void BuildCutoutTraceValues(
+	bool BuildCutoutCoverageSupportPoints(
 		const TArray<FImpostorCaptureView>& Views,
 		const TArray<float>& CoverageValues,
 		const int32 AtlasWidth,
-		TArray<double>& OutValues)
+		TArray<FVector2D>& OutSupportPoints,
+		int32& OutTileResolution)
 	{
-		OutValues.Init(0.0, ImpostorCutoutTraceResolution * ImpostorCutoutTraceResolution);
+		if (Views.IsEmpty() || AtlasWidth <= 0)
+		{
+			return false;
+		}
+
+		const FIntPoint TileSize = Views[0].TileSize;
+		if (TileSize.X <= 0 || TileSize.Y <= 0)
+		{
+			return false;
+		}
 		for (const FImpostorCaptureView& View : Views)
 		{
-			for (int32 TraceY = 0; TraceY < ImpostorCutoutTraceResolution; ++TraceY)
+			if (View.TileSize != TileSize)
 			{
-				const double CellMinY = static_cast<double>(TraceY) * View.TileSize.Y / ImpostorCutoutTraceResolution;
-				const double CellMaxY = static_cast<double>(TraceY + 1) * View.TileSize.Y / ImpostorCutoutTraceResolution;
-				const int32 MinY = FMath::FloorToInt(CellMinY);
-				const int32 MaxY = FMath::CeilToInt(CellMaxY);
-				for (int32 TraceX = 0; TraceX < ImpostorCutoutTraceResolution; ++TraceX)
+				return false;
+			}
+		}
+
+		TArray<int32> MinCoveredX;
+		TArray<int32> MaxCoveredX;
+		MinCoveredX.Init(TileSize.X, TileSize.Y);
+		MaxCoveredX.Init(INDEX_NONE, TileSize.Y);
+		for (const FImpostorCaptureView& View : Views)
+		{
+			for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
+			{
+				const int32 AtlasY = View.TilePixelMin.Y + LocalY;
+				for (int32 LocalX = 0; LocalX < TileSize.X; ++LocalX)
 				{
-					const double CellMinX = static_cast<double>(TraceX) * View.TileSize.X / ImpostorCutoutTraceResolution;
-					const double CellMaxX = static_cast<double>(TraceX + 1) * View.TileSize.X / ImpostorCutoutTraceResolution;
-					const int32 MinX = FMath::FloorToInt(CellMinX);
-					const int32 MaxX = FMath::CeilToInt(CellMaxX);
-					double CoverageSum = 0.0;
-					double CoverageWeight = 0.0;
-					for (int32 Y = MinY; Y < MaxY; ++Y)
+					const int32 AtlasX = View.TilePixelMin.X + LocalX;
+					const int32 AtlasIndex = AtlasY * AtlasWidth + AtlasX;
+					if (CoverageValues.IsValidIndex(AtlasIndex)
+						&& CoverageValues[AtlasIndex] > 0.0f)
 					{
-						const double WeightY = FMath::Max(
-							FMath::Min(static_cast<double>(Y + 1), CellMaxY)
-								- FMath::Max(static_cast<double>(Y), CellMinY),
-							0.0);
-						const int32 AtlasY = View.TilePixelMin.Y + FMath::Clamp(Y, 0, View.TileSize.Y - 1);
-						for (int32 X = MinX; X < MaxX; ++X)
-						{
-							const double WeightX = FMath::Max(
-								FMath::Min(static_cast<double>(X + 1), CellMaxX)
-									- FMath::Max(static_cast<double>(X), CellMinX),
-								0.0);
-							const double Weight = WeightX * WeightY;
-							const int32 AtlasX = View.TilePixelMin.X + FMath::Clamp(X, 0, View.TileSize.X - 1);
-							const int32 AtlasIndex = AtlasY * AtlasWidth + AtlasX;
-							if (CoverageValues.IsValidIndex(AtlasIndex))
-							{
-								CoverageSum += CoverageValues[AtlasIndex] * Weight;
-								CoverageWeight += Weight;
-							}
-						}
-					}
-					const int32 TraceIndex = TraceY * ImpostorCutoutTraceResolution + TraceX;
-					const double FilteredCoverage = CoverageWeight > 0.0 ? CoverageSum / CoverageWeight : 0.0;
-					OutValues[TraceIndex] = FMath::Clamp(
-						OutValues[TraceIndex] + FilteredCoverage,
-						0.0,
-						1.0);
-				}
-			}
-		}
-	}
-
-	double SampleCutoutTrace(
-		const TArray<double>& TraceValues,
-		const FIntPoint SamplePoint,
-		const FIntPoint Quadrant)
-	{
-		const int32 X = Quadrant.X == 0
-			? SamplePoint.X
-			: ImpostorCutoutTraceResolution - 1 - SamplePoint.X;
-		const int32 Y = Quadrant.Y == 0
-			? SamplePoint.Y
-			: ImpostorCutoutTraceResolution - 1 - SamplePoint.Y;
-		return TraceValues[Y * ImpostorCutoutTraceResolution + X];
-	}
-
-	FCutoutTraceAnchors FindCutoutTraceAnchors(
-		const TArray<double>& TraceValues,
-		const FIntPoint Quadrant)
-	{
-		FCutoutTraceAnchors Result;
-		double CurrentSample = 0.0;
-		for (int32 Y = 0; Y < 7; ++Y)
-		{
-			for (int32 X = 0; X < 15; ++X)
-			{
-				CurrentSample = SampleCutoutTrace(TraceValues, FIntPoint(X, Y), Quadrant);
-				if (CurrentSample > ImpostorCutoutTraceThreshold)
-				{
-					Result.X = FVector2D(X, Y);
-					break;
-				}
-			}
-			if (CurrentSample > ImpostorCutoutTraceThreshold)
-			{
-				break;
-			}
-		}
-
-		CurrentSample = 0.0;
-		for (int32 X = 0; X < 7; ++X)
-		{
-			for (int32 Y = 0; Y < 15; ++Y)
-			{
-				CurrentSample = SampleCutoutTrace(TraceValues, FIntPoint(X, Y), Quadrant);
-				if (CurrentSample > ImpostorCutoutTraceThreshold)
-				{
-					Result.Y = FVector2D(X, Y);
-					break;
-				}
-			}
-			if (CurrentSample > ImpostorCutoutTraceThreshold)
-			{
-				break;
-			}
-		}
-		return Result;
-	}
-
-	FVector2D TransformCutoutTracePoint(const FVector2D& Point, const FIntPoint Quadrant)
-	{
-		FVector2D Result = Point;
-		if (Quadrant.X != 0)
-		{
-			Result.X = ImpostorCutoutTraceResolution - 1.0 - Result.X;
-		}
-		if (Quadrant.Y != 0)
-		{
-			Result.Y = ImpostorCutoutTraceResolution - 1.0 - Result.Y;
-		}
-		Result += FVector2D(Quadrant);
-		return Result / ImpostorCutoutTraceResolution;
-	}
-
-	FCutoutTraceSegment TraceCutoutQuadrant(
-		const TArray<double>& TraceValues,
-		const FIntPoint Quadrant)
-	{
-		const FCutoutTraceAnchors Anchors = FindCutoutTraceAnchors(TraceValues, Quadrant);
-		const FVector2D VertexA = Anchors.Y;
-		const FVector2D VertexB = Anchors.X;
-		if (VertexA == VertexB)
-		{
-			return {
-				TransformCutoutTracePoint(VertexA, Quadrant),
-				TransformCutoutTracePoint(VertexB, Quadrant)
-			};
-		}
-
-		double MaximumSlopes[ImpostorCutoutOutlineVertexCount] = {};
-		FCutoutTraceSegment MaximumSlopeSegments[ImpostorCutoutOutlineVertexCount];
-		const int32 SliceCount = FMath::Clamp(
-			FMath::TruncToInt(VertexA.Y - VertexB.Y),
-			0,
-			ImpostorCutoutOutlineVertexCount);
-		for (int32 X = FMath::TruncToInt(VertexA.X) + 1; X <= FMath::TruncToInt(VertexB.X); ++X)
-		{
-			for (int32 Y = 0; Y <= FMath::TruncToInt(VertexA.Y); ++Y)
-			{
-				if (SampleCutoutTrace(TraceValues, FIntPoint(X, Y), Quadrant) <= ImpostorCutoutTraceThreshold)
-				{
-					continue;
-				}
-				const FVector2D CurrentVertex(X, Y);
-				for (int32 SliceIndex = 0; SliceIndex < SliceCount; ++SliceIndex)
-				{
-					const double Rise = VertexA.Y - SliceIndex - CurrentVertex.Y;
-					const double Run = CurrentVertex.X - VertexA.X;
-					const double Slope = Rise / Run;
-					if (Slope > MaximumSlopes[SliceIndex])
-					{
-						const double XIntercept = (VertexA.Y - VertexB.Y - SliceIndex) / Slope;
-						MaximumSlopes[SliceIndex] = Slope;
-						MaximumSlopeSegments[SliceIndex].A = VertexA - FVector2D(0.0, SliceIndex);
-						MaximumSlopeSegments[SliceIndex].B = FVector2D(VertexA.X + XIntercept, VertexB.Y);
+						MinCoveredX[LocalY] = FMath::Min(MinCoveredX[LocalY], LocalX);
+						MaxCoveredX[LocalY] = FMath::Max(MaxCoveredX[LocalY], LocalX);
 					}
 				}
-				break;
 			}
 		}
 
-		double MaximumArea = 0.0;
-		int32 LargestSegmentIndex = 0;
-		for (int32 SliceIndex = 0; SliceIndex < SliceCount; ++SliceIndex)
+		OutSupportPoints.Reset(TileSize.Y * 8 + 1);
+		OutSupportPoints.Add(FVector2D(0.5, 0.5));
+		const double InverseWidth = 1.0 / static_cast<double>(TileSize.X);
+		const double InverseHeight = 1.0 / static_cast<double>(TileSize.Y);
+		for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
 		{
-			const FCutoutTraceSegment& Segment = MaximumSlopeSegments[SliceIndex];
-			const double Area = ((Segment.B.X - Segment.A.X) * (Segment.A.Y - Segment.B.Y)) / 2.0;
-			if (Area > MaximumArea)
+			if (MaxCoveredX[LocalY] == INDEX_NONE)
 			{
-				MaximumArea = Area;
-				LargestSegmentIndex = SliceIndex;
+				continue;
 			}
+
+			const double MinX = static_cast<double>(MinCoveredX[LocalY]) * InverseWidth;
+			const double MaxX = static_cast<double>(MaxCoveredX[LocalY] + 1) * InverseWidth;
+			const double MinY = static_cast<double>(LocalY) * InverseHeight;
+			const double MaxY = static_cast<double>(LocalY + 1) * InverseHeight;
+			OutSupportPoints.Add(FVector2D(MinX, MinY));
+			OutSupportPoints.Add(FVector2D(MinX, MaxY));
+			OutSupportPoints.Add(FVector2D(MaxX, MinY));
+			OutSupportPoints.Add(FVector2D(MaxX, MaxY));
 		}
-		return {
-			TransformCutoutTracePoint(MaximumSlopeSegments[LargestSegmentIndex].A, Quadrant),
-			TransformCutoutTracePoint(MaximumSlopeSegments[LargestSegmentIndex].B, Quadrant)
-		};
+
+		OutTileResolution = FMath::Min(TileSize.X, TileSize.Y);
+		return OutSupportPoints.Num() > 1;
 	}
 
-	bool BuildImpostorBakerOutline(
-		const TArray<double>& TraceValues,
+	bool FindMinimumAreaCutoutOctagon(
+		const TArray<FVector2D>& SupportPoints,
+		const double GuardUV,
 		TArray<FVector2D>& OutOutline)
 	{
-		static const FIntPoint Quadrants[] = {
-			FIntPoint(0, 0),
-			FIntPoint(1, 0),
-			FIntPoint(1, 1),
-			FIntPoint(0, 1)
-		};
-		OutOutline.Reset(ImpostorCutoutOutlineVertexCount);
-		for (const FIntPoint Quadrant : Quadrants)
+		constexpr double UnitSquareTolerance = 1.0e-6;
+		constexpr double HalfPlaneTolerance = 1.0e-8;
+		double BestArea = TNumericLimits<double>::Max();
+		TArray<FVector2D> BestOutline;
+
+		for (int32 OrientationIndex = 0;
+			OrientationIndex < ImpostorCutoutOrientationSampleCount;
+			++OrientationIndex)
 		{
-			const FCutoutTraceSegment Segment = TraceCutoutQuadrant(TraceValues, Quadrant);
-			OutOutline.Add(Segment.A);
-			OutOutline.Add(Segment.B);
+			const double BaseAngle = (PI / 4.0)
+				* static_cast<double>(OrientationIndex)
+				/ static_cast<double>(ImpostorCutoutOrientationSampleCount);
+			FVector2D Normals[ImpostorCutoutOutlineVertexCount];
+			double Supports[ImpostorCutoutOutlineVertexCount];
+			for (int32 SideIndex = 0; SideIndex < ImpostorCutoutOutlineVertexCount; ++SideIndex)
+			{
+				const double Angle = BaseAngle + static_cast<double>(SideIndex) * PI / 4.0;
+				Normals[SideIndex] = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
+				Supports[SideIndex] = -TNumericLimits<double>::Max();
+				for (const FVector2D& Point : SupportPoints)
+				{
+					Supports[SideIndex] = FMath::Max(
+						Supports[SideIndex],
+						FVector2D::DotProduct(Normals[SideIndex], Point));
+				}
+				Supports[SideIndex] += GuardUV;
+			}
+
+			TArray<FVector2D> CandidateOutline;
+			CandidateOutline.Reserve(ImpostorCutoutOutlineVertexCount);
+			bool bValidCandidate = true;
+			for (int32 SideIndex = 0; SideIndex < ImpostorCutoutOutlineVertexCount; ++SideIndex)
+			{
+				const int32 NextSideIndex = (SideIndex + 1) % ImpostorCutoutOutlineVertexCount;
+				FVector2D Point;
+				if (!IntersectCutoutSupportLines(
+						Normals[SideIndex],
+						Supports[SideIndex],
+						Normals[NextSideIndex],
+						Supports[NextSideIndex],
+						Point)
+					|| Point.X < -UnitSquareTolerance
+					|| Point.X > 1.0 + UnitSquareTolerance
+					|| Point.Y < -UnitSquareTolerance
+					|| Point.Y > 1.0 + UnitSquareTolerance)
+				{
+					bValidCandidate = false;
+					break;
+				}
+				Point.X = FMath::Clamp(Point.X, 0.0, 1.0);
+				Point.Y = FMath::Clamp(Point.Y, 0.0, 1.0);
+				CandidateOutline.Add(Point);
+			}
+			if (!bValidCandidate)
+			{
+				continue;
+			}
+
+			for (const FVector2D& Point : CandidateOutline)
+			{
+				for (int32 SideIndex = 0; SideIndex < ImpostorCutoutOutlineVertexCount; ++SideIndex)
+				{
+					if (FVector2D::DotProduct(Normals[SideIndex], Point)
+						> Supports[SideIndex] + HalfPlaneTolerance)
+					{
+						bValidCandidate = false;
+						break;
+					}
+				}
+				if (!bValidCandidate)
+				{
+					break;
+				}
+			}
+			if (!bValidCandidate)
+			{
+				continue;
+			}
+
+			const double Area = ComputeCutoutOutlineArea(CandidateOutline);
+			if (Area > UE_DOUBLE_SMALL_NUMBER && Area < BestArea)
+			{
+				BestArea = Area;
+				BestOutline = MoveTemp(CandidateOutline);
+			}
 		}
-		OutOutline.Sort([](const FVector2D& A, const FVector2D& B)
+
+		if (BestOutline.Num() != ImpostorCutoutOutlineVertexCount)
+		{
+			return false;
+		}
+		BestOutline.Sort([](const FVector2D& A, const FVector2D& B)
 		{
 			return FMath::Atan2(A.Y - 0.5, A.X - 0.5)
 				> FMath::Atan2(B.Y - 0.5, B.X - 0.5);
 		});
+		OutOutline = MoveTemp(BestOutline);
+		return true;
+	}
+
+	bool BuildConservativeCutoutOctagon(
+		const TArray<FImpostorCaptureView>& Views,
+		const TArray<float>& CoverageValues,
+		const int32 AtlasWidth,
+		TArray<FVector2D>& OutOutline)
+	{
+		TArray<FVector2D> SupportPoints;
+		int32 TileResolution = 0;
+		if (!BuildCutoutCoverageSupportPoints(
+				Views,
+				CoverageValues,
+				AtlasWidth,
+				SupportPoints,
+				TileResolution))
+		{
+			return false;
+		}
+
+		const double RequestedGuardUV = ImpostorCutoutGuardPixels
+			/ static_cast<double>(FMath::Max(TileResolution, 1));
+		if (FindMinimumAreaCutoutOctagon(SupportPoints, RequestedGuardUV, OutOutline))
+		{
+			return true;
+		}
+
+		double ValidGuardUV = 0.0;
+		double InvalidGuardUV = RequestedGuardUV;
+		if (!FindMinimumAreaCutoutOctagon(SupportPoints, ValidGuardUV, OutOutline))
+		{
+			return false;
+		}
+		for (int32 Iteration = 0; Iteration < 12; ++Iteration)
+		{
+			const double CandidateGuardUV = (ValidGuardUV + InvalidGuardUV) * 0.5;
+			TArray<FVector2D> CandidateOutline;
+			if (FindMinimumAreaCutoutOctagon(
+					SupportPoints,
+					CandidateGuardUV,
+					CandidateOutline))
+			{
+				ValidGuardUV = CandidateGuardUV;
+				OutOutline = MoveTemp(CandidateOutline);
+			}
+			else
+			{
+				InvalidGuardUV = CandidateGuardUV;
+			}
+		}
 		return OutOutline.Num() == ImpostorCutoutOutlineVertexCount;
 	}
 
@@ -850,12 +878,10 @@ namespace
 			OutError = TEXT("The captured coverage is empty and cannot produce an Impostor cutout.");
 			return false;
 		}
-		TArray<double> TraceValues;
-		BuildCutoutTraceValues(Views, CoverageValues, AtlasWidth, TraceValues);
 		TArray<FVector2D> Outline;
-		if (!BuildImpostorBakerOutline(TraceValues, Outline))
+		if (!BuildConservativeCutoutOctagon(Views, CoverageValues, AtlasWidth, Outline))
 		{
-			OutError = TEXT("The combined Impostor coverage cannot produce the UE ImpostorBaker cutout.");
+			OutError = TEXT("The combined Impostor coverage cannot produce a conservative eight-vertex cutout.");
 			return false;
 		}
 
@@ -954,6 +980,7 @@ namespace
 		FFoliageBakerSourceLODAssetParams Params;
 		Params.OutputMode = MeshOutputSelection.OutputMode;
 		Params.RequestedReplaceLODIndex = MeshOutputSelection.ReplaceLODIndex;
+		Params.RequestedInsertAfterLODIndex = MeshOutputSelection.InsertAfterLODIndex;
 		Params.SourceLODIndex = Settings.SourceLODIndex;
 		Params.DesiredUVChannelCount = 1;
 		Params.MaterialSlotName = TEXT("ImpostorProxy");
@@ -1331,7 +1358,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	const double TexelAreaDensityGain = FMath::Square(
 		static_cast<double>(BakeData.SourceBounds.SphereRadius) / BakeData.SharedCaptureHalfExtent);
 	Result.Report = FString::Printf(
-		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask object/local RGB + UE ImpostorBaker Depth A (near 1, far 0, empty 0.5)%s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: UE ImpostorBaker-compatible XY cutout, center + 8 traced outline vertices, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
+		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask object/local RGB + UE ImpostorBaker Depth A (near 1, far 0, empty 0.5)%s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
 		*SourceStaticMesh.GetName(),
 		Settings.SourceLODIndex,
 		Settings.Coverage == EFoliageBakerImpostorCoverage::FullSphere ? TEXT("full sphere") : TEXT("upper hemisphere"),
@@ -1349,6 +1376,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		BakeData.SourceBounds.SphereRadius,
 		BakeData.SharedCaptureHalfExtent,
 		TexelAreaDensityGain,
+		ImpostorCutoutGuardPixels,
 		BakeData.Stats.PaintedPixels,
 		AtlasPixelCount,
 		PaintedPixelPercent,

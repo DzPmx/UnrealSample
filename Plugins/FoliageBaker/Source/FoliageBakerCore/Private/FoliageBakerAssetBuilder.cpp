@@ -39,6 +39,15 @@ namespace
 		return OutputFolder;
 	}
 
+	FString GetGeneratedAssetSourceName(const UStaticMesh& SourceStaticMesh)
+	{
+		const FString SourceName = SourceStaticMesh.GetName();
+		return SourceName.StartsWith(TEXT("SM_"), ESearchCase::CaseSensitive)
+			&& SourceName.Len() > 3
+			? SourceName.RightChop(3)
+			: SourceName;
+	}
+
 	void ResolveAssetPathForPolicy(
 		const FString& BasePackageName,
 		const FString& BaseAssetName,
@@ -239,6 +248,127 @@ namespace
 		{
 			StaticMesh.GetOriginalSectionInfoMap().Remove(LODIndex, SectionIndex);
 		}
+	}
+
+	void RemoveSectionInfoForLOD(FMeshSectionInfoMap& SectionInfoMap, const int32 LODIndex)
+	{
+		const int32 SectionCount = SectionInfoMap.GetSectionNumber(LODIndex);
+		for (int32 SectionIndex = 0; SectionIndex < SectionCount; ++SectionIndex)
+		{
+			SectionInfoMap.Remove(LODIndex, SectionIndex);
+		}
+	}
+
+	void ShiftSectionInfoMapForInsertedLOD(
+		FMeshSectionInfoMap& SectionInfoMap,
+		const int32 OldLODCount,
+		const int32 InsertLODIndex)
+	{
+		for (int32 SourceLODIndex = OldLODCount - 1; SourceLODIndex >= InsertLODIndex; --SourceLODIndex)
+		{
+			const int32 DestinationLODIndex = SourceLODIndex + 1;
+			const int32 SourceSectionCount = SectionInfoMap.GetSectionNumber(SourceLODIndex);
+			TArray<FMeshSectionInfo> SourceSections;
+			SourceSections.Reserve(SourceSectionCount);
+			for (int32 SectionIndex = 0; SectionIndex < SourceSectionCount; ++SectionIndex)
+			{
+				SourceSections.Add(SectionInfoMap.Get(SourceLODIndex, SectionIndex));
+			}
+
+			RemoveSectionInfoForLOD(SectionInfoMap, DestinationLODIndex);
+			for (int32 SectionIndex = 0; SectionIndex < SourceSections.Num(); ++SectionIndex)
+			{
+				SectionInfoMap.Set(DestinationLODIndex, SectionIndex, SourceSections[SectionIndex]);
+			}
+			RemoveSectionInfoForLOD(SectionInfoMap, SourceLODIndex);
+		}
+	}
+
+	void ShiftLODIndexForInsertion(int32& LODIndex, const int32 InsertLODIndex)
+	{
+		if (LODIndex >= InsertLODIndex)
+		{
+			++LODIndex;
+		}
+	}
+
+	void ShiftStaticMeshLODReferencesForInsertion(UStaticMesh& StaticMesh, const int32 InsertLODIndex)
+	{
+		FPerPlatformInt MinimumLOD = StaticMesh.GetMinLOD();
+		ShiftLODIndexForInsertion(MinimumLOD.Default, InsertLODIndex);
+		for (TPair<FName, int32>& Entry : MinimumLOD.PerPlatform)
+		{
+			ShiftLODIndexForInsertion(Entry.Value, InsertLODIndex);
+		}
+		StaticMesh.SetMinLOD(MoveTemp(MinimumLOD));
+
+		FPerQualityLevelInt QualityMinimumLOD = StaticMesh.GetQualityLevelMinLOD();
+		ShiftLODIndexForInsertion(QualityMinimumLOD.Default, InsertLODIndex);
+		for (TPair<int32, int32>& Entry : QualityMinimumLOD.PerQuality)
+		{
+			ShiftLODIndexForInsertion(Entry.Value, InsertLODIndex);
+		}
+		StaticMesh.SetQualityLevelMinLOD(MoveTemp(QualityMinimumLOD));
+		ShiftLODIndexForInsertion(StaticMesh.LODForCollision, InsertLODIndex);
+	}
+
+	void InsertSourceModel(UStaticMesh& StaticMesh, const int32 InsertLODIndex)
+	{
+		const int32 OldLODCount = StaticMesh.GetNumSourceModels();
+		ShiftSectionInfoMapForInsertedLOD(StaticMesh.GetSectionInfoMap(), OldLODCount, InsertLODIndex);
+		ShiftSectionInfoMapForInsertedLOD(StaticMesh.GetOriginalSectionInfoMap(), OldLODCount, InsertLODIndex);
+
+		TArray<FStaticMeshSourceModel> SourceModels = StaticMesh.MoveSourceModels();
+		SourceModels.InsertDefaulted(InsertLODIndex);
+		SourceModels[InsertLODIndex].CreateSubObjects(&StaticMesh);
+		StaticMesh.SetSourceModels(MoveTemp(SourceModels));
+
+		for (int32 LODIndex = 0; LODIndex < StaticMesh.GetNumSourceModels(); ++LODIndex)
+		{
+			if (LODIndex == InsertLODIndex)
+			{
+				continue;
+			}
+			FMeshReductionSettings& ReductionSettings = StaticMesh.GetSourceModel(LODIndex).ReductionSettings;
+			if (ReductionSettings.BaseLODModel >= InsertLODIndex)
+			{
+				++ReductionSettings.BaseLODModel;
+			}
+		}
+		ShiftStaticMeshLODReferencesForInsertion(StaticMesh, InsertLODIndex);
+	}
+
+	struct FGeneratedLODMetadataValue
+	{
+		FName Key = NAME_None;
+		int32 LODIndex = INDEX_NONE;
+	};
+
+	TArray<FGeneratedLODMetadataValue> FindGeneratedLODMetadataToShift(
+		const UStaticMesh& StaticMesh,
+		const int32 InsertLODIndex)
+	{
+		TArray<FGeneratedLODMetadataValue> Result;
+		const TMap<FName, FString>* ObjectMetadata = FMetaData::GetMapForObject(&StaticMesh);
+		if (!ObjectMetadata)
+		{
+			return Result;
+		}
+
+		for (const TPair<FName, FString>& Entry : *ObjectMetadata)
+		{
+			const FString KeyString = Entry.Key.ToString();
+			int32 ExistingLODIndex = INDEX_NONE;
+			if (KeyString.StartsWith(TEXT("FoliageBaker."), ESearchCase::CaseSensitive)
+				&& KeyString.EndsWith(TEXT("LOD"), ESearchCase::CaseSensitive)
+				&& LexTryParseString(ExistingLODIndex, *Entry.Value)
+				&& ExistingLODIndex >= InsertLODIndex
+				&& StaticMesh.IsSourceModelValid(ExistingLODIndex))
+			{
+				Result.Add({ Entry.Key, ExistingLODIndex });
+			}
+		}
+		return Result;
 	}
 
 	void NormalizeEncodedNormalPixels(FColor* Pixels, const int32 PixelCount)
@@ -612,13 +742,42 @@ namespace
 				}
 			}
 		}
+		else if (Params.OutputMode == EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD)
+		{
+			if (!SourceStaticMesh.IsSourceModelValid(Params.RequestedInsertAfterLODIndex))
+			{
+				OutError = FString::Printf(
+					TEXT("Cannot insert after LOD %d on %s because that source LOD does not exist."),
+					Params.RequestedInsertAfterLODIndex,
+					*SourceStaticMesh.GetName());
+				return false;
+			}
+			if (Params.RequestedInsertAfterLODIndex < Params.SourceLODIndex)
+			{
+				OutError = FString::Printf(
+					TEXT("Cannot insert after LOD %d because it is before the selected source LOD %d. Insert after the source LOD or a later LOD so the source geometry is not renumbered."),
+					Params.RequestedInsertAfterLODIndex,
+					Params.SourceLODIndex);
+				return false;
+			}
+			if (SourceStaticMesh.GetNumSourceModels() >= MAX_STATIC_MESH_LODS)
+			{
+				OutError = FString::Printf(
+					TEXT("Cannot insert a proxy LOD into %s because Static Meshes support at most %d LODs."),
+					*SourceStaticMesh.GetName(),
+					MAX_STATIC_MESH_LODS);
+				return false;
+			}
+			OutLODIndex = Params.RequestedInsertAfterLODIndex + 1;
+		}
 		else
 		{
 			OutError = TEXT("A source-mesh LOD output mode is required.");
 			return false;
 		}
 
-		if (OutLODIndex == Params.SourceLODIndex)
+		if (Params.OutputMode != EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD
+			&& OutLODIndex == Params.SourceLODIndex)
 		{
 			OutError = FString::Printf(
 				TEXT("Output LOD %d would overwrite the selected source LOD on %s. Choose a different output LOD so rebaking continues to use the original source geometry."),
@@ -836,7 +995,8 @@ bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
 	const FString OutputFolderPath = RelativeOutputFolder.IsEmpty()
 		? ParentFolderPath
 		: ParentFolderPath / RelativeOutputFolder;
-	OutBaseAssetName = ObjectTools::SanitizeObjectName(AssetNamePrefix + SourceStaticMesh.GetName() + AssetNameSuffix);
+	OutBaseAssetName = ObjectTools::SanitizeObjectName(
+		AssetNamePrefix + GetGeneratedAssetSourceName(SourceStaticMesh) + AssetNameSuffix);
 	OutBasePackageName = OutputFolderPath / OutBaseAssetName;
 
 	FText InvalidNameReason;
@@ -1044,6 +1204,14 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		ResetContext.SetBasePropertyOverrides(FMaterialInstanceBasePropertyOverrides());
 		ResetMaterialInstanceOverridesToDefaults(*MaterialInstance);
 	}
+	if (Params.TwoSidedOverride.IsSet())
+	{
+		FMaterialInstanceBasePropertyOverrides Overrides;
+		Overrides.bOverride_TwoSided = true;
+		Overrides.TwoSided = Params.TwoSidedOverride.GetValue();
+		FMaterialInstanceParameterUpdateContext OverrideContext(MaterialInstance);
+		OverrideContext.SetBasePropertyOverrides(Overrides);
+	}
 	if (BaseColorOpacityTexture)
 	{
 		MaterialInstance->SetTextureParameterValueEditorOnly(
@@ -1061,6 +1229,13 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		MaterialInstance->SetTextureParameterValueEditorOnly(
 			FMaterialParameterInfo(Params.MixTextureParameterName),
 			MixTexture);
+	}
+	for (const UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue& ScalarParameter
+		: Params.ScalarParameterValues)
+	{
+		MaterialInstance->SetScalarParameterValueEditorOnly(
+			FMaterialParameterInfo(ScalarParameter.ParameterName),
+			ScalarParameter.Value);
 	}
 	MaterialInstance->PostEditChange();
 	MaterialInstance->MarkPackageDirty();
@@ -1202,10 +1377,19 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		OutLODIndex = INDEX_NONE;
 		return false;
 	}
-	if (Params.OutputMode == EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD
+	const bool bInsertingLOD =
+		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD;
+	const TArray<FGeneratedLODMetadataValue> GeneratedLODMetadataToShift = bInsertingLOD
+		? FindGeneratedLODMetadataToShift(SourceStaticMesh, OutLODIndex)
+		: TArray<FGeneratedLODMetadataValue>();
+	if ((Params.OutputMode == EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD || bInsertingLOD)
 		&& !Params.RebuildLODMetadataKey.IsNone())
 	{
 		AssetTransaction.SnapshotMetadata(&SourceStaticMesh, Params.RebuildLODMetadataKey);
+	}
+	for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToShift)
+	{
+		AssetTransaction.SnapshotMetadata(&SourceStaticMesh, MetadataValue.Key);
 	}
 
 	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor
@@ -1246,6 +1430,10 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	{
 		SourceStaticMesh.AddSourceModel();
 	}
+	else if (bInsertingLOD)
+	{
+		InsertSourceModel(SourceStaticMesh, OutLODIndex);
+	}
 	if (!SourceStaticMesh.IsSourceModelValid(OutLODIndex))
 	{
 		OutError = FString::Printf(TEXT("Could not allocate source LOD %d on %s."), OutLODIndex, *SourceStaticMesh.GetName());
@@ -1267,13 +1455,26 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	CommitParams.bUseHashAsGuid = false;
 	SourceStaticMesh.CommitMeshDescription(OutLODIndex, CommitParams);
 
+	const int32 AdjustedBaseLODModel = bInsertingLOD
+		&& Params.BaseLODModel >= OutLODIndex
+		? Params.BaseLODModel + 1
+		: Params.BaseLODModel;
 	ConfigureProxySourceModel(
 		SourceStaticMesh,
 		OutLODIndex,
 		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD || bReusingGeneratedLOD,
 		Params.bRecomputeNormals,
 		Params.bRecomputeTangents,
-		Params.BaseLODModel);
+		AdjustedBaseLODModel);
+	if (bInsertingLOD
+		&& SourceStaticMesh.IsSourceModelValid(OutLODIndex - 1)
+		&& SourceStaticMesh.IsSourceModelValid(OutLODIndex + 1))
+	{
+		const float PreviousScreenSize = SourceStaticMesh.GetSourceModel(OutLODIndex - 1).ScreenSize.Default;
+		const float NextScreenSize = SourceStaticMesh.GetSourceModel(OutLODIndex + 1).ScreenSize.Default;
+		SourceStaticMesh.GetSourceModel(OutLODIndex).ScreenSize.Default =
+			FMath::Clamp((PreviousScreenSize + NextScreenSize) * 0.5f, 0.01f, 0.99f);
+	}
 	KeepOnlyUVChannels(SourceStaticMesh, OutLODIndex, Params.DesiredUVChannelCount, false);
 
 	FMeshSectionInfo SectionInfo;
@@ -1284,7 +1485,18 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	SourceStaticMesh.PostEditChange();
 	SourceStaticMesh.MarkPackageDirty();
 
-	if (Params.OutputMode == EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD
+	if (bInsertingLOD)
+	{
+		FMetaData& Metadata = SourceStaticMesh.GetPackage()->GetMetaData();
+		for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToShift)
+		{
+			Metadata.SetValue(
+				&SourceStaticMesh,
+				MetadataValue.Key,
+				*LexToString(MetadataValue.LODIndex + 1));
+		}
+	}
+	if ((Params.OutputMode == EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD || bInsertingLOD)
 		&& !Params.RebuildLODMetadataKey.IsNone())
 	{
 		SourceStaticMesh.GetPackage()->GetMetaData().SetValue(

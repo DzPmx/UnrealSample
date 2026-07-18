@@ -9,6 +9,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMeshOutputSelection
 {
 	EFoliageBakerMeshAssetOutputMode OutputMode = EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
 	int32 ReplaceLODIndex = INDEX_NONE;
+	int32 InsertAfterLODIndex = INDEX_NONE;
 };
 
 class FOLIAGEBAKERCORE_API FFoliageBakerMeshOutputDialog final

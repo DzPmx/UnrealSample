@@ -21,6 +21,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileRequest
 	bool bBakeBaseColor = true;
 	bool bBakeObjectSpaceNormal = true;
 	bool bBakePackedMix = false;
+	bool bBakeRoughnessSpecular = false;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileResult
@@ -28,6 +29,8 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileResult
 	TArray<FColor> BaseColor;
 	TArray<FColor> ObjectSpaceNormal;
 	TArray<FColor> PackedMix;
+	TArray<FColor> Roughness;
+	TArray<FColor> Specular;
 	TArray<FColor> SourceTriangleIdAndDepth;
 };
 

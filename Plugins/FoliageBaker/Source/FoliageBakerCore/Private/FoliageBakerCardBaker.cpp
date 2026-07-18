@@ -23,6 +23,17 @@ DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerCardsCore, Log, All);
 
 namespace
 {
+	bool UsesSeparateOneSidedCrossFaces(const FFoliageBakerCardBakeRequest& Request)
+	{
+		return Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+			&& Request.CrossCardGeometryMode == EFoliageBakerCrossCardGeometryMode::SeparateOneSidedFaces;
+	}
+
+	int32 GetDesiredCardUVChannelCount(const FFoliageBakerCardBakeRequest& Request)
+	{
+		return UsesSeparateOneSidedCrossFaces(Request) ? 1 : 2;
+	}
+
 	bool ComputeSourceTriangleBounds(
 		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
 		FBoxSphereBounds& OutBounds)
@@ -54,6 +65,7 @@ namespace
 		Settings.DoubleSidedBakeMode = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
 			? UE::FoliageBaker::PlaneCover::EDoubleSidedBakeMode::AllPlanes
 			: UE::FoliageBaker::PlaneCover::EDoubleSidedBakeMode::Off;
+		Settings.bEmitBackFaceGeometry = UsesSeparateOneSidedCrossFaces(Request);
 		Settings.AtlasVConvention = UE::FoliageBaker::PlaneCover::EAtlasVConvention::GeometryMinVToTextureMaxV;
 		Settings.TrunkCardAtlasScale = 1.0;
 		FBoxSphereBounds SourceBounds(ForceInitToZero);
@@ -83,7 +95,7 @@ namespace
 		for (UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle : SourceTriangles)
 		{
 			const bool bIsTrunk = MaterialMatches.IsMatch(Triangle.MaterialIndex);
-			Triangle.bTrunkCardOnly = bIsTrunk;
+			Triangle.bIsTrunk = bIsTrunk;
 			if (bIsTrunk)
 			{
 				++Classification.TrunkTriangleCount;
@@ -108,8 +120,8 @@ namespace
 		int32 MaskedMaterialBakeReferences = 0;
 		int32 AlphaAwareCroppedPlanes = 0;
 		int32 AlphaAwareTileCropGuardPixels = 0;
-		int32 OpacitySdfRangePixels = 0;
 		FString MaterialAlphaPolicyDetails;
+		UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialAverages MaterialAverages;
 	};
 
 	struct FCardVisibleFragment
@@ -132,8 +144,6 @@ namespace
 		const UE::FoliageBaker::PlaneCover::FPlaneProxyMeshStats& ProxyStats,
 		const UE::FoliageBaker::PlaneCover::FPlaneProxySettings& Settings,
 		const FAtlasOutputSelection& OutputSelection,
-		const bool bPackOpacitySdf,
-		const int32 OpacitySdfRangePixels,
 		TArray<FColor>& OutPixels,
 		TArray<FColor>& OutNormalPixels,
 		TArray<FColor>& OutMixPixels,
@@ -289,6 +299,8 @@ namespace
 					DepthCorrectRequest.bBakeBaseColor = OutputSelection.bBaseColorOpacity;
 					DepthCorrectRequest.bBakeObjectSpaceNormal = OutputSelection.bNormalMask;
 					DepthCorrectRequest.bBakePackedMix = OutputSelection.bMix;
+					DepthCorrectRequest.bBakeRoughnessSpecular =
+						OutputSelection.bMaterialScalarAverages;
 					DepthCorrectRequest.Materials.Reserve(ReferencedMaterialIndices.Num());
 
 					for (const int32 MaterialIndex : ReferencedMaterialIndices)
@@ -384,16 +396,21 @@ namespace
 						|| (OutputSelection.bNormalMask
 							&& DepthCorrectResult.ObjectSpaceNormal.Num() != TilePixelCount)
 						|| (OutputSelection.bMix
-							&& DepthCorrectResult.PackedMix.Num() != TilePixelCount))
+							&& DepthCorrectResult.PackedMix.Num() != TilePixelCount)
+						|| (OutputSelection.bMaterialScalarAverages
+							&& (DepthCorrectResult.Roughness.Num() != TilePixelCount
+								|| DepthCorrectResult.Specular.Num() != TilePixelCount)))
 					{
 						OutError = FString::Printf(
-							TEXT("Card depth-correct tile returned invalid sizes for plane %d (%s): base=%d, id=%d, normal=%d, mix=%d, expected=%d."),
+							TEXT("Card depth-correct tile returned invalid sizes for plane %d (%s): base=%d, id=%d, normal=%d, mix=%d, roughness=%d, specular=%d, expected=%d."),
 							PlaneInfo.SourcePlaneIndex,
 							bBackSide ? TEXT("back") : TEXT("front"),
 							DepthCorrectResult.BaseColor.Num(),
 							DepthCorrectResult.SourceTriangleIdAndDepth.Num(),
 							DepthCorrectResult.ObjectSpaceNormal.Num(),
 							DepthCorrectResult.PackedMix.Num(),
+							DepthCorrectResult.Roughness.Num(),
+							DepthCorrectResult.Specular.Num(),
 							TilePixelCount);
 						return false;
 					}
@@ -425,12 +442,21 @@ namespace
 
 							const UE::FoliageBaker::PlaneCover::FSourceTriangle& SourceTriangle =
 								Triangles[SourceTriangleIndex];
+							if (OutputSelection.bMaterialScalarAverages)
+							{
+								OutStats.MaterialAverages.AddSample(
+									SourceTriangle.bIsTrunk,
+									DepthCorrectResult.Roughness[TilePixelIndex].R,
+									DepthCorrectResult.Specular[TilePixelIndex].R);
+							}
 							FCardVisibleFragment& GpuFragment = VisibleFragments[TilePixelIndex];
 							if (OutputSelection.bBaseColorOpacity)
 							{
 								GpuFragment.BaseColor = DepthCorrectResult.BaseColor[TilePixelIndex];
 							}
-							GpuFragment.ClassificationValue = SourceTriangle.bTrunkCardOnly ? 128 : 255;
+							GpuFragment.ClassificationValue =
+								UE::FoliageBaker::Atlas::EncodeTrunkLeafAlpha(
+									SourceTriangle.bIsTrunk);
 							GpuFragment.bVisible = true;
 							if (OutputSelection.bNormalMask)
 							{
@@ -524,17 +550,6 @@ namespace
 		}
 
 		UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(OutPixels, OutStats.Width, OutStats.Height, PlaneInfos);
-		if (OutputSelection.bBaseColorOpacity && bPackOpacitySdf)
-		{
-			OutStats.OpacitySdfRangePixels = FMath::Clamp(OpacitySdfRangePixels, 1, 64);
-			UE::FoliageBaker::Atlas::WriteUnionSdfToAlpha(
-				OutPixels,
-				OutStats.Width,
-				OutStats.Height,
-				PlaneInfos,
-				AtlasCoverage,
-				OutStats.OpacitySdfRangePixels);
-		}
 		if (OutputSelection.bNormalMask)
 		{
 			UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(OutNormalPixels, OutStats.Width, OutStats.Height, PlaneInfos, &NormalCoverage, false);
@@ -837,6 +852,8 @@ namespace
 		{
 		case EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD:
 			return TEXT("added to source mesh LODs");
+		case EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD:
+			return TEXT("inserted source mesh LOD");
 		case EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD:
 			return TEXT("replaced source mesh LOD");
 		case EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset:
@@ -913,6 +930,7 @@ namespace
 		Selection.bBaseColorOpacity = Settings.bBakeBaseColorOpacity;
 		Selection.bNormalMask = Settings.bBakeNormalDepth;
 		Selection.bMix = Settings.bBakeMix;
+		Selection.bMaterialScalarAverages = !Settings.bBakeMix;
 		return Selection;
 	}
 
@@ -935,8 +953,9 @@ namespace
 		FFoliageBakerSourceLODAssetParams Params;
 		Params.OutputMode = OutputSelection.OutputMode;
 		Params.RequestedReplaceLODIndex = OutputSelection.ReplaceLODIndex;
+		Params.RequestedInsertAfterLODIndex = OutputSelection.InsertAfterLODIndex;
 		Params.SourceLODIndex = Request.SourceLODIndex;
-		Params.DesiredUVChannelCount = 2;
+		Params.DesiredUVChannelCount = GetDesiredCardUVChannelCount(Request);
 		Params.RebuildLODMetadataKey = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
 			? FName(TEXT("FoliageBaker.SingleBillboardLOD"))
 			: FName(TEXT("FoliageBaker.CrossCardsLOD"));
@@ -1054,7 +1073,7 @@ namespace
 		OutData.OutputSelection = BuildAtlasOutputSelection(EditorSettings);
 		if (!OutData.OutputSelection.HasAnyOutput())
 		{
-			OutError = TEXT("No atlas outputs selected. Enable BaseColor/SDF, Normal/TrunkLeafMask, or Mix.");
+			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Opacity, Normal/TrunkLeafMask, or Mix.");
 			return false;
 		}
 		UMaterialInstanceConstant* TemplateMaterialInstance = EditorSettings.MaterialTemplate;
@@ -1065,7 +1084,6 @@ namespace
 		}
 
 		auto BakeFeatureAtlas = [&](const FAtlasOutputSelection& OutputSelection,
-			const bool bPackOpacitySdf,
 			TArray<FColor>& AtlasPixels,
 			TArray<FColor>& NormalPixels,
 			TArray<FColor>& MixPixels,
@@ -1079,8 +1097,6 @@ namespace
 				MeshData.Stats,
 				CoverData.Settings,
 				OutputSelection,
-				bPackOpacitySdf,
-				EditorSettings.OpacitySdfRangePixels,
 				AtlasPixels,
 				NormalPixels,
 				MixPixels,
@@ -1105,7 +1121,6 @@ namespace
 			FAtlasBakeStats CropStats;
 			if (!BakeFeatureAtlas(
 				CropOutputSelection,
-				false,
 				CropAtlasPixels,
 				CropNormalPixels,
 				CropMixPixels,
@@ -1141,7 +1156,6 @@ namespace
 
 		if (!BakeFeatureAtlas(
 			OutData.OutputSelection,
-			true,
 			OutData.AtlasPixels,
 			OutData.NormalAtlasPixels,
 			OutData.MixAtlasPixels,
@@ -1226,6 +1240,28 @@ namespace
 		MaterialParams.BaseColorOpacityTextureParameterName = EditorSettings.BaseColorOpacityTextureParameterName;
 		MaterialParams.NormalDepthTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
+		if (OutData.OutputSelection.bMaterialScalarAverages)
+		{
+			const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
+				ParameterNames = {
+					EditorSettings.LeafRoughnessParameterName,
+					EditorSettings.LeafSpecularParameterName,
+					EditorSettings.TrunkRoughnessParameterName,
+					EditorSettings.TrunkSpecularParameterName,
+				};
+			if (!UE::FoliageBaker::MaterialResolver::ResolveTrunkLeafMaterialScalarParameters(
+					OutData.AtlasStats.MaterialAverages,
+					ParameterNames,
+					MaterialParams.ScalarParameterValues,
+					OutError))
+			{
+				return false;
+			}
+		}
+		if (EditorSettings.Mode == EFoliageBakerCardBakeMode::CrossCards)
+		{
+			MaterialParams.TwoSidedOverride = !UsesSeparateOneSidedCrossFaces(EditorSettings);
+		}
 		OutData.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,
 			AssetTransaction,
@@ -1257,7 +1293,7 @@ namespace
 				? TEXT("_Billboard")
 				: TEXT("_CrossCards");
 			MeshParams.ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
-			MeshParams.DesiredUVChannelCount = 2;
+			MeshParams.DesiredUVChannelCount = GetDesiredCardUVChannelCount(EditorSettings);
 			OutResult.ProxyMesh = FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 				StaticMesh,
 				AssetTransaction,
@@ -1309,16 +1345,32 @@ namespace
 		const FString AlphaPolicyDetails = TextureData.AtlasStats.MaterialAlphaPolicyDetails.IsEmpty()
 			? FString()
 			: FString::Printf(TEXT("\n  alpha policy:%s"), *TextureData.AtlasStats.MaterialAlphaPolicyDetails);
+		const FString CrossFaceDetails = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
+			? FString()
+			: FString::Printf(
+				TEXT("\n  cross face mode: %s"),
+				UsesSeparateOneSidedCrossFaces(Request)
+					? TEXT("separate one-sided front/back quads, generated material Two Sided=false")
+					: TEXT("one two-sided quad per direction, generated material Two Sided=true"));
+		const TCHAR* AtlasUVDetails = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
+			? TEXT("UV0 stores the single baked tile")
+			: UsesSeparateOneSidedCrossFaces(Request)
+				? TEXT("each physical face stores its own front/back tile in UV0; generated mesh keeps one UV channel")
+				: TEXT("UV0 stores the front-side tile and UV1 stores the back-side tile");
+		const TCHAR* WindingDetails = UsesSeparateOneSidedCrossFaces(Request)
+			? TEXT("opposed UE front-face orders with opposed source-facing normals")
+			: TEXT("reversed UE front-face order with source-facing normals");
 
 		const FString TechniqueSummary = FString::Printf(
-			TEXT("%s\n  source LOD: %d, selected-LOD bounds radius: %.3f cm\n  feature: %s, capture=%s, selected-LOD projected bounds, per-angle alpha crop\n  trunk/leaf classification: shared material/parent keyword rule, matched materials=%d, trunk triangles=%d"),
+			TEXT("%s\n  source LOD: %d, selected-LOD bounds radius: %.3f cm\n  feature: %s, capture=%s, selected-LOD projected bounds, per-angle alpha crop\n  trunk/leaf classification: shared material/parent keyword rule, matched materials=%d, trunk triangles=%d%s"),
 			*StaticMesh.GetName(),
 			CoverData.SourceLODIndex,
 			CoverData.SourceLODBounds.SphereRadius,
 			Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard ? TEXT("Single Billboard") : TEXT("Cross Cards"),
 			Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard ? TEXT("one selected axis, one baked side") : TEXT("equally spaced over 180 degrees, front and back baked"),
 			CoverData.TrunkLeafClassification.MatchedMaterialCount,
-			CoverData.TrunkLeafClassification.TrunkTriangleCount);
+			CoverData.TrunkLeafClassification.TrunkTriangleCount,
+			*CrossFaceDetails);
 		const FString BaseAtlasPath = TextureData.AtlasTexture ? TextureData.AtlasTexture->GetPathName() : TEXT("disabled");
 		const FString NormalAtlasPath = TextureData.NormalAtlasTexture ? TextureData.NormalAtlasTexture->GetPathName() : TEXT("disabled");
 		const FString MixAtlasPath = TextureData.MixAtlasTexture ? TextureData.MixAtlasTexture->GetPathName() : TEXT("disabled");
@@ -1329,13 +1381,25 @@ namespace
 			? TEXT("BuildFromMeshDescriptions full build path")
 			: TEXT("source StaticMesh LOD MeshDescription commit");
 		const FString MaterialParameterDetails = FString::Printf(
-			TEXT("BaseColor/SDF=%s, Normal/TrunkLeafMask=%s, Mix=%s"),
+			TEXT("BaseColor/Opacity=%s, Normal/TrunkLeafMask=%s, Mix=%s"),
 			*Request.BaseColorOpacityTextureParameterName.ToString(),
 			*Request.NormalDepthTextureParameterName.ToString(),
 			*Request.MixTextureParameterName.ToString());
+		const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
+			MaterialScalarParameterNames = {
+				Request.LeafRoughnessParameterName,
+				Request.LeafSpecularParameterName,
+				Request.TrunkRoughnessParameterName,
+				Request.TrunkSpecularParameterName,
+			};
+		const FString MaterialScalarDetails =
+			UE::FoliageBaker::MaterialResolver::BuildTrunkLeafMaterialAveragesReport(
+				!Request.bBakeMix,
+				TextureData.AtlasStats.MaterialAverages,
+				MaterialScalarParameterNames);
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  base/color SDF atlas: %s, RGB=BaseColor, A=whole-vegetation Union SDF (outside 0, contour 0.5, inside 1), SDF range=%d px\n  normal/trunk-leaf atlas: %s, RGB=object/local-space normal, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; Single Billboard uses one baked side\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/trunk-leaf atlas: %s, RGB=object/local-space normal, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  material scalar averages: %s\n  atlas UVs: %s\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: %s"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
@@ -1358,16 +1422,18 @@ namespace
 				: TEXT("dedicated fixed-angle orthographic capture, front and back per plane, all selected-LOD triangles, WPO disabled"),
 			TEXT("one shared per-tile masked RDG depth winner supplies BaseColor, object normal, source triangle ID, and packed Mix; no CPU material-property fallback"),
 			*BaseAtlasPath,
-			TextureData.AtlasStats.OpacitySdfRangePixels,
 			*NormalAtlasPath,
 			*MixAtlasPath,
+			*MaterialScalarDetails,
+			AtlasUVDetails,
 			*TextureData.Material->GetPathName(),
 			*MaterialParameterDetails,
 			MeshData.Stats.SourceShadingNormalTriangleCount,
 			MeshData.Stats.SourceTriangleCount,
 			MeshData.Stats.AveragePlaneToShadingNormalDot,
 			MeshData.Stats.AveragePlaneToShadingNormalAngleDegrees,
-			MeshBuildPathDetails);
+			MeshBuildPathDetails,
+			WindingDetails);
 	}
 
 	FProxyAssetBuildResult BuildCardProxyAsset(
@@ -1508,7 +1574,7 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 		UsedTextureParameterNames.Add(ParameterName);
 		return true;
 	};
-	if (!ValidateTextureParameterName(Request.bBakeBaseColorOpacity, Request.BaseColorOpacityTextureParameterName, TEXT("BaseColor/SDF"))
+	if (!ValidateTextureParameterName(Request.bBakeBaseColorOpacity, Request.BaseColorOpacityTextureParameterName, TEXT("BaseColor/Opacity"))
 		|| !ValidateTextureParameterName(Request.bBakeNormalDepth, Request.NormalDepthTextureParameterName, TEXT("Normal/TrunkLeafMask"))
 		|| !ValidateTextureParameterName(Request.bBakeMix, Request.MixTextureParameterName, TEXT("Mix")))
 	{
@@ -1528,10 +1594,9 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 	SanitizedRequest.SourceLODIndex = Request.SourceLODIndex;
 	SanitizedRequest.CrossCardPlaneCount = FMath::Clamp(Request.CrossCardPlaneCount, 2, 5);
 	SanitizedRequest.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
-	SanitizedRequest.OpacitySdfRangePixels = FMath::Clamp(Request.OpacitySdfRangePixels, 1, 64);
 	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
 		? TEXT("_Billboard")
-		: TEXT("_CrossCards");
+		: TEXT("_Cross");
 	SanitizedRequest.BaseColorOpacityTextureSuffix = FeatureSuffix + Request.BaseColorOpacityTextureSuffix;
 	SanitizedRequest.NormalDepthTextureSuffix = FeatureSuffix + Request.NormalDepthTextureSuffix;
 	SanitizedRequest.MixTextureSuffix = FeatureSuffix + Request.MixTextureSuffix;

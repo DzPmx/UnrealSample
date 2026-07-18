@@ -56,6 +56,7 @@ namespace UE::FoliageBaker::PlaneCover
 		bool bHasSourceShadingNormal = false;
 		bool bHasTangents = false;
 		bool bHasVertexColors = false;
+		bool bIsTrunk = false;
 		bool bTrunkCardOnly = false;
 	};
 
@@ -79,8 +80,9 @@ namespace UE::FoliageBaker::PlaneCover
 		double CrackReductionProjectionScale = 1.0;
 		int32 TextureAtlasResolution = 4096;
 		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;
+		bool bEmitBackFaceGeometry = false;
 		EAtlasVConvention AtlasVConvention = EAtlasVConvention::GeometryMinVToTextureMinV;
-		double TrunkCardAtlasScale = 2.0;
+		double TrunkCardAtlasScale = 1.0;
 		bool bEnableAlphaAwareTileCrop = false;
 		int32 AlphaAwareTileCropGuardPixels = 2;
 	};

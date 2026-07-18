@@ -2,6 +2,11 @@
 
 namespace UE::FoliageBaker::Atlas
 {
+	uint8 EncodeTrunkLeafAlpha(const bool bIsTrunk)
+	{
+		return bIsTrunk ? 128 : 255;
+	}
+
 	namespace
 	{
 		constexpr float DistanceInfinity = 1.0e20f;

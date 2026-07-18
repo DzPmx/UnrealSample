@@ -20,6 +20,12 @@ enum class EFoliageBakerCaptureAxis : uint8
 	NegativeY
 };
 
+enum class EFoliageBakerCrossCardGeometryMode : uint8
+{
+	TwoSidedTwoUVs,
+	SeparateOneSidedFaces
+};
+
 struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 {
 	UStaticMesh* SourceStaticMesh = nullptr;
@@ -29,11 +35,11 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	EFoliageBakerCardBakeMode Mode = EFoliageBakerCardBakeMode::SingleBillboard;
 	EFoliageBakerCaptureAxis SingleCaptureAxis = EFoliageBakerCaptureAxis::PositiveX;
 	int32 CrossCardPlaneCount = 2;
+	EFoliageBakerCrossCardGeometryMode CrossCardGeometryMode = EFoliageBakerCrossCardGeometryMode::TwoSidedTwoUVs;
 	TArray<FString> TrunkMaterialKeywords = { TEXT("Trunk") };
 
 	int32 TextureResolution = 1024;
 	int32 AlphaCropGuardPixels = 2;
-	int32 OpacitySdfRangePixels = 16;
 	bool bTrimUnusedAtlasSpace = false;
 	bool bBakeBaseColorOpacity = true;
 	bool bBakeNormalDepth = true;
@@ -41,6 +47,10 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
 	FName NormalDepthTextureParameterName = TEXT("NormalMask");
 	FName MixTextureParameterName = TEXT("Mix");
+	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
+	FName LeafSpecularParameterName = TEXT("LeafSpecular");
+	FName TrunkRoughnessParameterName = TEXT("TrunkRoughness");
+	FName TrunkSpecularParameterName = TEXT("TrunkSpecular");
 
 	FString TextureOutputFolderName = TEXT("Textures");
 	FString MaterialOutputFolderName = TEXT("Materials");

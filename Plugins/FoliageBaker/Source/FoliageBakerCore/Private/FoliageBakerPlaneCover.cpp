@@ -571,7 +571,7 @@ namespace UE::FoliageBaker::PlaneCover
 			for (const FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
 			{
 				const double AtlasResolutionScale = PreparedPlane.bIsTrunkCard
-					? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
+					? FMath::Clamp(Settings.TrunkCardAtlasScale, 0.5, 2.0)
 					: 1.0;
 				MaxPlaneDimension = FMath::Max(
 					MaxPlaneDimension,
@@ -585,7 +585,7 @@ namespace UE::FoliageBaker::PlaneCover
 				{
 					FPreparedProxyPlane& PreparedPlane = PreparedPlanes[PlaneIndex];
 					const double AtlasResolutionScale = PreparedPlane.bIsTrunkCard
-						? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
+						? FMath::Clamp(Settings.TrunkCardAtlasScale, 0.5, 2.0)
 						: 1.0;
 					const double PlaneWidth = FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, 1.0) * AtlasResolutionScale;
 					const double PlaneHeight = FMath::Max(PreparedPlane.MaxV - PreparedPlane.MinV, 1.0) * AtlasResolutionScale;
@@ -729,7 +729,7 @@ namespace UE::FoliageBaker::PlaneCover
 			for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
 			{
 				const double AtlasResolutionScale = PlaneInfo.bIsTrunkCard
-					? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
+					? FMath::Clamp(Settings.TrunkCardAtlasScale, 0.5, 2.0)
 					: 1.0;
 				MaxPlaneDimension = FMath::Max(
 					MaxPlaneDimension,
@@ -743,7 +743,7 @@ namespace UE::FoliageBaker::PlaneCover
 				{
 					FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
 					const double AtlasResolutionScale = PlaneInfo.bIsTrunkCard
-						? FMath::Max(1.0, Settings.TrunkCardAtlasScale)
+						? FMath::Clamp(Settings.TrunkCardAtlasScale, 0.5, 2.0)
 						: 1.0;
 					const double PlaneWidth = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, 1.0) * AtlasResolutionScale;
 					const double PlaneHeight = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, 1.0) * AtlasResolutionScale;
@@ -1187,15 +1187,19 @@ namespace UE::FoliageBaker::PlaneCover
 			const FVector2f CornerUVs[4],
 			const FVector2f BackCornerUVs[4],
 			const FVector2f MaskUV,
-			const FVector& InShadingNormal)
+			const FVector& InShadingNormal,
+			const bool bReverseFacing)
 		{
 			static constexpr int32 UnrealFrontFaceOrder[4] = { 0, 3, 2, 1 };
+			static constexpr int32 UnrealBackFaceOrder[4] = { 0, 1, 2, 3 };
+			const int32* VertexOrder = bReverseFacing ? UnrealBackFaceOrder : UnrealFrontFaceOrder;
 
 			const FVector TangentU = Corners[1] - Corners[0];
 			const FVector TangentV = Corners[3] - Corners[0];
 			const FVector GeometryTangent = TangentU.GetSafeNormal();
-			const FVector IntendedFaceNormal = FVector::CrossProduct(TangentU, Corners[2] - Corners[0]).GetSafeNormal();
-			const FVector DesiredBinormal = TangentV.GetSafeNormal();
+			const FVector BaseFaceNormal = FVector::CrossProduct(TangentU, Corners[2] - Corners[0]).GetSafeNormal();
+			const FVector IntendedFaceNormal = bReverseFacing ? -BaseFaceNormal : BaseFaceNormal;
+			const FVector DesiredBinormal = (bReverseFacing ? -TangentV : TangentV).GetSafeNormal();
 			if (GeometryTangent.IsNearlyZero() || IntendedFaceNormal.IsNearlyZero() || DesiredBinormal.IsNearlyZero())
 			{
 				return false;
@@ -1227,7 +1231,7 @@ namespace UE::FoliageBaker::PlaneCover
 			VertexInstanceIDs.SetNum(4);
 			for (int32 VertexOrderIndex = 0; VertexOrderIndex < 4; ++VertexOrderIndex)
 			{
-				const int32 CornerIndex = UnrealFrontFaceOrder[VertexOrderIndex];
+				const int32 CornerIndex = VertexOrder[VertexOrderIndex];
 				const FVertexID VertexID = MeshDescription.CreateVertex();
 				VertexPositions[VertexID] = FVector3f(Corners[CornerIndex]);
 
@@ -1665,9 +1669,10 @@ namespace UE::FoliageBaker::PlaneCover
 
 		VertexInstanceUVs.SetNumChannels(3);
 
-		OutMeshDescription.ReserveNewVertices(Result.Planes.Num() * 4);
-		OutMeshDescription.ReserveNewVertexInstances(Result.Planes.Num() * 4);
-		OutMeshDescription.ReserveNewPolygons(Result.Planes.Num());
+		const int32 QuadsPerPlane = Settings.bEmitBackFaceGeometry ? 2 : 1;
+		OutMeshDescription.ReserveNewVertices(Result.Planes.Num() * 4 * QuadsPerPlane);
+		OutMeshDescription.ReserveNewVertexInstances(Result.Planes.Num() * 4 * QuadsPerPlane);
+		OutMeshDescription.ReserveNewPolygons(Result.Planes.Num() * QuadsPerPlane);
 
 		const FPolygonGroupID PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
 		PolygonGroupImportedMaterialSlotNames[PolygonGroupID] = TEXT("BillboardProxy");
@@ -1838,9 +1843,20 @@ namespace UE::FoliageBaker::PlaneCover
 			const FVector2f MaskUV = PreparedPlane.bIsTrunkCard
 				? FVector2f(0.0f, 0.0f)
 				: FVector2f(1.0f, 0.0f);
-			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PreparedPlane.Corners, PreparedPlane.AtlasUVs, PreparedPlane.BackAtlasUVs, MaskUV, PreparedPlane.ShadingNormal))
+			const FVector2f* FrontBackUVs = Settings.bEmitBackFaceGeometry
+				? PreparedPlane.AtlasUVs
+				: PreparedPlane.BackAtlasUVs;
+			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PreparedPlane.Corners, PreparedPlane.AtlasUVs, FrontBackUVs, MaskUV, PreparedPlane.ShadingNormal, false))
 			{
 				continue;
+			}
+			int32 GeneratedQuadCount = 1;
+			if (Settings.bEmitBackFaceGeometry && PreparedPlane.bHasBackFaceAtlas)
+			{
+				if (AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PreparedPlane.Corners, PreparedPlane.BackAtlasUVs, PreparedPlane.BackAtlasUVs, MaskUV, -PreparedPlane.ShadingNormal, true))
+				{
+					++GeneratedQuadCount;
+				}
 			}
 
 			if (OutPlaneInfos)
@@ -1884,7 +1900,7 @@ namespace UE::FoliageBaker::PlaneCover
 
 			PlaneToShadingNormalDotSum += PreparedPlane.PlaneToShadingNormalDot;
 			++OutStats.PlaneCount;
-			++OutStats.QuadCount;
+			OutStats.QuadCount += GeneratedQuadCount;
 		}
 
 		OutStats.TriangleCount = OutMeshDescription.Triangles().Num();
@@ -1990,9 +2006,10 @@ namespace UE::FoliageBaker::PlaneCover
 		TPolygonGroupAttributesRef<FName> PolygonGroupImportedMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
 
 		VertexInstanceUVs.SetNumChannels(3);
-		OutMeshDescription.ReserveNewVertices(PlaneInfos.Num() * 4);
-		OutMeshDescription.ReserveNewVertexInstances(PlaneInfos.Num() * 4);
-		OutMeshDescription.ReserveNewPolygons(PlaneInfos.Num());
+		const int32 QuadsPerPlane = Settings.bEmitBackFaceGeometry ? 2 : 1;
+		OutMeshDescription.ReserveNewVertices(PlaneInfos.Num() * 4 * QuadsPerPlane);
+		OutMeshDescription.ReserveNewVertexInstances(PlaneInfos.Num() * 4 * QuadsPerPlane);
+		OutMeshDescription.ReserveNewPolygons(PlaneInfos.Num() * QuadsPerPlane);
 
 		const FPolygonGroupID PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
 		PolygonGroupImportedMaterialSlotNames[PolygonGroupID] = TEXT("BillboardProxy");
@@ -2004,13 +2021,24 @@ namespace UE::FoliageBaker::PlaneCover
 			const FVector2f MaskUV = PlaneInfo.bIsTrunkCard
 				? FVector2f(0.0f, 0.0f)
 				: FVector2f(1.0f, 0.0f);
-			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PlaneInfo.Corners, PlaneInfo.AtlasUVs, PlaneInfo.BackAtlasUVs, MaskUV, PlaneInfo.ShadingNormal))
+			const FVector2f* FrontBackUVs = Settings.bEmitBackFaceGeometry
+				? PlaneInfo.AtlasUVs
+				: PlaneInfo.BackAtlasUVs;
+			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PlaneInfo.Corners, PlaneInfo.AtlasUVs, FrontBackUVs, MaskUV, PlaneInfo.ShadingNormal, false))
 			{
 				continue;
 			}
+			int32 GeneratedQuadCount = 1;
+			if (Settings.bEmitBackFaceGeometry && PlaneInfo.bHasBackFaceAtlas)
+			{
+				if (AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PlaneInfo.Corners, PlaneInfo.BackAtlasUVs, PlaneInfo.BackAtlasUVs, MaskUV, -PlaneInfo.ShadingNormal, true))
+				{
+					++GeneratedQuadCount;
+				}
+			}
 
 			++InOutStats.PlaneCount;
-			++InOutStats.QuadCount;
+			InOutStats.QuadCount += GeneratedQuadCount;
 		}
 
 		InOutStats.TriangleCount = OutMeshDescription.Triangles().Num();

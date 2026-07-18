@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/TextureDefines.h"
+#include "FoliageBakerMaterialResolver.h"
 #include "UObject/StrongObjectPtr.h"
 
 struct FMeshDescription;
@@ -66,6 +67,7 @@ enum class EFoliageBakerMeshAssetOutputMode : uint8
 {
 	SeparateMeshAsset,
 	AddToSourceMeshLOD,
+	InsertIntoSourceMeshLOD,
 	ReplaceSourceMeshLOD
 };
 
@@ -96,6 +98,8 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	FName BaseColorOpacityTextureParameterName = NAME_None;
 	FName NormalDepthTextureParameterName = NAME_None;
 	FName MixTextureParameterName = NAME_None;
+	TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue> ScalarParameterValues;
+	TOptional<bool> TwoSidedOverride;
 	FString MissingTemplateError = TEXT("A parent Material Instance Constant must be configured in Editor Preferences.");
 };
 
@@ -114,6 +118,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerSourceLODAssetParams
 {
 	EFoliageBakerMeshAssetOutputMode OutputMode = EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD;
 	int32 RequestedReplaceLODIndex = INDEX_NONE;
+	int32 RequestedInsertAfterLODIndex = INDEX_NONE;
 	int32 SourceLODIndex = 0;
 	int32 DesiredUVChannelCount = 2;
 	FName MaterialSlotName = FName(TEXT("BillboardProxy"));
