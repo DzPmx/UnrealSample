@@ -50,11 +50,39 @@ namespace
 		}
 	}
 
+	EFoliageBakerBillboardPlaneMode ToCoreBillboardPlaneMode(
+		const EFoliageBakerBillboardMode Mode)
+	{
+		return Mode == EFoliageBakerBillboardMode::DoublePlanes
+			? EFoliageBakerBillboardPlaneMode::DoublePlanes
+			: EFoliageBakerBillboardPlaneMode::SinglePlane;
+	}
+
 	EFoliageBakerCrossCardGeometryMode ToCoreGeometryMode(const EFoliageBakerCrossCardFaceMode FaceMode)
 	{
 		return FaceMode == EFoliageBakerCrossCardFaceMode::SeparateOneSidedFaces
 			? EFoliageBakerCrossCardGeometryMode::SeparateOneSidedFaces
 			: EFoliageBakerCrossCardGeometryMode::TwoSidedTwoUVs;
+	}
+
+	TSoftObjectPtr<UMaterialInstanceConstant> GetConfiguredMaterialTemplate(
+		const UFoliageBakerCardsSettings& ToolSettings,
+		const UFoliageBakerCardsSettings* EditorPreferences)
+	{
+		if (!EditorPreferences)
+		{
+			return {};
+		}
+		if (IsSingleBillboardMode(ToolSettings.Mode)
+			&& ToolSettings.BillboardMode == EFoliageBakerBillboardMode::DoublePlanes)
+		{
+			const UFoliageBakerSingleBillboardSettings* BillboardPreferences =
+				Cast<UFoliageBakerSingleBillboardSettings>(EditorPreferences);
+			return BillboardPreferences
+				? BillboardPreferences->DoublePlanesMaterialInstanceTemplate
+				: TSoftObjectPtr<UMaterialInstanceConstant>();
+		}
+		return EditorPreferences->MaterialInstanceTemplate;
 	}
 
 	FFoliageBakerCardBakeRequest BuildRequest(
@@ -67,6 +95,7 @@ namespace
 		Request.MaterialTemplate = &MaterialTemplate;
 		Request.SourceLODIndex = Settings.SourceLODIndex;
 		Request.Mode = ToCoreMode(Settings.Mode);
+		Request.BillboardPlaneMode = ToCoreBillboardPlaneMode(Settings.BillboardMode);
 		Request.SingleCaptureAxis = ToCoreAxis(Settings.SingleCaptureAxis);
 		Request.CrossCardPlaneCount = FMath::Clamp(
 			Settings.CrossCardPlaneCount,
@@ -166,14 +195,14 @@ TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageB
 	ControllerArgs.SettingsObject = Settings;
 	ControllerArgs.SourceStaticMeshes = &Settings->SourceStaticMeshes;
 	ControllerArgs.BakeButtonText = IsSingleBillboardMode(Mode)
-		? LOCTEXT("BakeSingleBillboardButton", "Bake Single Billboard")
+		? LOCTEXT("BakeBillboardButton", "Bake Billboard")
 		: LOCTEXT("BakeCrossCardsButton", "Bake Cross Cards");
 	ControllerArgs.BakeButtonTooltip = IsSingleBillboardMode(Mode)
-		? LOCTEXT("BakeSingleBillboardTooltip", "Bake one Single Billboard asset for every queued Static Mesh.")
+		? LOCTEXT("BakeBillboardTooltip", "Bake the selected Single Plane or Double Planes Billboard mode for every queued Static Mesh.")
 		: LOCTEXT("BakeCrossCardsTooltip", "Bake one Cross Cards asset for every queued Static Mesh.");
 	ControllerArgs.RequirementsHint = LOCTEXT(
 		"BakeRequirementsHint",
-		"Configure the Parent Material Instance in Editor Preferences and queue at least one Static Mesh.");
+		"Configure the Parent Material Instance required by the selected mode in Editor Preferences and queue at least one Static Mesh.");
 	ControllerArgs.AddMeshesTransactionText =
 		LOCTEXT("AddCardsSourceMeshesTransaction", "Add Foliage Baker Card Source Meshes");
 	ControllerArgs.ClearMeshesTransactionText =
@@ -198,8 +227,10 @@ bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 	{
 		return false;
 	}
+	const TSoftObjectPtr<UMaterialInstanceConstant> MaterialTemplate =
+		GetConfiguredMaterialTemplate(*Settings, EditorPreferences);
 	return FFoliageBakerFeatureTool::CanBakeFeature(
-		EditorPreferences && !EditorPreferences->MaterialInstanceTemplate.IsNull(),
+		!MaterialTemplate.IsNull(),
 		Settings->bBakeBaseColorOpacity
 			|| Settings->bBakeNormalDepth
 			|| Settings->bBakeMix,
@@ -211,14 +242,14 @@ void FFoliageBakerCardsModule::Bake(const EFoliageBakerCardMode Mode)
 	EnsureToolSettings(Mode);
 	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
 	const UFoliageBakerCardsSettings* EditorPreferences = GetEditorPreferences(Mode);
-	UMaterialInstanceConstant* MaterialTemplate = EditorPreferences
-		? EditorPreferences->MaterialInstanceTemplate.LoadSynchronous()
-		: nullptr;
+	TSoftObjectPtr<UMaterialInstanceConstant> ConfiguredMaterialTemplate =
+		GetConfiguredMaterialTemplate(*Settings, EditorPreferences);
+	UMaterialInstanceConstant* MaterialTemplate = ConfiguredMaterialTemplate.LoadSynchronous();
 	if (!MaterialTemplate)
 	{
 		FFoliageBakerFeatureTool::ShowMessage(LOCTEXT(
 			"MissingTemplate",
-			"Configure the Parent Material Instance in Editor Preferences before baking."));
+			"Configure the Parent Material Instance required by the selected Billboard or Cross Cards mode in Editor Preferences before baking."));
 		return;
 	}
 

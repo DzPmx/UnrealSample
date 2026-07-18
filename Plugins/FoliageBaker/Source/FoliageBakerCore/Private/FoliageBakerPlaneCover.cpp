@@ -859,6 +859,74 @@ namespace UE::FoliageBaker::PlaneCover
 			return true;
 		}
 
+		bool PackSharedTwoPlaneInfosIntoAtlas(
+			TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
+			const FPlaneProxySettings& Settings,
+			int32& OutAtlasWidth,
+			int32& OutAtlasHeight,
+			int32& OutLargestInteriorDimension,
+			int32& OutLargestPadding)
+		{
+			if (PlaneInfos.Num() != 2
+				|| PlaneInfos[0].bHasBackFaceAtlas
+				|| PlaneInfos[1].bHasBackFaceAtlas)
+			{
+				return false;
+			}
+
+			const int32 AtlasResolution = FMath::Clamp(Settings.TextureAtlasResolution, 256, 8192);
+			const double PlaneWidth = FMath::Max(PlaneInfos[0].MaxU - PlaneInfos[0].MinU, 1.0);
+			const double PlaneHeight = FMath::Max(PlaneInfos[0].MaxV - PlaneInfos[0].MinV, 1.0);
+			const bool bHorizontalLayout = PlaneHeight > PlaneWidth;
+			const double PixelsPerUnit = bHorizontalLayout
+				? FMath::Min(
+					static_cast<double>(AtlasResolution) / (2.0 * PlaneWidth),
+					static_cast<double>(AtlasResolution) / PlaneHeight)
+				: FMath::Min(
+					static_cast<double>(AtlasResolution) / PlaneWidth,
+					static_cast<double>(AtlasResolution) / (2.0 * PlaneHeight));
+			const int32 TileWidth = FMath::Clamp(
+				FMath::FloorToInt(PlaneWidth * PixelsPerUnit),
+				1,
+				bHorizontalLayout ? AtlasResolution / 2 : AtlasResolution);
+			const int32 TileHeight = FMath::Clamp(
+				FMath::FloorToInt(PlaneHeight * PixelsPerUnit),
+				1,
+				bHorizontalLayout ? AtlasResolution : AtlasResolution / 2);
+
+			OutAtlasWidth = AtlasResolution;
+			OutAtlasHeight = AtlasResolution;
+			OutLargestInteriorDimension = FMath::Max(TileWidth, TileHeight);
+			OutLargestPadding = 0;
+			for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
+			{
+				FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
+				PlaneInfo.AtlasPixelMin = PlaneIndex == 0
+					? FIntPoint::ZeroValue
+					: bHorizontalLayout
+						? FIntPoint(TileWidth, 0)
+						: FIntPoint(0, TileHeight);
+				PlaneInfo.AtlasTileSize = FIntPoint(TileWidth, TileHeight);
+				PlaneInfo.BackAtlasPixelMin = FIntPoint::ZeroValue;
+				PlaneInfo.BackAtlasTileSize = FIntPoint::ZeroValue;
+				PlaneInfo.AtlasTileResolution = FMath::Min(TileWidth, TileHeight);
+				PlaneInfo.AtlasTilePaddingPixels = 0;
+				SetAtlasUVsFromTile(
+					PlaneInfo.AtlasPixelMin,
+					PlaneInfo.AtlasTileSize,
+					OutAtlasWidth,
+					OutAtlasHeight,
+					Settings.AtlasVConvention,
+					PlaneInfo.AtlasUVs);
+				for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
+				{
+					PlaneInfo.BackAtlasUVs[CornerIndex] = PlaneInfo.AtlasUVs[CornerIndex];
+				}
+			}
+
+			return true;
+		}
+
 		void ComputeSignedDistanceRangeForTriangles(
 			const TArray<FSourceTriangle>& Triangles,
 			const TArray<int32>& TriangleIndices,
@@ -1916,13 +1984,192 @@ namespace UE::FoliageBaker::PlaneCover
 		return true;
 	}
 
+	bool RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
+		const TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
+		const FPlaneProxySettings& Settings,
+		FMeshDescription& OutMeshDescription,
+		FPlaneProxyMeshStats& InOutStats,
+		FString& OutError)
+	{
+		OutError.Reset();
+		if (PlaneInfos.IsEmpty())
+		{
+			OutError = TEXT("No proxy planes are available for mesh reconstruction.");
+			return false;
+		}
+
+		OutMeshDescription.Empty();
+		FStaticMeshAttributes Attributes(OutMeshDescription);
+		Attributes.Register();
+		Attributes.RegisterTriangleNormalAndTangentAttributes();
+
+		TVertexAttributesRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
+		TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
+		TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
+		TVertexInstanceAttributesRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
+		TVertexInstanceAttributesRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
+		TTriangleAttributesRef<FVector3f> TriangleNormals = Attributes.GetTriangleNormals();
+		TTriangleAttributesRef<FVector3f> TriangleTangents = Attributes.GetTriangleTangents();
+		TTriangleAttributesRef<FVector3f> TriangleBinormals = Attributes.GetTriangleBinormals();
+		TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
+		TPolygonGroupAttributesRef<FName> PolygonGroupImportedMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
+
+		VertexInstanceUVs.SetNumChannels(3);
+		const int32 QuadsPerPlane = Settings.bEmitBackFaceGeometry ? 2 : 1;
+		OutMeshDescription.ReserveNewVertices(PlaneInfos.Num() * 4 * QuadsPerPlane);
+		OutMeshDescription.ReserveNewVertexInstances(PlaneInfos.Num() * 4 * QuadsPerPlane);
+		OutMeshDescription.ReserveNewPolygons(PlaneInfos.Num() * QuadsPerPlane);
+
+		const FPolygonGroupID PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
+		PolygonGroupImportedMaterialSlotNames[PolygonGroupID] = TEXT("BillboardProxy");
+
+		InOutStats.PlaneCount = 0;
+		InOutStats.QuadCount = 0;
+		for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			const FVector2f AuxiliaryUV = PlaneInfo.bUseCustomAuxiliaryUV
+				? PlaneInfo.AuxiliaryUV
+				: PlaneInfo.bIsTrunkCard
+					? FVector2f(0.0f, 0.0f)
+					: FVector2f(1.0f, 0.0f);
+			const FVector2f* FrontBackUVs = Settings.bEmitBackFaceGeometry
+				? PlaneInfo.AtlasUVs
+				: PlaneInfo.BackAtlasUVs;
+			if (!AddQuadPolygon(
+				OutMeshDescription,
+				PolygonGroupID,
+				VertexPositions,
+				VertexInstanceUVs,
+				VertexInstanceNormals,
+				VertexInstanceTangents,
+				VertexInstanceBinormalSigns,
+				TriangleNormals,
+				TriangleTangents,
+				TriangleBinormals,
+				EdgeHardnesses,
+				PlaneInfo.Corners,
+				PlaneInfo.AtlasUVs,
+				FrontBackUVs,
+				AuxiliaryUV,
+				PlaneInfo.ShadingNormal,
+				false))
+			{
+				continue;
+			}
+
+			int32 GeneratedQuadCount = 1;
+			if (Settings.bEmitBackFaceGeometry && PlaneInfo.bHasBackFaceAtlas)
+			{
+				if (AddQuadPolygon(
+					OutMeshDescription,
+					PolygonGroupID,
+					VertexPositions,
+					VertexInstanceUVs,
+					VertexInstanceNormals,
+					VertexInstanceTangents,
+					VertexInstanceBinormalSigns,
+					TriangleNormals,
+					TriangleTangents,
+					TriangleBinormals,
+					EdgeHardnesses,
+					PlaneInfo.Corners,
+					PlaneInfo.BackAtlasUVs,
+					PlaneInfo.BackAtlasUVs,
+					AuxiliaryUV,
+					-PlaneInfo.ShadingNormal,
+					true))
+				{
+					++GeneratedQuadCount;
+				}
+			}
+
+			++InOutStats.PlaneCount;
+			InOutStats.QuadCount += GeneratedQuadCount;
+		}
+
+		InOutStats.TriangleCount = OutMeshDescription.Triangles().Num();
+		if (InOutStats.PlaneCount == 0)
+		{
+			OutError = TEXT("No proxy planes could be reconstructed.");
+			return false;
+		}
+		return true;
+	}
+
+	bool ApplySharedPlaneProxyBoundsAndRebuildMeshDescription(
+		TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
+		const FPlaneProxySettings& Settings,
+		FMeshDescription& OutMeshDescription,
+		FPlaneProxyMeshStats& InOutStats,
+		FString& OutError)
+	{
+		OutError.Reset();
+		if (PlaneInfos.IsEmpty())
+		{
+			OutError = TEXT("No proxy planes are available for shared bounds.");
+			return false;
+		}
+
+		double SharedMinU = TNumericLimits<double>::Max();
+		double SharedMaxU = -TNumericLimits<double>::Max();
+		double SharedMinV = TNumericLimits<double>::Max();
+		double SharedMaxV = -TNumericLimits<double>::Max();
+		for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			SharedMinU = FMath::Min(SharedMinU, PlaneInfo.MinU);
+			SharedMaxU = FMath::Max(SharedMaxU, PlaneInfo.MaxU);
+			SharedMinV = FMath::Min(SharedMinV, PlaneInfo.MinV);
+			SharedMaxV = FMath::Max(SharedMaxV, PlaneInfo.MaxV);
+		}
+
+		if (!FMath::IsFinite(SharedMinU)
+			|| !FMath::IsFinite(SharedMaxU)
+			|| !FMath::IsFinite(SharedMinV)
+			|| !FMath::IsFinite(SharedMaxV)
+			|| SharedMaxU <= SharedMinU
+			|| SharedMaxV <= SharedMinV)
+		{
+			OutError = TEXT("Could not resolve valid shared proxy-plane bounds.");
+			return false;
+		}
+
+		for (FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		{
+			PlaneInfo.MinU = SharedMinU;
+			PlaneInfo.MaxU = SharedMaxU;
+			PlaneInfo.MinV = SharedMinV;
+			PlaneInfo.MaxV = SharedMaxV;
+			UpdatePlaneInfoCornersFromBounds(PlaneInfo);
+		}
+
+		if (!PackSharedTwoPlaneInfosIntoAtlas(
+			PlaneInfos,
+			Settings,
+			InOutStats.AtlasWidth,
+			InOutStats.AtlasHeight,
+			InOutStats.AtlasTileResolution,
+			InOutStats.AtlasTilePaddingPixels))
+		{
+			OutError = TEXT("Could not pack shared billboard texture tiles into the configured atlas resolution.");
+			return false;
+		}
+
+		return RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
+			PlaneInfos,
+			Settings,
+			OutMeshDescription,
+			InOutStats,
+			OutError);
+	}
+
 	bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(
 		TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
 		const TArray<FPlaneProxyTileCrop>& TileCrops,
 		const FPlaneProxySettings& Settings,
 		FMeshDescription& OutMeshDescription,
 		FPlaneProxyMeshStats& InOutStats,
-		FString& OutError)
+		FString& OutError,
+		const bool bUseSharedTwoPlaneLayout)
 	{
 		OutError.Reset();
 		if (PlaneInfos.IsEmpty())
@@ -1977,78 +2224,33 @@ namespace UE::FoliageBaker::PlaneCover
 			return true;
 		}
 
-		if (!PackPlaneInfosIntoAtlas(
-			PlaneInfos,
-			Settings,
-			InOutStats.AtlasWidth,
-			InOutStats.AtlasHeight,
-			InOutStats.AtlasTileResolution,
-			InOutStats.AtlasTilePaddingPixels))
+		const bool bPacked = bUseSharedTwoPlaneLayout
+			? PackSharedTwoPlaneInfosIntoAtlas(
+				PlaneInfos,
+				Settings,
+				InOutStats.AtlasWidth,
+				InOutStats.AtlasHeight,
+				InOutStats.AtlasTileResolution,
+				InOutStats.AtlasTilePaddingPixels)
+			: PackPlaneInfosIntoAtlas(
+				PlaneInfos,
+				Settings,
+				InOutStats.AtlasWidth,
+				InOutStats.AtlasHeight,
+				InOutStats.AtlasTileResolution,
+				InOutStats.AtlasTilePaddingPixels);
+		if (!bPacked)
 		{
 			OutError = TEXT("Could not repack alpha-cropped billboard texture tiles into the configured atlas resolution.");
 			return false;
 		}
 
-		OutMeshDescription.Empty();
-		FStaticMeshAttributes Attributes(OutMeshDescription);
-		Attributes.Register();
-		Attributes.RegisterTriangleNormalAndTangentAttributes();
-
-		TVertexAttributesRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
-		TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
-		TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
-		TVertexInstanceAttributesRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
-		TVertexInstanceAttributesRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
-		TTriangleAttributesRef<FVector3f> TriangleNormals = Attributes.GetTriangleNormals();
-		TTriangleAttributesRef<FVector3f> TriangleTangents = Attributes.GetTriangleTangents();
-		TTriangleAttributesRef<FVector3f> TriangleBinormals = Attributes.GetTriangleBinormals();
-		TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
-		TPolygonGroupAttributesRef<FName> PolygonGroupImportedMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
-
-		VertexInstanceUVs.SetNumChannels(3);
-		const int32 QuadsPerPlane = Settings.bEmitBackFaceGeometry ? 2 : 1;
-		OutMeshDescription.ReserveNewVertices(PlaneInfos.Num() * 4 * QuadsPerPlane);
-		OutMeshDescription.ReserveNewVertexInstances(PlaneInfos.Num() * 4 * QuadsPerPlane);
-		OutMeshDescription.ReserveNewPolygons(PlaneInfos.Num() * QuadsPerPlane);
-
-		const FPolygonGroupID PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
-		PolygonGroupImportedMaterialSlotNames[PolygonGroupID] = TEXT("BillboardProxy");
-
-		InOutStats.PlaneCount = 0;
-		InOutStats.QuadCount = 0;
-		for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
-		{
-			const FVector2f MaskUV = PlaneInfo.bIsTrunkCard
-				? FVector2f(0.0f, 0.0f)
-				: FVector2f(1.0f, 0.0f);
-			const FVector2f* FrontBackUVs = Settings.bEmitBackFaceGeometry
-				? PlaneInfo.AtlasUVs
-				: PlaneInfo.BackAtlasUVs;
-			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PlaneInfo.Corners, PlaneInfo.AtlasUVs, FrontBackUVs, MaskUV, PlaneInfo.ShadingNormal, false))
-			{
-				continue;
-			}
-			int32 GeneratedQuadCount = 1;
-			if (Settings.bEmitBackFaceGeometry && PlaneInfo.bHasBackFaceAtlas)
-			{
-				if (AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PlaneInfo.Corners, PlaneInfo.BackAtlasUVs, PlaneInfo.BackAtlasUVs, MaskUV, -PlaneInfo.ShadingNormal, true))
-				{
-					++GeneratedQuadCount;
-				}
-			}
-
-			++InOutStats.PlaneCount;
-			InOutStats.QuadCount += GeneratedQuadCount;
-		}
-
-		InOutStats.TriangleCount = OutMeshDescription.Triangles().Num();
-		if (InOutStats.PlaneCount == 0)
-		{
-			OutError = TEXT("No alpha-cropped proxy planes could be rebuilt.");
-			return false;
-		}
-
-		return true;
+		return RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
+			PlaneInfos,
+			Settings,
+			OutMeshDescription,
+			InOutStats,
+			OutError);
 	}
 
 }

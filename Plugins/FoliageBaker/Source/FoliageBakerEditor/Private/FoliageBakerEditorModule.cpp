@@ -26,7 +26,7 @@
 namespace
 {
 	const FName FoliageBakerToolTabName(TEXT("FoliageBakerTools"));
-	constexpr int32 SingleBillboardFeatureIndex = 0;
+	constexpr int32 BillboardFeatureIndex = 0;
 	const FName EditorSettingsContainerName(TEXT("Editor"));
 	const FName PluginsSettingsCategoryName(TEXT("Plugins"));
 	const FName SingleBillboardSettingsSectionName(TEXT("FoliageBakerSingleBillboard"));
@@ -36,7 +36,7 @@ namespace
 
 	enum class EFoliageBakerFeatureKind : uint8
 	{
-		SingleBillboard,
+		Billboard,
 		CrossCards,
 		Impostor,
 		BillboardClouds
@@ -44,7 +44,7 @@ namespace
 
 	struct FFoliageBakerFeatureDescriptor
 	{
-		EFoliageBakerFeatureKind Kind = EFoliageBakerFeatureKind::SingleBillboard;
+		EFoliageBakerFeatureKind Kind = EFoliageBakerFeatureKind::Billboard;
 		FText TabLabel;
 		FText Title;
 		FText Description;
@@ -56,15 +56,15 @@ namespace
 		static const TArray<FFoliageBakerFeatureDescriptor> Descriptors =
 		{
 			{
-				EFoliageBakerFeatureKind::SingleBillboard,
-				LOCTEXT("SingleBillboardTab", "Single Billboard"),
-				LOCTEXT("SingleBillboardFeatureTitle", "Single Billboard"),
+				EFoliageBakerFeatureKind::Billboard,
+				LOCTEXT("BillboardTab", "Billboard"),
+				LOCTEXT("BillboardFeatureTitle", "Billboard"),
 				LOCTEXT(
-					"SingleBillboardFeatureDescription",
-					"Bake one vertical billboard from a user-selected +X, -X, +Y, or -Y capture axis."),
+					"BillboardFeatureDescription",
+					"Bake either one camera-facing plane or two parallel camera-facing planes captured from horizontal directions 90 degrees apart."),
 				LOCTEXT(
-					"SingleBillboardFeatureMetadata",
-					"Selectable source LOD  |  one plane  |  one baked side  |  1024 default")
+					"BillboardFeatureMetadata",
+					"Selectable source LOD  |  Single Plane or Double Planes  |  orthographic capture  |  1024 default")
 			},
 			{
 				EFoliageBakerFeatureKind::CrossCards,
@@ -129,10 +129,10 @@ namespace
 		{
 			{
 				SingleBillboardSettingsSectionName,
-				LOCTEXT("SingleBillboardSettingsName", "Foliage Baker - Single Billboard"),
+				LOCTEXT("BillboardSettingsName", "Foliage Baker - Billboard"),
 				LOCTEXT(
-					"SingleBillboardSettingsDescription",
-					"Configure Single Billboard preferences, including its required Parent Material Instance."),
+					"BillboardSettingsDescription",
+					"Configure Single Plane and Double Planes Billboard preferences, including their separate Parent Material Instances."),
 				&GetMutableSettingsObject<UFoliageBakerSingleBillboardSettings>
 			},
 			{
@@ -241,7 +241,7 @@ void FFoliageBakerEditorModule::RegisterMenus()
 	Section.AddMenuEntry(
 		TEXT("OpenFoliageBaker"),
 		LOCTEXT("OpenFoliageBakerLabel", "Foliage Baker"),
-		LOCTEXT("OpenFoliageBakerTooltip", "Open the unified Single Billboard, Cross Cards, Impostor, and BillboardClouds tool."),
+		LOCTEXT("OpenFoliageBakerTooltip", "Open the unified Billboard, Cross Cards, Impostor, and BillboardClouds tool."),
 		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"),
 		FToolMenuExecuteAction::CreateRaw(this, &FFoliageBakerEditorModule::ExecuteOpenTool));
 }
@@ -249,7 +249,7 @@ void FFoliageBakerEditorModule::RegisterMenus()
 TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs& SpawnTabArgs)
 {
 	(void)SpawnTabArgs;
-	ActiveFeatureIndex = SingleBillboardFeatureIndex;
+	ActiveFeatureIndex = BillboardFeatureIndex;
 
 	FFoliageBakerBillboardCloudsModule& BillboardCloudsModule =
 		FModuleManager::LoadModuleChecked<FFoliageBakerBillboardCloudsModule>(TEXT("FoliageBakerBillboardClouds"));
@@ -280,7 +280,7 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 			{
 				switch (Descriptor.Kind)
 				{
-				case EFoliageBakerFeatureKind::SingleBillboard:
+				case EFoliageBakerFeatureKind::Billboard:
 					return CardsModule.CreateFeaturePanel(
 						EFoliageBakerCardMode::SingleBillboard);
 				case EFoliageBakerFeatureKind::CrossCards:

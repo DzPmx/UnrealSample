@@ -4,6 +4,7 @@
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerImpostorSettings.h"
 #include "FoliageBakerMaskedMaterialBaker.h"
+#include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedMaterialBake.h"
@@ -50,6 +51,7 @@ namespace
 		int32 RasterizedTriangleReferences = 0;
 		int32 MaskedTriangleReferences = 0;
 		int32 DepthCorrectTileCount = 0;
+		UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialAverages MaterialAverages;
 	};
 
 	struct FImpostorBakeData
@@ -99,14 +101,39 @@ namespace
 		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Value, 0.0f, 1.0f) * 255.0f), 0, 255));
 	}
 
-	FColor EncodeObjectSpaceNormal(const FVector& InNormal, const uint8 Alpha)
+	FVector DecodeObjectSpaceNormal(const FColor& EncodedNormal)
+	{
+		return FVector(
+			static_cast<double>(EncodedNormal.R) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(EncodedNormal.G) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(EncodedNormal.B) / 255.0 * 2.0 - 1.0)
+			.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+	}
+
+	FColor EncodeOctahedralObjectSpaceNormal(
+		const FVector& InNormal,
+		const uint8 TrunkLeafMask,
+		const uint8 Depth)
 	{
 		const FVector Normal = InNormal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+		const double L1Norm = FMath::Abs(Normal.X)
+			+ FMath::Abs(Normal.Y)
+			+ FMath::Abs(Normal.Z);
+		const FVector Projected = Normal / FMath::Max(L1Norm, UE_DOUBLE_SMALL_NUMBER);
+		FVector2D Octahedral(Projected.X, Projected.Y);
+		if (Projected.Z < 0.0)
+		{
+			const double OldX = Octahedral.X;
+			Octahedral.X = (1.0 - FMath::Abs(Octahedral.Y))
+				* (OldX >= 0.0 ? 1.0 : -1.0);
+			Octahedral.Y = (1.0 - FMath::Abs(OldX))
+				* (Octahedral.Y >= 0.0 ? 1.0 : -1.0);
+		}
 		return FColor(
-			UnitFloatToByte(static_cast<float>(Normal.X * 0.5 + 0.5)),
-			UnitFloatToByte(static_cast<float>(Normal.Y * 0.5 + 0.5)),
-			UnitFloatToByte(static_cast<float>(Normal.Z * 0.5 + 0.5)),
-			Alpha);
+			UnitFloatToByte(static_cast<float>(Octahedral.X * 0.5 + 0.5)),
+			UnitFloatToByte(static_cast<float>(Octahedral.Y * 0.5 + 0.5)),
+			TrunkLeafMask,
+			Depth);
 	}
 
 	FVector DecodeHemiOctahedralDirection(const FVector2D& Encoded)
@@ -257,7 +284,12 @@ namespace
 		}
 
 		InOutData.BaseColorPixels.Init(FColor(0, 0, 0, 0), PixelCount);
-		InOutData.NormalDepthPixels.Init(EncodeObjectSpaceNormal(FVector::UpVector, UnitFloatToByte(0.5f)), PixelCount);
+		InOutData.NormalDepthPixels.Init(
+			EncodeOctahedralObjectSpaceNormal(
+				FVector::UpVector,
+				0,
+				UnitFloatToByte(0.5f)),
+			PixelCount);
 		if (Settings.bBakeMix)
 		{
 			InOutData.MixPixels.Init(FColor(255, 128, 0, 0), PixelCount);
@@ -327,6 +359,7 @@ namespace
 			DepthCorrectRequest.bBakeBaseColor = Settings.bBakeBaseColorSdf;
 			DepthCorrectRequest.bBakeObjectSpaceNormal = Settings.bBakeNormalDepth;
 			DepthCorrectRequest.bBakePackedMix = Settings.bBakeMix;
+			DepthCorrectRequest.bBakeRoughnessSpecular = !Settings.bBakeMix;
 			DepthCorrectRequest.Materials.Reserve(ReferencedMaterialIndices.Num());
 
 			for (const int32 MaterialIndex : ReferencedMaterialIndices)
@@ -423,15 +456,20 @@ namespace
 			if (DepthCorrectResult.SourceTriangleIdAndDepth.Num() != TilePixelCount
 				|| (Settings.bBakeBaseColorSdf && DepthCorrectResult.BaseColor.Num() != TilePixelCount)
 				|| (Settings.bBakeNormalDepth && DepthCorrectResult.ObjectSpaceNormal.Num() != TilePixelCount)
-				|| (Settings.bBakeMix && DepthCorrectResult.PackedMix.Num() != TilePixelCount))
+				|| (Settings.bBakeMix && DepthCorrectResult.PackedMix.Num() != TilePixelCount)
+				|| (!Settings.bBakeMix
+					&& (DepthCorrectResult.Roughness.Num() != TilePixelCount
+						|| DepthCorrectResult.Specular.Num() != TilePixelCount)))
 			{
 				OutError = FString::Printf(
-					TEXT("Impostor depth-correct tile returned invalid sizes for frame %d: base=%d, id=%d, normal=%d, mix=%d, expected=%d."),
+					TEXT("Impostor depth-correct tile returned invalid sizes for frame %d: base=%d, id=%d, normal=%d, mix=%d, roughness=%d, specular=%d, expected=%d."),
 					ViewIndex,
 					DepthCorrectResult.BaseColor.Num(),
 					DepthCorrectResult.SourceTriangleIdAndDepth.Num(),
 					DepthCorrectResult.ObjectSpaceNormal.Num(),
 					DepthCorrectResult.PackedMix.Num(),
+					DepthCorrectResult.Roughness.Num(),
+					DepthCorrectResult.Specular.Num(),
 					TilePixelCount);
 				return false;
 			}
@@ -462,6 +500,13 @@ namespace
 					}
 
 					const FSourceTriangle& Triangle = InOutData.Triangles[TriangleIndex];
+					if (!Settings.bBakeMix)
+					{
+						InOutData.Stats.MaterialAverages.AddSample(
+							Triangle.bIsTrunk,
+							DepthCorrectResult.Roughness[TileIndex].R,
+							DepthCorrectResult.Specular[TileIndex].R);
+					}
 					FVector2D ProjectedPoints[3];
 					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
 					{
@@ -523,9 +568,13 @@ namespace
 								/ (2.0 * SharedCaptureHalfExtent)),
 							0.0f,
 							1.0f);
-						FColor ObjectNormal = DepthCorrectResult.ObjectSpaceNormal[TileIndex];
-						ObjectNormal.A = UnitFloatToByte(LinearDepth);
-						InOutData.NormalDepthPixels[AtlasIndex] = ObjectNormal;
+						InOutData.NormalDepthPixels[AtlasIndex] =
+							EncodeOctahedralObjectSpaceNormal(
+								DecodeObjectSpaceNormal(
+									DepthCorrectResult.ObjectSpaceNormal[TileIndex]),
+								UE::FoliageBaker::Atlas::EncodeTrunkLeafAlpha(
+									Triangle.bIsTrunk),
+								UnitFloatToByte(LinearDepth));
 						NormalCoverage[AtlasIndex] = true;
 					}
 
@@ -574,7 +623,6 @@ namespace
 					InOutData.NormalDepthPixels[PixelIndex].A = UnitFloatToByte(0.5f);
 				}
 			}
-			UE::FoliageBaker::Atlas::NormalizeEncodedObjectSpaceNormals(InOutData.NormalDepthPixels);
 		}
 		else
 		{
@@ -1015,7 +1063,7 @@ namespace
 		Params.bSRGB = bSRGB;
 		Params.AlphaCoverageThreshold = 0.0f;
 		Params.MipBackgroundColor = MipBackgroundColor;
-		Params.bNormalizeMipNormals = LODGroup == TEXTUREGROUP_WorldNormalMap;
+		Params.bNormalizeMipNormals = false;
 		const int32 TileResolution = FMath::Max(1, Stats.TileResolution);
 		for (int32 TileY = 0; TileY < Stats.AtlasHeight; TileY += TileResolution)
 		{
@@ -1109,6 +1157,15 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), *Error);
 		return Result;
 	}
+	const UE::FoliageBaker::MaterialResolver::FMaterialKeywordMatchResult
+		TrunkMaterialMatches =
+			UE::FoliageBaker::MaterialResolver::ResolveMaterialKeywordMatches(
+				SourceStaticMesh,
+				Settings.TrunkMaterialKeywords);
+	for (FSourceTriangle& Triangle : BakeData.Triangles)
+	{
+		Triangle.bIsTrunk = TrunkMaterialMatches.IsMatch(Triangle.MaterialIndex);
+	}
 	if (!ComputeSourceBounds(BakeData.Triangles, BakeData.SourceVertices, BakeData.SourceBounds))
 	{
 		Result.Report = FString::Printf(TEXT("%s\n  failed: selected LOD bounds could not be computed."), *SourceStaticMesh.GetName());
@@ -1198,7 +1255,10 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			TC_BC7,
 			TEXTUREGROUP_WorldNormalMap,
 			false,
-			EncodeObjectSpaceNormal(FVector::UpVector, UnitFloatToByte(0.5f)),
+			EncodeOctahedralObjectSpaceNormal(
+				FVector::UpVector,
+				0,
+				UnitFloatToByte(0.5f)),
 			Error);
 		if (!Result.NormalDepthTexture)
 		{
@@ -1236,6 +1296,28 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	MaterialParams.BaseColorOpacityTextureParameterName = Settings.BaseColorSdfTextureParameterName;
 	MaterialParams.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
 	MaterialParams.MixTextureParameterName = Settings.MixTextureParameterName;
+	if (!Settings.bBakeMix)
+	{
+		const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
+			ParameterNames = {
+				Settings.LeafRoughnessParameterName,
+				Settings.LeafSpecularParameterName,
+				Settings.TrunkRoughnessParameterName,
+				Settings.TrunkSpecularParameterName,
+			};
+		if (!UE::FoliageBaker::MaterialResolver::ResolveTrunkLeafMaterialScalarParameters(
+				BakeData.Stats.MaterialAverages,
+				ParameterNames,
+				MaterialParams.ScalarParameterValues,
+				Error))
+		{
+			Result.Report = FString::Printf(
+				TEXT("%s\n  failed: %s"),
+				*SourceStaticMesh.GetName(),
+				*Error);
+			return Result;
+		}
+	}
 	Result.MaterialInstance = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 		SourceStaticMesh,
 		Transaction,
@@ -1357,8 +1439,20 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		: 0.0;
 	const double TexelAreaDensityGain = FMath::Square(
 		static_cast<double>(BakeData.SourceBounds.SphereRadius) / BakeData.SharedCaptureHalfExtent);
+	const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
+		MaterialScalarParameterNames = {
+			Settings.LeafRoughnessParameterName,
+			Settings.LeafSpecularParameterName,
+			Settings.TrunkRoughnessParameterName,
+			Settings.TrunkSpecularParameterName,
+		};
+	const FString MaterialScalarDetails =
+		UE::FoliageBaker::MaterialResolver::BuildTrunkLeafMaterialAveragesReport(
+			!Settings.bBakeMix,
+			BakeData.Stats.MaterialAverages,
+			MaterialScalarParameterNames);
 	Result.Report = FString::Printf(
-		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask object/local RGB + UE ImpostorBaker Depth A (near 1, far 0, empty 0.5)%s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
+		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask octahedral object/local Normal RG + trunk 0.5/leaf 1 Mask B + Depth A (near 1, far 0, empty 0.5)%s\n  material scalar averages: %s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal, material properties and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
 		*SourceStaticMesh.GetName(),
 		Settings.SourceLODIndex,
 		Settings.Coverage == EFoliageBakerImpostorCoverage::FullSphere ? TEXT("full sphere") : TEXT("upper hemisphere"),
@@ -1370,6 +1464,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		BakeData.Stats.TileResolution,
 		ImpostorProjectionGuardPixels,
 		Settings.bBakeMix ? TEXT(", Mix RGBA enabled") : TEXT(""),
+		*MaterialScalarDetails,
 		BakeData.SourceBounds.Origin.X,
 		BakeData.SourceBounds.Origin.Y,
 		BakeData.SourceBounds.Origin.Z,

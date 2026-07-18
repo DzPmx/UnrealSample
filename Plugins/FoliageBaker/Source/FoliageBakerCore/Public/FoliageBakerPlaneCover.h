@@ -149,6 +149,8 @@ namespace UE::FoliageBaker::PlaneCover
 		int32 AtlasTileResolution = 0;
 		int32 AtlasTilePaddingPixels = 0;
 		bool bHasBackFaceAtlas = false;
+		bool bUseCustomAuxiliaryUV = false;
+		FVector2f AuxiliaryUV = FVector2f::ZeroVector;
 		TArray<int32> TriangleIndices;
 		TArray<FCrackReductionProjection> CrackReductionProjections;
 	};
@@ -165,5 +167,7 @@ namespace UE::FoliageBaker::PlaneCover
 	FOLIAGEBAKERCORE_API bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError);
 	FOLIAGEBAKERCORE_API FVector ProjectPointToPlane(const FVector& Point, const FVector& PlaneNormal, double PlaneRho);
 	FOLIAGEBAKERCORE_API bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneProxySet& Result, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
-	FOLIAGEBAKERCORE_API bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const TArray<FPlaneProxyTileCrop>& TileCrops, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);
+	FOLIAGEBAKERCORE_API bool RebuildPlaneProxyMeshDescriptionFromPlaneInfos(const TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);
+	FOLIAGEBAKERCORE_API bool ApplySharedPlaneProxyBoundsAndRebuildMeshDescription(TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);
+	FOLIAGEBAKERCORE_API bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const TArray<FPlaneProxyTileCrop>& TileCrops, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError, bool bUseSharedTwoPlaneLayout = false);
 }

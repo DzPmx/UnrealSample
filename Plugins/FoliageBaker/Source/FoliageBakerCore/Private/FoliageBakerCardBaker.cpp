@@ -23,6 +23,12 @@ DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerCardsCore, Log, All);
 
 namespace
 {
+	bool UsesDoublePlanesBillboard(const FFoliageBakerCardBakeRequest& Request)
+	{
+		return Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
+			&& Request.BillboardPlaneMode == EFoliageBakerBillboardPlaneMode::DoublePlanes;
+	}
+
 	bool UsesSeparateOneSidedCrossFaces(const FFoliageBakerCardBakeRequest& Request)
 	{
 		return Request.Mode == EFoliageBakerCardBakeMode::CrossCards
@@ -31,6 +37,10 @@ namespace
 
 	int32 GetDesiredCardUVChannelCount(const FFoliageBakerCardBakeRequest& Request)
 	{
+		if (UsesDoublePlanesBillboard(Request))
+		{
+			return 3;
+		}
 		return UsesSeparateOneSidedCrossFaces(Request) ? 1 : 2;
 	}
 
@@ -107,6 +117,71 @@ namespace
 
 	using FAtlasOutputSelection = UE::FoliageBaker::MaterialResolver::FMaterialOutputSelection;
 
+	FColor ConvertEncodedObjectSpaceNormalToCaptureFrame(
+		const FColor& EncodedNormal,
+		const FVector& CaptureRayDirection)
+	{
+		const FVector ObjectSpaceNormal = FVector(
+			static_cast<double>(EncodedNormal.R) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(EncodedNormal.G) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(EncodedNormal.B) / 255.0 * 2.0 - 1.0)
+			.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+		const FVector Facing = (-CaptureRayDirection).GetSafeNormal();
+		const FVector Right = FVector::CrossProduct(FVector::UpVector, Facing).GetSafeNormal();
+		if (Facing.IsNearlyZero() || Right.IsNearlyZero())
+		{
+			return EncodedNormal;
+		}
+
+		const FVector CaptureFrameNormal(
+			FVector::DotProduct(ObjectSpaceNormal, Facing),
+			FVector::DotProduct(ObjectSpaceNormal, Right),
+			FVector::DotProduct(ObjectSpaceNormal, FVector::UpVector));
+		return UE::FoliageBaker::ProjectedMaterialBake::EncodeObjectSpaceNormalToColor(
+			CaptureFrameNormal,
+			EncodedNormal.A);
+	}
+
+	int32 MergeDoublePlaneTileCrops(
+		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop>& TileCrops)
+	{
+		if (TileCrops.Num() != 2 || !TileCrops[0].bEnabled || !TileCrops[1].bEnabled)
+		{
+			for (UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop& Crop : TileCrops)
+			{
+				Crop = UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop();
+			}
+			return 0;
+		}
+
+		UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop SharedCrop;
+		SharedCrop.bEnabled = true;
+		SharedCrop.MinUFraction = FMath::Min(TileCrops[0].MinUFraction, TileCrops[1].MinUFraction);
+		SharedCrop.MaxUFraction = FMath::Max(TileCrops[0].MaxUFraction, TileCrops[1].MaxUFraction);
+		SharedCrop.MinVFraction = FMath::Min(TileCrops[0].MinVFraction, TileCrops[1].MinVFraction);
+		SharedCrop.MaxVFraction = FMath::Max(TileCrops[0].MaxVFraction, TileCrops[1].MaxVFraction);
+
+		constexpr double CropEpsilon = 1.0e-5;
+		const bool bCropsTile = SharedCrop.MinUFraction > CropEpsilon
+			|| SharedCrop.MaxUFraction < 1.0 - CropEpsilon
+			|| SharedCrop.MinVFraction > CropEpsilon
+			|| SharedCrop.MaxVFraction < 1.0 - CropEpsilon;
+		if (!bCropsTile
+			|| SharedCrop.MaxUFraction <= SharedCrop.MinUFraction
+			|| SharedCrop.MaxVFraction <= SharedCrop.MinVFraction)
+		{
+			for (UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop& Crop : TileCrops)
+			{
+				Crop = UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop();
+			}
+			return 0;
+		}
+
+		TileCrops[0] = SharedCrop;
+		TileCrops[1] = SharedCrop;
+		return 2;
+	}
+
 	struct FAtlasBakeStats
 	{
 		int32 Width = 0;
@@ -144,6 +219,7 @@ namespace
 		const UE::FoliageBaker::PlaneCover::FPlaneProxyMeshStats& ProxyStats,
 		const UE::FoliageBaker::PlaneCover::FPlaneProxySettings& Settings,
 		const FAtlasOutputSelection& OutputSelection,
+		const bool bConvertNormalsToCaptureFrame,
 		TArray<FColor>& OutPixels,
 		TArray<FColor>& OutNormalPixels,
 		TArray<FColor>& OutMixPixels,
@@ -460,8 +536,13 @@ namespace
 							GpuFragment.bVisible = true;
 							if (OutputSelection.bNormalMask)
 							{
-								ProjectedNormalTile[TilePixelIndex] =
+								const FColor ObjectSpaceNormal =
 									DepthCorrectResult.ObjectSpaceNormal[TilePixelIndex];
+								ProjectedNormalTile[TilePixelIndex] = bConvertNormalsToCaptureFrame
+									? ConvertEncodedObjectSpaceNormalToCaptureFrame(
+										ObjectSpaceNormal,
+										CaptureRayDirection)
+									: ObjectSpaceNormal;
 							}
 						}
 					}
@@ -946,6 +1027,11 @@ namespace
 		}
 	}
 
+	FVector RotateHorizontalNormal90Degrees(const FVector& Normal)
+	{
+		return FVector(-Normal.Y, Normal.X, 0.0).GetSafeNormal();
+	}
+
 	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(
 		const FFoliageBakerCardBakeRequest& Request,
 		const FFoliageBakerMeshOutputSelection& OutputSelection)
@@ -956,9 +1042,11 @@ namespace
 		Params.RequestedInsertAfterLODIndex = OutputSelection.InsertAfterLODIndex;
 		Params.SourceLODIndex = Request.SourceLODIndex;
 		Params.DesiredUVChannelCount = GetDesiredCardUVChannelCount(Request);
-		Params.RebuildLODMetadataKey = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-			? FName(TEXT("FoliageBaker.SingleBillboardLOD"))
-			: FName(TEXT("FoliageBaker.CrossCardsLOD"));
+		Params.RebuildLODMetadataKey = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+			? FName(TEXT("FoliageBaker.CrossCardsLOD"))
+			: UsesDoublePlanesBillboard(Request)
+				? FName(TEXT("FoliageBaker.DoublePlanesBillboardLOD"))
+				: FName(TEXT("FoliageBaker.SingleBillboardLOD"));
 		return Params;
 	}
 
@@ -1013,12 +1101,16 @@ namespace
 
 
 		const int32 PlaneCount = EditorSettings.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-			? 1
+			? (UsesDoublePlanesBillboard(EditorSettings) ? 2 : 1)
 			: FMath::Clamp(EditorSettings.CrossCardPlaneCount, 2, 5);
+		const FVector PrimaryCaptureNormal =
+			ResolveSingleCaptureNormal(EditorSettings.SingleCaptureAxis);
 		for (int32 PlaneIndex = 0; PlaneIndex < PlaneCount; ++PlaneIndex)
 		{
 			const FVector Normal = EditorSettings.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-				? ResolveSingleCaptureNormal(EditorSettings.SingleCaptureAxis)
+				? PlaneIndex == 0
+					? PrimaryCaptureNormal
+					: RotateHorizontalNormal90Degrees(PrimaryCaptureNormal)
 				: FVector(
 					FMath::Cos(static_cast<double>(PlaneIndex) * UE_DOUBLE_PI / static_cast<double>(PlaneCount)),
 					FMath::Sin(static_cast<double>(PlaneIndex) * UE_DOUBLE_PI / static_cast<double>(PlaneCount)),
@@ -1061,6 +1153,86 @@ namespace
 			&OutData.PlaneInfos);
 	}
 
+	bool BuildDoublePlanesOutputMesh(
+		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const UE::FoliageBaker::PlaneCover::FPlaneProxySettings& PlaneSettings,
+		FProxyMeshBuildData& MeshData,
+		FString& OutError)
+	{
+		if (!UsesDoublePlanesBillboard(EditorSettings))
+		{
+			return true;
+		}
+		if (MeshData.PlaneInfos.Num() != 2)
+		{
+			OutError = FString::Printf(
+				TEXT("Double Planes Billboard requires exactly two captured planes, but %d were generated."),
+				MeshData.PlaneInfos.Num());
+			return false;
+		}
+
+		const FVector OutputNormal =
+			ResolveSingleCaptureNormal(EditorSettings.SingleCaptureAxis).GetSafeNormal();
+		FVector OutputAxisU = FVector::CrossProduct(FVector::UpVector, OutputNormal).GetSafeNormal();
+		if (OutputAxisU.IsNearlyZero())
+		{
+			OutError = TEXT("Double Planes Billboard could not construct a horizontal output plane frame.");
+			return false;
+		}
+
+		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> OutputPlaneInfos =
+			MeshData.PlaneInfos;
+		for (int32 PlaneIndex = 0; PlaneIndex < OutputPlaneInfos.Num(); ++PlaneIndex)
+		{
+			UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& OutputPlane =
+				OutputPlaneInfos[PlaneIndex];
+			const FVector CaptureNormal = OutputPlane.Normal.GetSafeNormal();
+			if (CaptureNormal.IsNearlyZero())
+			{
+				OutError = FString::Printf(
+					TEXT("Double Planes Billboard capture plane %d has an invalid direction."),
+					PlaneIndex);
+				return false;
+			}
+
+			for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
+			{
+				OutputPlane.BackAtlasUVs[CornerIndex] =
+					FVector2f(static_cast<float>(CaptureNormal.X), static_cast<float>(CaptureNormal.Y));
+			}
+			OutputPlane.bUseCustomAuxiliaryUV = true;
+			OutputPlane.AuxiliaryUV = FVector2f(static_cast<float>(PlaneIndex), 0.0f);
+
+			OutputPlane.Normal = OutputNormal;
+			OutputPlane.Rho = 0.0;
+			OutputPlane.AxisU = OutputAxisU;
+			OutputPlane.AxisV = FVector::UpVector;
+			OutputPlane.ShadingNormal = OutputNormal;
+			const FVector PlaneOrigin = OutputPlane.Normal * OutputPlane.Rho;
+			OutputPlane.Corners[0] =
+				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MinU + OutputPlane.AxisV * OutputPlane.MinV;
+			OutputPlane.Corners[1] =
+				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MaxU + OutputPlane.AxisV * OutputPlane.MinV;
+			OutputPlane.Corners[2] =
+				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MaxU + OutputPlane.AxisV * OutputPlane.MaxV;
+			OutputPlane.Corners[3] =
+				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MinU + OutputPlane.AxisV * OutputPlane.MaxV;
+		}
+
+		if (!UE::FoliageBaker::PlaneCover::RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
+			OutputPlaneInfos,
+			PlaneSettings,
+			MeshData.MeshDescription,
+			MeshData.Stats,
+			OutError))
+		{
+			return false;
+		}
+		MeshData.Stats.AveragePlaneToShadingNormalDot = 1.0;
+		MeshData.Stats.AveragePlaneToShadingNormalAngleDegrees = 0.0;
+		return true;
+	}
+
 	bool BuildProxyTextureData(
 		const UStaticMesh& StaticMesh,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
@@ -1082,6 +1254,16 @@ namespace
 			OutError = TEXT("A parent Material Instance Constant must be configured in Editor Preferences.");
 			return false;
 		}
+		if (UsesDoublePlanesBillboard(EditorSettings)
+			&& !UE::FoliageBaker::PlaneCover::ApplySharedPlaneProxyBoundsAndRebuildMeshDescription(
+				MeshData.PlaneInfos,
+				CoverData.Settings,
+				MeshData.MeshDescription,
+				MeshData.Stats,
+				OutError))
+		{
+			return false;
+		}
 
 		auto BakeFeatureAtlas = [&](const FAtlasOutputSelection& OutputSelection,
 			TArray<FColor>& AtlasPixels,
@@ -1097,6 +1279,7 @@ namespace
 				MeshData.Stats,
 				CoverData.Settings,
 				OutputSelection,
+				UsesDoublePlanesBillboard(EditorSettings),
 				AtlasPixels,
 				NormalPixels,
 				MixPixels,
@@ -1138,6 +1321,10 @@ namespace
 				EffectiveAlphaCropGuardPixels,
 				AlphaCropThreshold,
 				TileCrops);
+			if (UsesDoublePlanesBillboard(EditorSettings))
+			{
+				AlphaAwareCroppedPlaneCount = MergeDoublePlaneTileCrops(TileCrops);
+			}
 
 			if (AlphaAwareCroppedPlaneCount > 0)
 			{
@@ -1147,7 +1334,8 @@ namespace
 					CoverData.Settings,
 					MeshData.MeshDescription,
 					MeshData.Stats,
-					OutError))
+					OutError,
+					UsesDoublePlanesBillboard(EditorSettings)))
 				{
 					return false;
 				}
@@ -1182,6 +1370,14 @@ namespace
 			}
 			MeshData.Stats.AtlasWidth = OutData.AtlasStats.Width;
 			MeshData.Stats.AtlasHeight = OutData.AtlasStats.Height;
+		}
+		if (!BuildDoublePlanesOutputMesh(
+			EditorSettings,
+			CoverData.Settings,
+			MeshData,
+			OutError))
+		{
+			return false;
 		}
 
 		if (OutData.OutputSelection.bBaseColorOpacity)
@@ -1289,9 +1485,11 @@ namespace
 		if (MeshOutputSelection.OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 		{
 			FFoliageBakerStaticMeshAssetParams MeshParams;
-			MeshParams.AssetNameSuffix = EditorSettings.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-				? TEXT("_Billboard")
-				: TEXT("_CrossCards");
+			MeshParams.AssetNameSuffix = EditorSettings.Mode == EFoliageBakerCardBakeMode::CrossCards
+				? TEXT("_CrossCards")
+				: UsesDoublePlanesBillboard(EditorSettings)
+					? TEXT("_DoubleBillboard")
+					: TEXT("_Billboard");
 			MeshParams.ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
 			MeshParams.DesiredUVChannelCount = GetDesiredCardUVChannelCount(EditorSettings);
 			OutResult.ProxyMesh = FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
@@ -1352,22 +1550,36 @@ namespace
 				UsesSeparateOneSidedCrossFaces(Request)
 					? TEXT("separate one-sided front/back quads, generated material Two Sided=false")
 					: TEXT("one two-sided quad per direction, generated material Two Sided=true"));
-		const TCHAR* AtlasUVDetails = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-			? TEXT("UV0 stores the single baked tile")
+		const TCHAR* AtlasUVDetails = UsesDoublePlanesBillboard(Request)
+			? TEXT("UV0 stores each plane's baked tile; UV1.xy stores its local capture direction; UV2.x stores plane selector 0 or 1")
+			: Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
+				? TEXT("UV0 stores the single baked tile")
 			: UsesSeparateOneSidedCrossFaces(Request)
 				? TEXT("each physical face stores its own front/back tile in UV0; generated mesh keeps one UV channel")
 				: TEXT("UV0 stores the front-side tile and UV1 stores the back-side tile");
-		const TCHAR* WindingDetails = UsesSeparateOneSidedCrossFaces(Request)
-			? TEXT("opposed UE front-face orders with opposed source-facing normals")
-			: TEXT("reversed UE front-face order with source-facing normals");
+		const TCHAR* WindingDetails = UsesDoublePlanesBillboard(Request)
+			? TEXT("two overlapping parallel quads in the primary capture frame; dedicated material controls camera-facing rotation, Dither weights, and spacing")
+			: UsesSeparateOneSidedCrossFaces(Request)
+				? TEXT("opposed UE front-face orders with opposed source-facing normals")
+				: TEXT("reversed UE front-face order with source-facing normals");
+		const TCHAR* FeatureName = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+			? TEXT("Cross Cards")
+			: UsesDoublePlanesBillboard(Request)
+				? TEXT("Double Planes Billboard")
+				: TEXT("Single Plane Billboard");
+		const TCHAR* CaptureDetails = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+			? TEXT("equally spaced over 180 degrees, front and back baked")
+			: UsesDoublePlanesBillboard(Request)
+				? TEXT("primary selected axis plus a second local horizontal axis rotated +90 degrees, one baked side per view")
+				: TEXT("one selected axis, one baked side");
 
 		const FString TechniqueSummary = FString::Printf(
 			TEXT("%s\n  source LOD: %d, selected-LOD bounds radius: %.3f cm\n  feature: %s, capture=%s, selected-LOD projected bounds, per-angle alpha crop\n  trunk/leaf classification: shared material/parent keyword rule, matched materials=%d, trunk triangles=%d%s"),
 			*StaticMesh.GetName(),
 			CoverData.SourceLODIndex,
 			CoverData.SourceLODBounds.SphereRadius,
-			Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard ? TEXT("Single Billboard") : TEXT("Cross Cards"),
-			Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard ? TEXT("one selected axis, one baked side") : TEXT("equally spaced over 180 degrees, front and back baked"),
+			FeatureName,
+			CaptureDetails,
 			CoverData.TrunkLeafClassification.MatchedMaterialCount,
 			CoverData.TrunkLeafClassification.TrunkTriangleCount,
 			*CrossFaceDetails);
@@ -1417,10 +1629,14 @@ namespace
 			TextureData.AtlasStats.AlphaAwareTileCropGuardPixels,
 			TextureData.AtlasStats.RasterizedTriangleReferences,
 			TextureData.AtlasStats.MaskedMaterialBakeReferences,
-			Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-				? TEXT("dedicated fixed-axis orthographic capture, all selected-LOD triangles, WPO disabled")
-				: TEXT("dedicated fixed-angle orthographic capture, front and back per plane, all selected-LOD triangles, WPO disabled"),
-			TEXT("one shared per-tile masked RDG depth winner supplies BaseColor, object normal, source triangle ID, and packed Mix; no CPU material-property fallback"),
+			Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+				? TEXT("dedicated fixed-angle orthographic capture, front and back per plane, all selected-LOD triangles, WPO disabled")
+				: UsesDoublePlanesBillboard(Request)
+					? TEXT("two dedicated fixed-axis orthographic captures separated by 90 degrees, all selected-LOD triangles, WPO disabled")
+					: TEXT("dedicated fixed-axis orthographic capture, all selected-LOD triangles, WPO disabled"),
+			UsesDoublePlanesBillboard(Request)
+				? TEXT("one shared per-tile masked RDG depth winner supplies BaseColor, source object normal, source triangle ID, and packed Mix; each view normal is re-expressed in its capture Facing/Right/Up frame before atlas storage")
+				: TEXT("one shared per-tile masked RDG depth winner supplies BaseColor, object normal, source triangle ID, and packed Mix; no CPU material-property fallback"),
 			*BaseAtlasPath,
 			*NormalAtlasPath,
 			*MixAtlasPath,
@@ -1594,9 +1810,11 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 	SanitizedRequest.SourceLODIndex = Request.SourceLODIndex;
 	SanitizedRequest.CrossCardPlaneCount = FMath::Clamp(Request.CrossCardPlaneCount, 2, 5);
 	SanitizedRequest.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
-	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-		? TEXT("_Billboard")
-		: TEXT("_Cross");
+	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+		? TEXT("_Cross")
+		: UsesDoublePlanesBillboard(Request)
+			? TEXT("_DoubleBillboard")
+			: TEXT("_Billboard");
 	SanitizedRequest.BaseColorOpacityTextureSuffix = FeatureSuffix + Request.BaseColorOpacityTextureSuffix;
 	SanitizedRequest.NormalDepthTextureSuffix = FeatureSuffix + Request.NormalDepthTextureSuffix;
 	SanitizedRequest.MixTextureSuffix = FeatureSuffix + Request.MixTextureSuffix;

@@ -34,6 +34,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Sampling", meta = (ClampMin = "3", ClampMax = "8", DisplayName = "Frame Grid Size", ToolTip = "Number of rows and columns in the octahedral direction grid. The baker captures Frame Grid Size squared views."))
 	int32 FrameGridSize = 4;
 
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Classification", meta = (DisplayName = "Trunk Material Keywords", ToolTip = "Material or parent material names containing any keyword are classified as trunk. All other materials are classified as leaf."))
+	TArray<FString> TrunkMaterialKeywords = { TEXT("Trunk") };
+
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum dimension of the generated square atlas. Square tiles are arranged in the configured octahedral frame grid."))
 	int32 TextureResolution = 2048;
 
@@ -43,7 +46,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / SDF", ToolTip = "RGB stores BaseColor. A stores a whole-vegetation SDF: outside 0, contour 0.5, inside 1."))
 	bool bBakeBaseColorSdf = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Depth", ToolTip = "RGB stores object/local-space Normal. A stores UE ImpostorBaker-compatible shared-range linear depth: near 1, far 0, uncovered 0.5."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Mask / Depth", ToolTip = "RG stores octahedral object/local-space Normal. B stores trunk 0.5 or leaf 1. A stores shared-range linear depth: near 1, far 0, uncovered 0.5."))
 	bool bBakeNormalDepth = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission."))
@@ -79,11 +82,23 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter"))
 	FName BaseColorSdfTextureParameterName = TEXT("ColorOpacity");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Depth Parameter"))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter"))
 	FName NormalDepthTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Packed Masks Parameter"))
 	FName MixTextureParameterName = TEXT("PackedMasks_1");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of final visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
+	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of final visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
+	FName LeafSpecularParameterName = TEXT("LeafSpecular");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Trunk Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of final visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
+	FName TrunkRoughnessParameterName = TEXT("TrunkRoughness");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Trunk Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of final visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
+	FName TrunkSpecularParameterName = TEXT("TrunkSpecular");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Frames XY Parameter", ToolTip = "Scalar parameter receiving the shared row and column count used by the square octahedral atlas."))
 	FName FramesParameterName = TEXT("FramesXY");

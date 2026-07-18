@@ -20,6 +20,12 @@ enum class EFoliageBakerCaptureAxis : uint8
 	NegativeY
 };
 
+enum class EFoliageBakerBillboardPlaneMode : uint8
+{
+	SinglePlane,
+	DoublePlanes
+};
+
 enum class EFoliageBakerCrossCardGeometryMode : uint8
 {
 	TwoSidedTwoUVs,
@@ -33,6 +39,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	int32 SourceLODIndex = 0;
 
 	EFoliageBakerCardBakeMode Mode = EFoliageBakerCardBakeMode::SingleBillboard;
+	EFoliageBakerBillboardPlaneMode BillboardPlaneMode = EFoliageBakerBillboardPlaneMode::SinglePlane;
 	EFoliageBakerCaptureAxis SingleCaptureAxis = EFoliageBakerCaptureAxis::PositiveX;
 	int32 CrossCardPlaneCount = 2;
 	EFoliageBakerCrossCardGeometryMode CrossCardGeometryMode = EFoliageBakerCrossCardGeometryMode::TwoSidedTwoUVs;
