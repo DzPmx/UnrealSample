@@ -117,9 +117,22 @@ namespace
 		Request.bBakeBaseColorOpacity = Settings.bBakeBaseColorOpacity;
 		Request.bBakeNormalDepth = Settings.bBakeNormalDepth;
 		Request.bBakeMix = Settings.bBakeMix;
+		Request.bBakeUpperHemisphereL1Visibility =
+			IsSingleBillboardMode(Settings.Mode)
+			&& Settings.bBakeUpperHemisphereL1Visibility;
+		Request.UpperHemisphereL1SampleCount = FMath::Clamp(
+			Settings.UpperHemisphereL1SampleCount,
+			4,
+			32);
+		Request.UpperHemisphereL1ShadowMapResolution = FMath::Clamp(
+			Settings.UpperHemisphereL1ShadowMapResolution,
+			64,
+			512);
 		Request.BaseColorOpacityTextureParameterName = Settings.BaseColorOpacityTextureParameterName;
 		Request.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;
+		Request.UpperHemisphereL1VisibilityTextureParameterName =
+			Settings.UpperHemisphereL1VisibilityTextureParameterName;
 		Request.LeafRoughnessParameterName = Settings.LeafRoughnessParameterName;
 		Request.LeafSpecularParameterName = Settings.LeafSpecularParameterName;
 		Request.TrunkRoughnessParameterName = Settings.TrunkRoughnessParameterName;
@@ -130,6 +143,8 @@ namespace
 		Request.BaseColorOpacityTextureSuffix = Settings.BaseColorOpacityTextureSuffix;
 		Request.NormalDepthTextureSuffix = Settings.NormalDepthTextureSuffix;
 		Request.MixTextureSuffix = Settings.MixTextureSuffix;
+		Request.UpperHemisphereL1VisibilityTextureSuffix =
+			Settings.UpperHemisphereL1VisibilityTextureSuffix;
 		Request.MaterialInstanceNamePrefix = Settings.MaterialInstanceNamePrefix;
 		Request.MaterialInstanceNameSuffix = Settings.MaterialInstanceNameSuffix;
 		return Request;
@@ -233,7 +248,9 @@ bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 		!MaterialTemplate.IsNull(),
 		Settings->bBakeBaseColorOpacity
 			|| Settings->bBakeNormalDepth
-			|| Settings->bBakeMix,
+			|| Settings->bBakeMix
+			|| (IsSingleBillboardMode(Mode)
+				&& Settings->bBakeUpperHemisphereL1Visibility),
 		Settings->SourceStaticMeshes);
 }
 

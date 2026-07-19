@@ -91,6 +91,12 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 {
+	struct FTextureParameterValue
+	{
+		FName ParameterName = NAME_None;
+		UTexture2D* Texture = nullptr;
+	};
+
 	FString OutputFolderName;
 	FString AssetNamePrefix;
 	FString AssetNameSuffix;
@@ -98,6 +104,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	FName BaseColorOpacityTextureParameterName = NAME_None;
 	FName NormalDepthTextureParameterName = NAME_None;
 	FName MixTextureParameterName = NAME_None;
+	TArray<FTextureParameterValue> AdditionalTextureParameterValues;
 	TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue> ScalarParameterValues;
 	TOptional<bool> TwoSidedOverride;
 	FString MissingTemplateError = TEXT("A parent Material Instance Constant must be configured in Editor Preferences.");

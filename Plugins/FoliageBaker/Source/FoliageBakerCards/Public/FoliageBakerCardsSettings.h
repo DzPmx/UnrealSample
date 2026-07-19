@@ -92,6 +92,15 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission. The destination material texture parameter is configured in Material."))
 	bool bBakeMix = false;
 
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Upper Hemisphere L1 Visibility", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Bakes low-frequency self-visibility for source-local light directions over the upper hemisphere. RGB store signed X/Y/Z directional coefficients remapped from -1..1 to 0..1; A stores the constant coefficient. Runtime reconstruction is saturate(A + dot(RGB * 2 - 1, BakedLightDirection)). BakedLightDirection points toward the light and must be transformed back through the Billboard WPO rotation into the original bake frame."))
+	bool bBakeUpperHemisphereL1Visibility = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "4", ClampMax = "32", DisplayName = "L1 Visibility Samples", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Number of uniformly distributed upper-hemisphere directions used to fit the four L1 visibility coefficients. Higher values improve stability but increase offline bake time."))
+	int32 UpperHemisphereL1SampleCount = 12;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "512", DisplayName = "L1 Shadow Map Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum internal masked shadow-map dimension used for each sampled light direction. Each receiver uses a fixed 5x5 PCF depth-comparison kernel before L1 fitting. This does not change the generated coefficient atlas resolution."))
+	int32 UpperHemisphereL1ShadowMapResolution = 256;
+
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString TextureOutputFolderName = TEXT("Textures");
 
@@ -110,6 +119,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MixTextureSuffix = TEXT("_M");
 
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Upper Hemisphere L1 Visibility Texture Suffix", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides))
+	FString UpperHemisphereL1VisibilityTextureSuffix = TEXT("_L1V");
+
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MaterialInstanceNamePrefix = TEXT("MI_");
 
@@ -127,6 +139,9 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission texture when that output is enabled."))
 	FName MixTextureParameterName = TEXT("Mix");
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Upper Hemisphere L1 Visibility Parameter", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Texture parameter receiving the optional upper-hemisphere L1 self-visibility coefficient atlas. The plugin only assigns this parameter; it does not modify the parent material graph."))
+	FName UpperHemisphereL1VisibilityTextureParameterName = TEXT("UpperHemisphereL1Visibility");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
 	FName LeafRoughnessParameterName = TEXT("LeafRoughness");

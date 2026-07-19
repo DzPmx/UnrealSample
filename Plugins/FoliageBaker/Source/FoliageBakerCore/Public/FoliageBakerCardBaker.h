@@ -51,9 +51,13 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	bool bBakeBaseColorOpacity = true;
 	bool bBakeNormalDepth = true;
 	bool bBakeMix = false;
+	bool bBakeUpperHemisphereL1Visibility = false;
+	int32 UpperHemisphereL1SampleCount = 12;
+	int32 UpperHemisphereL1ShadowMapResolution = 256;
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
 	FName NormalDepthTextureParameterName = TEXT("NormalMask");
 	FName MixTextureParameterName = TEXT("Mix");
+	FName UpperHemisphereL1VisibilityTextureParameterName = TEXT("UpperHemisphereL1Visibility");
 	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
 	FName LeafSpecularParameterName = TEXT("LeafSpecular");
 	FName TrunkRoughnessParameterName = TEXT("TrunkRoughness");
@@ -65,6 +69,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	FString BaseColorOpacityTextureSuffix = TEXT("_DA");
 	FString NormalDepthTextureSuffix = TEXT("_NR");
 	FString MixTextureSuffix = TEXT("_M");
+	FString UpperHemisphereL1VisibilityTextureSuffix = TEXT("_L1V");
 	FString MaterialInstanceNamePrefix = TEXT("MI_");
 	FString MaterialInstanceNameSuffix;
 };
@@ -78,6 +83,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeResult
 	UTexture2D* ColorOpacityTexture = nullptr;
 	UTexture2D* NormalDepthTexture = nullptr;
 	UTexture2D* MixTexture = nullptr;
+	UTexture2D* UpperHemisphereL1VisibilityTexture = nullptr;
 	UMaterialInstanceConstant* MaterialInstance = nullptr;
 	TArray<UObject*> CreatedAssets;
 	FString Report;

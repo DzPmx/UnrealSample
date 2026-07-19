@@ -1230,6 +1230,16 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 			FMaterialParameterInfo(Params.MixTextureParameterName),
 			MixTexture);
 	}
+	for (const FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue& TextureParameter
+		: Params.AdditionalTextureParameterValues)
+	{
+		if (!TextureParameter.ParameterName.IsNone() && TextureParameter.Texture)
+		{
+			MaterialInstance->SetTextureParameterValueEditorOnly(
+				FMaterialParameterInfo(TextureParameter.ParameterName),
+				TextureParameter.Texture);
+		}
+	}
 	for (const UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue& ScalarParameter
 		: Params.ScalarParameterValues)
 	{
