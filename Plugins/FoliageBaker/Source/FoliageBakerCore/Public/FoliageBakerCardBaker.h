@@ -47,13 +47,16 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 
 	int32 TextureResolution = 1024;
 	int32 AlphaCropGuardPixels = 2;
+	bool bPreserveAlphaMaskValues = true;
+	float MipMaskCoverageThreshold = 0.35f;
 	bool bTrimUnusedAtlasSpace = false;
 	bool bBakeBaseColorOpacity = true;
 	bool bBakeNormalDepth = true;
 	bool bBakeMix = false;
 	bool bBakeUpperHemisphereL1Visibility = false;
+	int32 UpperHemisphereL1TextureResolution = 512;
 	int32 UpperHemisphereL1SampleCount = 12;
-	int32 UpperHemisphereL1ShadowMapResolution = 256;
+	int32 UpperHemisphereL1ShadowMapResolution = 1024;
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
 	FName NormalDepthTextureParameterName = TEXT("NormalMask");
 	FName MixTextureParameterName = TEXT("Mix");

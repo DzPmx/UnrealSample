@@ -80,6 +80,12 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Per-View Alpha Crop Guard", ToolTip = "Extra pixels retained around the automatically detected visible-alpha bounds. Per-view alpha cropping is always enabled for Billboard and Cross Cards."))
 	int32 AlphaCropGuardPixels = 2;
 
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate semantic mask mips independently inside every Billboard or Cross Cards atlas tile. Alpha remains exactly background 0, trunk 0.5, or leaf 1 instead of being averaged to gray values."))
+	bool bPreserveAlphaMaskValues = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "bPreserveAlphaMaskValues", EditConditionHides, DisplayName = "Mip Mask Coverage Threshold", ToolTip = "Minimum fraction of covered Mip 0 samples required to keep a destination mip pixel. Lower values preserve fuller foliage silhouettes; higher values remove more thin coverage."))
+	float MipMaskCoverageThreshold = 0.35f;
+
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Optimization", meta = (DisplayName = "Trim Unused Atlas Space", ToolTip = "After all Billboard or Cross Cards tiles are packed, remove completely unused outer atlas rows and columns. Output dimensions remain block-aligned and can become rectangular. Per-view alpha bounds are always cropped independently of this option."))
 	bool bTrimUnusedAtlasSpace = false;
 
@@ -95,11 +101,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Upper Hemisphere L1 Visibility", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Bakes low-frequency self-visibility for source-local light directions over the upper hemisphere. RGB store signed X/Y/Z directional coefficients remapped from -1..1 to 0..1; A stores the constant coefficient. Runtime reconstruction is saturate(A + dot(RGB * 2 - 1, BakedLightDirection)). BakedLightDirection points toward the light and must be transformed back through the Billboard WPO rotation into the original bake frame."))
 	bool bBakeUpperHemisphereL1Visibility = false;
 
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "1024", DisplayName = "L1 Visibility Texture Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum dimension of the generated L1 coefficient atlas. The Billboard atlas aspect ratio and normalized tile layout are preserved, and every tile is resized independently to prevent cross-tile filtering."))
+	int32 UpperHemisphereL1TextureResolution = 512;
+
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "4", ClampMax = "32", DisplayName = "L1 Visibility Samples", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Number of uniformly distributed upper-hemisphere directions used to fit the four L1 visibility coefficients. Higher values improve stability but increase offline bake time."))
 	int32 UpperHemisphereL1SampleCount = 12;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "512", DisplayName = "L1 Shadow Map Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum internal masked shadow-map dimension used for each sampled light direction. Each receiver uses a fixed 5x5 PCF depth-comparison kernel before L1 fitting. This does not change the generated coefficient atlas resolution."))
-	int32 UpperHemisphereL1ShadowMapResolution = 256;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "1024", DisplayName = "L1 Shadow Map Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum internal masked shadow-map dimension used for each sampled light direction. Each receiver uses a fixed 5x5 PCF depth-comparison kernel before L1 fitting. This does not change the generated coefficient atlas resolution."))
+	int32 UpperHemisphereL1ShadowMapResolution = 1024;
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString TextureOutputFolderName = TEXT("Textures");

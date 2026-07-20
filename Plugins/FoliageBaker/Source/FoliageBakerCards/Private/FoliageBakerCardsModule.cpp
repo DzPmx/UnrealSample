@@ -113,6 +113,8 @@ namespace
 			Settings.AlphaCropGuardPixels,
 			MinAlphaCropGuardPixels,
 			MaxAlphaCropGuardPixels);
+		Request.bPreserveAlphaMaskValues = Settings.bPreserveAlphaMaskValues;
+		Request.MipMaskCoverageThreshold = FMath::Clamp(Settings.MipMaskCoverageThreshold, 0.01f, 1.0f);
 		Request.bTrimUnusedAtlasSpace = Settings.bTrimUnusedAtlasSpace;
 		Request.bBakeBaseColorOpacity = Settings.bBakeBaseColorOpacity;
 		Request.bBakeNormalDepth = Settings.bBakeNormalDepth;
@@ -120,6 +122,10 @@ namespace
 		Request.bBakeUpperHemisphereL1Visibility =
 			IsSingleBillboardMode(Settings.Mode)
 			&& Settings.bBakeUpperHemisphereL1Visibility;
+		Request.UpperHemisphereL1TextureResolution = FMath::Clamp(
+			Settings.UpperHemisphereL1TextureResolution,
+			64,
+			1024);
 		Request.UpperHemisphereL1SampleCount = FMath::Clamp(
 			Settings.UpperHemisphereL1SampleCount,
 			4,
@@ -127,7 +133,7 @@ namespace
 		Request.UpperHemisphereL1ShadowMapResolution = FMath::Clamp(
 			Settings.UpperHemisphereL1ShadowMapResolution,
 			64,
-			512);
+			1024);
 		Request.BaseColorOpacityTextureParameterName = Settings.BaseColorOpacityTextureParameterName;
 		Request.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;

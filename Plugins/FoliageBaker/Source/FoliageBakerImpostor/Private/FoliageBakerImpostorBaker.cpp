@@ -1061,7 +1061,6 @@ namespace
 		Params.CompressionSettings = Compression;
 		Params.LODGroup = LODGroup;
 		Params.bSRGB = bSRGB;
-		Params.AlphaCoverageThreshold = 0.0f;
 		Params.MipBackgroundColor = MipBackgroundColor;
 		Params.bNormalizeMipNormals = false;
 		const int32 TileResolution = FMath::Max(1, Stats.TileResolution);

@@ -49,6 +49,8 @@ float LeafMask = step(0.75, ColorOpacityA);
 float TrunkMask = Coverage * (1.0 - LeafMask);
 ```
 
+Single Plane、Double Planes、Cross Cards 和 BillboardClouds 默认启用逐 Tile 的语义 Mask Mip。RGB 继续使用 Box Filter；A 通道的每一级 Mip 直接统计对应的 Mip 0 区域，始终只写背景 `0`、树干 `0.5` 或树叶 `1`，不会对 Alpha 做平均或整体缩放。`Mip Mask Coverage Threshold` 范围为 `0.01–1.0`，默认 `0.35`，表示一个目标 Mip 像素至少需要多少比例的 Mip 0 样本属于树干或树叶才予以保留；保留后由覆盖样本中的树叶/树干多数决定分类，相同数量时优先树叶。关闭 `Preserve Alpha Mask Values` 后恢复原始逐 Tile Box Mip。该设置只影响 BaseColor / Auxiliary 的 A 通道，不处理 Impostor SDF，也不影响 Normal、Mix 或 L1 Visibility。
+
 Impostor 使用 SDF 计算平滑覆盖：
 
 ```hlsl
@@ -96,7 +98,8 @@ Billboard 模式可以额外生成一张逐像素的上半球 L1 自遮挡可见
 
 - 每个 Atlas 有效像素从深度结果重建源表面位置。
 - 在上半球用均匀方向采样为整株模型生成 Masked Shadow Depth；采样数量范围为 4–32，默认 12。
-- 每次深度比较固定使用 5×5 PCF。内部 Shadow Map 最大边范围为 64–512，默认 256；PCF 所需的 2 texel 安全边界只存在于内部投影，不扩大最终 Atlas、不改变代理 UV。
+- L1 系数纹理拥有独立的最大边分辨率设置，范围为 64–1024，默认 512。输出保持 Billboard Atlas 的宽高比和归一化 Tile 布局，每个 Tile 独立缩放，避免相邻视角串色。
+- 每次深度比较固定使用 5×5 PCF。内部 Shadow Map 最大边范围为 64–1024，默认 1024；PCF 所需的 2 texel 安全边界只存在于内部投影，不扩大最终 Atlas、不改变代理 UV。
 - 每个像素对采样得到的 Visibility 做四系数线性最小二乘拟合。`RGB` 保存 `Cxyz`，由 `[-1,1]` 重映射到 `[0,1]`；`A` 保存 `[0,1]` 的常数项 `C0`。
 - 未覆盖像素使用中性编码 `(128,128,128,255)`，表示零方向项和常数项 1；Atlas Tile 内的 RGB/A 扩张沿用有效像素，不引入黑色 Padding。
 

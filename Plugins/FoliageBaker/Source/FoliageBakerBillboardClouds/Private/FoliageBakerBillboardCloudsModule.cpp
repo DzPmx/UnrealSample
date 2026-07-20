@@ -761,7 +761,7 @@ namespace
 		const TextureCompressionSettings CompressionSettings,
 		const TextureGroup LODGroup,
 		const bool bSRGB,
-		const float AlphaCoverageThreshold,
+		const float SemanticMaskMipCoverageThreshold,
 		const FString& EmptyPixelsError,
 		FString& OutError)
 	{
@@ -774,7 +774,7 @@ namespace
 		Params.CompressionSettings = CompressionSettings;
 		Params.LODGroup = LODGroup;
 		Params.bSRGB = bSRGB;
-		Params.AlphaCoverageThreshold = AlphaCoverageThreshold;
+		Params.SemanticMaskMipCoverageThreshold = SemanticMaskMipCoverageThreshold;
 		Params.MipBackgroundColor = MipBackgroundColor;
 		Params.bNormalizeMipNormals = LODGroup == TEXTUREGROUP_WorldNormalMap;
 		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
@@ -801,7 +801,6 @@ namespace
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		const float AlphaCoverageThreshold,
 		FString& OutError)
 	{
 		return CreateBillboardTextureAsset(
@@ -817,7 +816,9 @@ namespace
 			TC_BC7,
 			TEXTUREGROUP_World,
 			true,
-			AlphaCoverageThreshold,
+			EditorSettings.bPreserveAlphaMaskValues
+				? FMath::Clamp(EditorSettings.MipMaskCoverageThreshold, 0.01f, 1.0f)
+				: 0.0f,
 			TEXT("No atlas pixels were generated."),
 			OutError);
 	}
@@ -1220,7 +1221,6 @@ namespace
 				OutData.AtlasPixels,
 				OutData.AtlasStats,
 				MeshData.PlaneInfos,
-				0.0f,
 				OutError);
 			if (!OutData.AtlasTexture)
 			{

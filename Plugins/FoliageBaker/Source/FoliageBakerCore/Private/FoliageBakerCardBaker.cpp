@@ -842,7 +842,7 @@ namespace
 		const TextureCompressionSettings CompressionSettings,
 		const TextureGroup LODGroup,
 		const bool bSRGB,
-		const float AlphaCoverageThreshold,
+		const float SemanticMaskMipCoverageThreshold,
 		const FString& EmptyPixelsError,
 		FString& OutError)
 	{
@@ -855,7 +855,7 @@ namespace
 		Params.CompressionSettings = CompressionSettings;
 		Params.LODGroup = LODGroup;
 		Params.bSRGB = bSRGB;
-		Params.AlphaCoverageThreshold = AlphaCoverageThreshold;
+		Params.SemanticMaskMipCoverageThreshold = SemanticMaskMipCoverageThreshold;
 		Params.MipBackgroundColor = MipBackgroundColor;
 		Params.bNormalizeMipNormals = LODGroup == TEXTUREGROUP_WorldNormalMap;
 		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
@@ -897,7 +897,9 @@ namespace
 			TC_BC7,
 			TEXTUREGROUP_World,
 			true,
-			0.0f,
+			EditorSettings.bPreserveAlphaMaskValues
+				? EditorSettings.MipMaskCoverageThreshold
+				: 0.0f,
 			TEXT("No atlas pixels were generated."),
 			OutError);
 	}
@@ -956,6 +958,68 @@ namespace
 			OutError);
 	}
 
+	bool ResizeTileIsolatedAtlas(
+		const TArray<FColor>& SourcePixels,
+		const FAtlasBakeStats& SourceStats,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& SourcePlaneInfos,
+		const int32 RequestedMaximumDimension,
+		const FColor BackgroundColor,
+		TArray<FColor>& OutPixels,
+		FAtlasBakeStats& OutStats,
+		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& OutPlaneInfos,
+		FString& OutError)
+	{
+		int32 OutputWidth = 0;
+		int32 OutputHeight = 0;
+		if (!UE::FoliageBaker::Atlas::ResizeTileIsolated(
+				SourcePixels,
+				SourceStats.Width,
+				SourceStats.Height,
+				SourcePlaneInfos,
+				FMath::Clamp(RequestedMaximumDimension, 64, 1024),
+				BackgroundColor,
+				OutPixels,
+				OutputWidth,
+				OutputHeight,
+				OutPlaneInfos,
+				OutError))
+		{
+			return false;
+		}
+
+		OutStats = SourceStats;
+		OutStats.Width = OutputWidth;
+		OutStats.Height = OutputHeight;
+		OutStats.TileResolution = FMath::Max(
+			1,
+			FMath::RoundToInt(
+				SourceStats.TileResolution
+					* FMath::Min(
+						static_cast<double>(OutputWidth) / SourceStats.Width,
+						static_cast<double>(OutputHeight) / SourceStats.Height)));
+		int64 PackedTilePixels = 0;
+		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo
+			: OutPlaneInfos)
+		{
+			PackedTilePixels +=
+				static_cast<int64>(PlaneInfo.AtlasTileSize.X)
+				* PlaneInfo.AtlasTileSize.Y;
+			if (PlaneInfo.bHasBackFaceAtlas)
+			{
+				PackedTilePixels +=
+					static_cast<int64>(PlaneInfo.BackAtlasTileSize.X)
+					* PlaneInfo.BackAtlasTileSize.Y;
+			}
+		}
+		const int64 TargetPixelCount =
+			static_cast<int64>(OutputWidth) * OutputHeight;
+		OutStats.PackedTileUtilizationPercent = TargetPixelCount > 0
+			? 100.0 * static_cast<double>(PackedTilePixels)
+				/ static_cast<double>(TargetPixelCount)
+			: 0.0;
+		return true;
+	}
+
 	UTexture2D* CreateUpperHemisphereL1VisibilityTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
@@ -965,15 +1029,32 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
+		TArray<FColor> ResizedPixels;
+		FAtlasBakeStats ResizedStats;
+		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> ResizedPlaneInfos;
+		if (!ResizeTileIsolatedAtlas(
+				Pixels,
+				AtlasStats,
+				PlaneInfos,
+				EditorSettings.UpperHemisphereL1TextureResolution,
+				FColor(128, 128, 128, 255),
+				ResizedPixels,
+				ResizedStats,
+				ResizedPlaneInfos,
+				OutError))
+		{
+			return nullptr;
+		}
+
 		return CreateBillboardTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			EditorSettings.TextureOutputFolderName,
 			EditorSettings.TextureNamePrefix,
 			EditorSettings.UpperHemisphereL1VisibilityTextureSuffix,
-			Pixels,
-			AtlasStats,
-			PlaneInfos,
+			ResizedPixels,
+			ResizedStats,
+			ResizedPlaneInfos,
 			FColor(128, 128, 128, 255),
 			TC_BC7,
 			TEXTUREGROUP_WorldSpecular,
@@ -1774,8 +1855,11 @@ namespace
 		if (TextureData.UpperHemisphereL1VisibilityTexture)
 		{
 			Report += FString::Printf(
-				TEXT("\n  upper-hemisphere L1 visibility atlas: %s, RGB=object/local-space signed Cxyz remapped to 0..1, A=C0, samples=%d, internal shadow resolution=%d, material parameter=%s"),
+				TEXT("\n  upper-hemisphere L1 visibility atlas: %s, size=%dx%d, configured maximum dimension=%d, RGB=object/local-space signed Cxyz remapped to 0..1, A=C0, samples=%d, internal shadow resolution=%d, material parameter=%s"),
 				*TextureData.UpperHemisphereL1VisibilityTexture->GetPathName(),
+				TextureData.UpperHemisphereL1VisibilityTexture->GetSizeX(),
+				TextureData.UpperHemisphereL1VisibilityTexture->GetSizeY(),
+				Request.UpperHemisphereL1TextureResolution,
 				Request.UpperHemisphereL1SampleCount,
 				Request.UpperHemisphereL1ShadowMapResolution,
 				*Request.UpperHemisphereL1VisibilityTextureParameterName.ToString());
@@ -1960,10 +2044,14 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 	SanitizedRequest.SourceLODIndex = Request.SourceLODIndex;
 	SanitizedRequest.CrossCardPlaneCount = FMath::Clamp(Request.CrossCardPlaneCount, 2, 5);
 	SanitizedRequest.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
+	SanitizedRequest.MipMaskCoverageThreshold =
+		FMath::Clamp(Request.MipMaskCoverageThreshold, 0.01f, 1.0f);
+	SanitizedRequest.UpperHemisphereL1TextureResolution =
+		FMath::Clamp(Request.UpperHemisphereL1TextureResolution, 64, 1024);
 	SanitizedRequest.UpperHemisphereL1SampleCount =
 		FMath::Clamp(Request.UpperHemisphereL1SampleCount, 4, 32);
 	SanitizedRequest.UpperHemisphereL1ShadowMapResolution =
-		FMath::Clamp(Request.UpperHemisphereL1ShadowMapResolution, 64, 512);
+		FMath::Clamp(Request.UpperHemisphereL1ShadowMapResolution, 64, 1024);
 	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
 		? TEXT("_Cross")
 		: UsesDoublePlanesBillboard(Request)

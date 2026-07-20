@@ -392,66 +392,96 @@ namespace
 		}
 	}
 
-	double ComputeAlphaCoverage(
-		const FColor* Pixels,
-		const int32 PixelCount,
-		const uint8 Threshold,
-		const float AlphaScale = 1.0f)
+	void GenerateSemanticMaskMipAlpha(
+		const uint8* SourceAlphaValues,
+		const int32 SourceWidth,
+		const int32 SourceHeight,
+		FColor* DestinationPixels,
+		const int32 DestinationWidth,
+		const int32 DestinationHeight,
+		const float CoverageThreshold)
 	{
-		if (!Pixels || PixelCount <= 0)
-		{
-			return 0.0;
-		}
-
-		int32 CoveredPixelCount = 0;
-		for (int32 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
-		{
-			if (static_cast<float>(Pixels[PixelIndex].A) * AlphaScale >= Threshold)
-			{
-				++CoveredPixelCount;
-			}
-		}
-		return static_cast<double>(CoveredPixelCount) / static_cast<double>(PixelCount);
-	}
-
-	void ScaleAlphaToCoverage(
-		FColor* Pixels,
-		const int32 PixelCount,
-		const uint8 Threshold,
-		const double TargetCoverage)
-	{
-		if (!Pixels || PixelCount <= 0 || Threshold == 0 || TargetCoverage <= 0.0)
+		if (!SourceAlphaValues
+			|| !DestinationPixels
+			|| SourceWidth <= 0
+			|| SourceHeight <= 0
+			|| DestinationWidth <= 0
+			|| DestinationHeight <= 0)
 		{
 			return;
 		}
 
-		float MinScale = 0.0f;
-		float MaxScale = 4.0f;
-		float AlphaScale = 1.0f;
-		for (int32 Iteration = 0; Iteration < 8; ++Iteration)
-		{
-			const double Coverage = ComputeAlphaCoverage(Pixels, PixelCount, Threshold, AlphaScale);
-			if (FMath::IsNearlyEqual(Coverage, TargetCoverage, 1.0 / FMath::Max(1, PixelCount)))
-			{
-				break;
-			}
-			if (Coverage < TargetCoverage)
-			{
-				MinScale = AlphaScale;
-			}
-			else
-			{
-				MaxScale = AlphaScale;
-			}
-			AlphaScale = 0.5f * (MinScale + MaxScale);
-		}
+		const double SafeCoverageThreshold = FMath::Clamp(
+			static_cast<double>(CoverageThreshold),
+			0.01,
+			1.0);
+		constexpr uint8 TrunkAlphaThreshold = 64;
+		constexpr uint8 LeafAlphaThreshold = 192;
 
-		for (int32 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
+		for (int32 DestinationY = 0; DestinationY < DestinationHeight; ++DestinationY)
 		{
-			Pixels[PixelIndex].A = static_cast<uint8>(FMath::Clamp(
-				FMath::RoundToInt(static_cast<float>(Pixels[PixelIndex].A) * AlphaScale),
+			const int32 SourceMinY = FMath::Clamp(
+				DestinationY * SourceHeight / DestinationHeight,
 				0,
-				255));
+				SourceHeight - 1);
+			const int32 SourceMaxY = FMath::Clamp(
+				FMath::DivideAndRoundUp(
+					(DestinationY + 1) * SourceHeight,
+					DestinationHeight),
+				SourceMinY + 1,
+				SourceHeight);
+
+			for (int32 DestinationX = 0; DestinationX < DestinationWidth; ++DestinationX)
+			{
+				const int32 SourceMinX = FMath::Clamp(
+					DestinationX * SourceWidth / DestinationWidth,
+					0,
+					SourceWidth - 1);
+				const int32 SourceMaxX = FMath::Clamp(
+					FMath::DivideAndRoundUp(
+						(DestinationX + 1) * SourceWidth,
+						DestinationWidth),
+					SourceMinX + 1,
+					SourceWidth);
+
+				int32 LeafSampleCount = 0;
+				int32 TrunkSampleCount = 0;
+				for (int32 SourceY = SourceMinY; SourceY < SourceMaxY; ++SourceY)
+				{
+					for (int32 SourceX = SourceMinX; SourceX < SourceMaxX; ++SourceX)
+					{
+						const uint8 SourceAlpha =
+							SourceAlphaValues[SourceY * SourceWidth + SourceX];
+						if (SourceAlpha >= LeafAlphaThreshold)
+						{
+							++LeafSampleCount;
+						}
+						else if (SourceAlpha >= TrunkAlphaThreshold)
+						{
+							++TrunkSampleCount;
+						}
+					}
+				}
+
+				const int32 SampleCount =
+					(SourceMaxX - SourceMinX) * (SourceMaxY - SourceMinY);
+				const int32 CoveredSampleCount = LeafSampleCount + TrunkSampleCount;
+				const double Coverage = SampleCount > 0
+					? static_cast<double>(CoveredSampleCount) / static_cast<double>(SampleCount)
+					: 0.0;
+				FColor& DestinationPixel =
+					DestinationPixels[DestinationY * DestinationWidth + DestinationX];
+				if (Coverage < SafeCoverageThreshold)
+				{
+					DestinationPixel.A = 0;
+				}
+				else
+				{
+					DestinationPixel.A = LeafSampleCount >= TrunkSampleCount
+						? 255
+						: 128;
+				}
+			}
 		}
 	}
 
@@ -495,9 +525,10 @@ namespace
 		FMemory::Memcpy(MipData[0], Pixels.GetData(), static_cast<SIZE_T>(Pixels.Num()) * sizeof(FColor));
 
 		const EGammaSpace GammaSpace = Params.bSRGB ? EGammaSpace::sRGB : EGammaSpace::Linear;
-		const uint8 AlphaCoverageThreshold = Params.AlphaCoverageThreshold > 0.0f
-			? static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Params.AlphaCoverageThreshold, 0.0f, 1.0f) * 255.0f), 1, 255))
-			: 0;
+		const float SemanticMaskMipCoverageThreshold =
+			Params.SemanticMaskMipCoverageThreshold > 0.0f
+				? FMath::Clamp(Params.SemanticMaskMipCoverageThreshold, 0.01f, 1.0f)
+				: 0.0f;
 
 		TArray<FIntRect> TileRects;
 		TileRects.Reserve(Params.MipTileRects.Num());
@@ -521,13 +552,14 @@ namespace
 		{
 			const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
 			const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
+			const int32 MipScale = 1 << MipIndex;
 			return FIntRect(
 				FIntPoint(
 					FMath::Clamp(TileRect.Min.X >> MipIndex, 0, MipWidth),
 					FMath::Clamp(TileRect.Min.Y >> MipIndex, 0, MipHeight)),
 				FIntPoint(
-					FMath::Clamp(TileRect.Max.X >> MipIndex, 0, MipWidth),
-					FMath::Clamp(TileRect.Max.Y >> MipIndex, 0, MipHeight)));
+					FMath::Clamp(FMath::DivideAndRoundUp(TileRect.Max.X, MipScale), 0, MipWidth),
+					FMath::Clamp(FMath::DivideAndRoundUp(TileRect.Max.Y, MipScale), 0, MipHeight)));
 		};
 		auto RectsOverlap = [](const FIntRect& A, const FIntRect& B)
 		{
@@ -589,9 +621,15 @@ namespace
 					Pixels.GetData() + (TileRect.Min.Y + LocalY) * Params.Width + TileRect.Min.X,
 					static_cast<SIZE_T>(TileRect.Width()) * sizeof(FColor));
 			}
-			const double TargetAlphaCoverage = AlphaCoverageThreshold > 0
-				? ComputeAlphaCoverage(CurrentTilePixels, TileRect.Width() * TileRect.Height(), AlphaCoverageThreshold)
-				: 0.0;
+			TArray<uint8> Mip0TileAlpha;
+			if (SemanticMaskMipCoverageThreshold > 0.0f)
+			{
+				Mip0TileAlpha.SetNumUninitialized(TileRect.Width() * TileRect.Height());
+				for (int32 PixelIndex = 0; PixelIndex < Mip0TileAlpha.Num(); ++PixelIndex)
+				{
+					Mip0TileAlpha[PixelIndex] = CurrentTilePixels[PixelIndex].A;
+				}
+			}
 
 			for (int32 MipIndex = 1; MipIndex < IsolatedMipCount; ++MipIndex)
 			{
@@ -611,9 +649,16 @@ namespace
 				{
 					NormalizeEncodedNormalPixels(NextTilePixels, NextTilePixelCount);
 				}
-				if (AlphaCoverageThreshold > 0)
+				if (SemanticMaskMipCoverageThreshold > 0.0f)
 				{
-					ScaleAlphaToCoverage(NextTilePixels, NextTilePixelCount, AlphaCoverageThreshold, TargetAlphaCoverage);
+					GenerateSemanticMaskMipAlpha(
+						Mip0TileAlpha.GetData(),
+						TileRect.Width(),
+						TileRect.Height(),
+						NextTilePixels,
+						MipTileRect.Width(),
+						MipTileRect.Height(),
+						SemanticMaskMipCoverageThreshold);
 				}
 
 				for (int32 LocalY = 0; LocalY < MipTileRect.Height(); ++LocalY)
@@ -642,12 +687,15 @@ namespace
 				CurrentAtlas.RawData.GetData(),
 				MipData[LastIsolatedMipIndex],
 				static_cast<SIZE_T>(LastIsolatedMipWidth * LastIsolatedMipHeight) * sizeof(FColor));
-			const double TailAlphaCoverage = AlphaCoverageThreshold > 0
-				? ComputeAlphaCoverage(
-					reinterpret_cast<const FColor*>(CurrentAtlas.RawData.GetData()),
-					LastIsolatedMipWidth * LastIsolatedMipHeight,
-					AlphaCoverageThreshold)
-				: 0.0;
+			TArray<uint8> Mip0AtlasAlpha;
+			if (SemanticMaskMipCoverageThreshold > 0.0f)
+			{
+				Mip0AtlasAlpha.SetNumUninitialized(Pixels.Num());
+				for (int32 PixelIndex = 0; PixelIndex < Pixels.Num(); ++PixelIndex)
+				{
+					Mip0AtlasAlpha[PixelIndex] = Pixels[PixelIndex].A;
+				}
+			}
 
 			for (int32 MipIndex = IsolatedMipCount; MipIndex < NumMips; ++MipIndex)
 			{
@@ -666,13 +714,16 @@ namespace
 				{
 					NormalizeEncodedNormalPixels(NextAtlasPixels, NextAtlasPixelCount);
 				}
-				if (AlphaCoverageThreshold > 0)
+				if (SemanticMaskMipCoverageThreshold > 0.0f)
 				{
-					ScaleAlphaToCoverage(
+					GenerateSemanticMaskMipAlpha(
+						Mip0AtlasAlpha.GetData(),
+						Params.Width,
+						Params.Height,
 						NextAtlasPixels,
-						NextAtlasPixelCount,
-						AlphaCoverageThreshold,
-						TailAlphaCoverage);
+						MipWidth,
+						MipHeight,
+						SemanticMaskMipCoverageThreshold);
 				}
 				FMemory::Memcpy(
 					MipData[MipIndex],
@@ -1096,10 +1147,8 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 	Texture->MipGenSettings = bUseTileIsolatedMips ? TMGS_LeaveExistingMips : TMGS_FromTextureGroup;
 	Texture->SRGB = Params.bSRGB;
 	Texture->bUseNewMipFilter = true;
-	Texture->bDoScaleMipsForAlphaCoverage = !bUseTileIsolatedMips && Params.AlphaCoverageThreshold > 0.0f;
-	Texture->AlphaCoverageThresholds = !bUseTileIsolatedMips && Params.AlphaCoverageThreshold > 0.0f
-		? FVector4(0.0, 0.0, 0.0, FMath::Clamp(Params.AlphaCoverageThreshold, 0.01f, 0.99f))
-		: FVector4(0.0, 0.0, 0.0, 0.0);
+	Texture->bDoScaleMipsForAlphaCoverage = false;
+	Texture->AlphaCoverageThresholds = FVector4(0.0, 0.0, 0.0, 0.0);
 	Texture->AddressX = TA_Clamp;
 	Texture->AddressY = TA_Clamp;
 	Texture->PostEditChange();
