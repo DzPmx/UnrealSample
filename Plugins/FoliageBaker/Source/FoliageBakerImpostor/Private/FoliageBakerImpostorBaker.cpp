@@ -1043,6 +1043,7 @@ namespace
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& Transaction,
 		const UFoliageBakerImpostorSettings& Settings,
+		const FString& OutputPackagePathOverride,
 		const FString& Suffix,
 		const TArray<FColor>& Pixels,
 		const FImpostorBakeStats& Stats,
@@ -1054,6 +1055,7 @@ namespace
 	{
 		FFoliageBakerTextureAssetParams Params;
 		Params.OutputFolderName = Settings.TextureOutputFolderName;
+		Params.OutputPackagePathOverride = OutputPackagePathOverride;
 		Params.AssetNamePrefix = Settings.TextureNamePrefix;
 		Params.AssetNameSuffix = Suffix;
 		Params.Width = Stats.AtlasWidth;
@@ -1220,6 +1222,15 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		return Result;
 	}
 
+	FFoliageBakerGeneratedAssetOutputFolders OutputFolders;
+	if (Settings.bPlaceGeneratedAssetsNearReplacedLODAssets
+		&& MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD)
+	{
+		OutputFolders = FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
+			SourceStaticMesh,
+			MeshOutputSelection->ReplaceLODIndex);
+	}
+
 	FFoliageBakerAssetTransaction Transaction;
 	if (Settings.bBakeBaseColorSdf)
 	{
@@ -1227,6 +1238,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
+			OutputFolders.TexturePackagePath,
 			Settings.BaseColorSdfTextureSuffix,
 			BakeData.BaseColorPixels,
 			BakeData.Stats,
@@ -1248,6 +1260,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
+			OutputFolders.TexturePackagePath,
 			Settings.NormalDepthTextureSuffix,
 			BakeData.NormalDepthPixels,
 			BakeData.Stats,
@@ -1272,6 +1285,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
+			OutputFolders.TexturePackagePath,
 			Settings.MixTextureSuffix,
 			BakeData.MixPixels,
 			BakeData.Stats,
@@ -1289,6 +1303,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 
 	FFoliageBakerMaterialInstanceAssetParams MaterialParams;
 	MaterialParams.OutputFolderName = Settings.MaterialOutputFolderName;
+	MaterialParams.OutputPackagePathOverride = OutputFolders.MaterialPackagePath;
 	MaterialParams.AssetNamePrefix = Settings.MaterialInstanceNamePrefix;
 	MaterialParams.AssetNameSuffix = Settings.MaterialInstanceNameSuffix;
 	MaterialParams.ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;

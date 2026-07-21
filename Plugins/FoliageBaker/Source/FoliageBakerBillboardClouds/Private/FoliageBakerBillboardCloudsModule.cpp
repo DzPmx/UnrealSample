@@ -752,6 +752,7 @@ namespace
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FString& OutputFolderName,
+		const FString& OutputPackagePathOverride,
 		const FString& AssetNamePrefix,
 		const FString& AssetNameSuffix,
 		const TArray<FColor>& Pixels,
@@ -767,6 +768,7 @@ namespace
 	{
 		FFoliageBakerTextureAssetParams Params;
 		Params.OutputFolderName = OutputFolderName;
+		Params.OutputPackagePathOverride = OutputPackagePathOverride;
 		Params.AssetNamePrefix = AssetNamePrefix;
 		Params.AssetNameSuffix = AssetNameSuffix;
 		Params.Width = AtlasStats.Width;
@@ -798,6 +800,7 @@ namespace
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
+		const FString& OutputPackagePathOverride,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
@@ -807,6 +810,7 @@ namespace
 			SourceStaticMesh,
 			AssetTransaction,
 			EditorSettings.TextureOutputFolderName,
+			OutputPackagePathOverride,
 			EditorSettings.TextureNamePrefix,
 			EditorSettings.BaseColorOpacityTextureSuffix,
 			Pixels,
@@ -827,6 +831,7 @@ namespace
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
+		const FString& OutputPackagePathOverride,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
@@ -836,6 +841,7 @@ namespace
 			SourceStaticMesh,
 			AssetTransaction,
 			EditorSettings.TextureOutputFolderName,
+			OutputPackagePathOverride,
 			EditorSettings.TextureNamePrefix,
 			EditorSettings.NormalTextureSuffix,
 			Pixels,
@@ -854,6 +860,7 @@ namespace
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
+		const FString& OutputPackagePathOverride,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
@@ -863,6 +870,7 @@ namespace
 			SourceStaticMesh,
 			AssetTransaction,
 			EditorSettings.TextureOutputFolderName,
+			OutputPackagePathOverride,
 			EditorSettings.TextureNamePrefix,
 			EditorSettings.MixTextureSuffix,
 			Pixels,
@@ -1092,6 +1100,7 @@ namespace
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyPlaneCoverBuildData& CoverData,
 		FProxyMeshBuildData& MeshData,
+		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
 		FProxyTextureBuildData& OutData,
 		FString& OutError)
 	{
@@ -1128,14 +1137,11 @@ namespace
 		{
 			return false;
 		}
-		const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
-			GetDefault<UFoliageBakerBillboardCloudsSettings>();
-		UMaterialInstanceConstant* TemplateMaterialInstance = EditorPreferences
-			? EditorPreferences->BillboardMaterialTemplate.LoadSynchronous()
-			: nullptr;
+		UMaterialInstanceConstant* TemplateMaterialInstance =
+			EditorSettings.BillboardMaterialTemplate.LoadSynchronous();
 		if (!TemplateMaterialInstance)
 		{
-			OutError = TEXT("Billboard Clouds Parent Material Instance is not configured in Editor Preferences.");
+			OutError = TEXT("Billboard Clouds Parent Material Instance is not selected in the current tool settings.");
 			return false;
 		}
 
@@ -1218,6 +1224,7 @@ namespace
 				StaticMesh,
 				AssetTransaction,
 				EditorSettings,
+				OutputFolders.TexturePackagePath,
 				OutData.AtlasPixels,
 				OutData.AtlasStats,
 				MeshData.PlaneInfos,
@@ -1234,6 +1241,7 @@ namespace
 				StaticMesh,
 				AssetTransaction,
 				EditorSettings,
+				OutputFolders.TexturePackagePath,
 				OutData.NormalAtlasPixels,
 				OutData.AtlasStats,
 				MeshData.PlaneInfos,
@@ -1250,6 +1258,7 @@ namespace
 				StaticMesh,
 				AssetTransaction,
 				EditorSettings,
+				OutputFolders.TexturePackagePath,
 				OutData.MixAtlasPixels,
 				OutData.AtlasStats,
 				MeshData.PlaneInfos,
@@ -1262,6 +1271,7 @@ namespace
 
 		FFoliageBakerMaterialInstanceAssetParams MaterialParams;
 		MaterialParams.OutputFolderName = EditorSettings.MaterialOutputFolderName;
+		MaterialParams.OutputPackagePathOverride = OutputFolders.MaterialPackagePath;
 		MaterialParams.AssetNamePrefix = EditorSettings.MaterialInstanceNamePrefix;
 		MaterialParams.AssetNameSuffix = EditorSettings.MaterialInstanceNameSuffix;
 		MaterialParams.ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
@@ -1286,7 +1296,7 @@ namespace
 				return false;
 			}
 		}
-		MaterialParams.MissingTemplateError = TEXT("Billboard Clouds Parent Material Instance is not configured in Editor Preferences.");
+		MaterialParams.MissingTemplateError = TEXT("Billboard Clouds Parent Material Instance is not selected in the current tool settings.");
 		OutData.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,
 			AssetTransaction,
@@ -1450,13 +1460,6 @@ namespace
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
 
-		FProxyTextureBuildData TextureData;
-		FFoliageBakerAssetTransaction AssetTransaction;
-		if (!BuildProxyTextureData(StaticMesh, EditorSettings, AssetTransaction, CoverData, MeshData, TextureData, Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
-		}
-
 		const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
 			FFoliageBakerMeshOutputDialog::OpenAfterBake(StaticMesh, EditorSettings.SourceLODIndex);
 		if (!MeshOutputSelection.IsSet())
@@ -1467,6 +1470,30 @@ namespace
 			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
 				StaticMesh,
 				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection.GetValue()),
+				Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
+		FFoliageBakerGeneratedAssetOutputFolders OutputFolders;
+		if (EditorSettings.bPlaceGeneratedAssetsNearReplacedLODAssets
+			&& MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD)
+		{
+			OutputFolders = FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
+				StaticMesh,
+				MeshOutputSelection->ReplaceLODIndex);
+		}
+
+		FProxyTextureBuildData TextureData;
+		FFoliageBakerAssetTransaction AssetTransaction;
+		if (!BuildProxyTextureData(
+				StaticMesh,
+				EditorSettings,
+				AssetTransaction,
+				CoverData,
+				MeshData,
+				OutputFolders,
+				TextureData,
 				Error))
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
@@ -1567,7 +1594,7 @@ TSharedRef<SWidget> FFoliageBakerBillboardCloudsModule::CreateFeaturePanel()
 		"Bake BillboardClouds assets for every queued Static Mesh.");
 	ControllerArgs.RequirementsHint = LOCTEXT(
 		"UnifiedBakeRequirementsHint",
-		"Configure the Parent Material Instance in Editor Preferences, enable an atlas output, and queue at least one Static Mesh.");
+		"Select the Parent Material Instance, enable an atlas output, and queue at least one Static Mesh. Editor Preferences provides the initial default.");
 	ControllerArgs.AddMeshesTransactionText = LOCTEXT(
 		"AddBillboardCloudsSourceMeshesTransaction",
 		"Add Foliage Baker BillboardClouds Source Meshes");
@@ -1594,10 +1621,8 @@ bool FFoliageBakerBillboardCloudsModule::CanBake() const
 	{
 		return false;
 	}
-	const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
-		GetDefault<UFoliageBakerBillboardCloudsSettings>();
 	return FFoliageBakerFeatureTool::CanBakeFeature(
-		EditorPreferences && !EditorPreferences->BillboardMaterialTemplate.IsNull(),
+		!ToolSettings->BillboardMaterialTemplate.IsNull(),
 		BuildAtlasOutputSelection(*ToolSettings).HasAnyOutput(),
 		ToolSettings->SourceStaticMeshes);
 }
@@ -1605,14 +1630,11 @@ bool FFoliageBakerBillboardCloudsModule::CanBake() const
 void FFoliageBakerBillboardCloudsModule::Bake()
 {
 	EnsureToolSettings();
-	const UFoliageBakerBillboardCloudsSettings* EditorPreferences =
-		GetDefault<UFoliageBakerBillboardCloudsSettings>();
-	if (!EditorPreferences
-		|| EditorPreferences->BillboardMaterialTemplate.IsNull()
-		|| !EditorPreferences->BillboardMaterialTemplate.LoadSynchronous())
+	if (ToolSettings->BillboardMaterialTemplate.IsNull()
+		|| !ToolSettings->BillboardMaterialTemplate.LoadSynchronous())
 	{
 		FFoliageBakerFeatureTool::ShowMessage(
-			LOCTEXT("MissingBillboardCloudsParentMaterial", "Configure the Billboard Clouds Parent Material Instance in Editor Preferences before baking."));
+			LOCTEXT("MissingBillboardCloudsParentMaterial", "Select the Billboard Clouds Parent Material Instance in the current tool before baking."));
 		return;
 	}
 	if (!BuildAtlasOutputSelection(*ToolSettings).HasAnyOutput())

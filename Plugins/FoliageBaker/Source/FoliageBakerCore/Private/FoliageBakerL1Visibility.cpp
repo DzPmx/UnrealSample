@@ -191,7 +191,7 @@ namespace UE::FoliageBaker::L1Visibility
 				return false;
 			}
 
-			const int32 SafeMaximumResolution = FMath::Clamp(MaximumResolution, 64, 512);
+			const int32 SafeMaximumResolution = FMath::Clamp(MaximumResolution, 64, 1024);
 			int32 Width = SafeMaximumResolution;
 			int32 Height = SafeMaximumResolution;
 			if (UExtent > VExtent)

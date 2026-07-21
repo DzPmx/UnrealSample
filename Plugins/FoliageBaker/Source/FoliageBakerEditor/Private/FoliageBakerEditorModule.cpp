@@ -32,6 +32,7 @@ namespace
 	const FName SingleBillboardSettingsSectionName(TEXT("FoliageBakerSingleBillboard"));
 	const FName CrossCardsSettingsSectionName(TEXT("FoliageBakerCrossCards"));
 	const FName ImpostorSettingsSectionName(TEXT("FoliageBakerImpostor"));
+	const FName MultiBillboardSettingsSectionName(TEXT("FoliageBakerMultiBillboard"));
 	const FName BillboardCloudsSettingsSectionName(TEXT("FoliageBakerBillboardClouds"));
 
 	enum class EFoliageBakerFeatureKind : uint8
@@ -39,6 +40,7 @@ namespace
 		Billboard,
 		CrossCards,
 		Impostor,
+		MultiBillboard,
 		BillboardClouds
 	};
 
@@ -89,6 +91,17 @@ namespace
 					"Selectable source LOD  |  fixed N x N direction grid  |  shared projection and depth range")
 			},
 			{
+				EFoliageBakerFeatureKind::MultiBillboard,
+				LOCTEXT("MultiBillboardTab", "MultiBillboard"),
+				LOCTEXT("MultiBillboardFeatureTitle", "MultiBillboard"),
+				LOCTEXT(
+					"MultiBillboardFeatureDescription",
+					"Select leaf geometry by material-name keywords, replace each local cluster with camera-facing Billboards, and optionally retain a simplified trunk using the source materials."),
+				LOCTEXT(
+					"MultiBillboardFeatureMetadata",
+					"Selectable source LOD  |  material-based leaf selection  |  optional reduced trunk  |  1-128 local Billboard clusters")
+			},
+			{
 				EFoliageBakerFeatureKind::BillboardClouds,
 				LOCTEXT("BillboardCloudsTab", "BillboardClouds"),
 				LOCTEXT("BillboardCloudsFeatureTitle", "BillboardClouds"),
@@ -132,7 +145,7 @@ namespace
 				LOCTEXT("BillboardSettingsName", "Foliage Baker - Billboard"),
 				LOCTEXT(
 					"BillboardSettingsDescription",
-					"Configure Single Plane and Double Planes Billboard preferences, including their separate Parent Material Instances."),
+					"Configure Single Plane and Double Planes Billboard preferences, including their default Parent Material Instances."),
 				&GetMutableSettingsObject<UFoliageBakerSingleBillboardSettings>
 			},
 			{
@@ -140,7 +153,7 @@ namespace
 				LOCTEXT("CrossCardsSettingsName", "Foliage Baker - Cross Cards"),
 				LOCTEXT(
 					"CrossCardsSettingsDescription",
-					"Configure Cross Cards preferences, including its required Parent Material Instance."),
+					"Configure Cross Cards preferences, including its default Parent Material Instance."),
 				&GetMutableSettingsObject<UFoliageBakerCrossCardsSettings>
 			},
 			{
@@ -148,15 +161,23 @@ namespace
 				LOCTEXT("ImpostorSettingsName", "Foliage Baker - Impostor"),
 				LOCTEXT(
 					"ImpostorSettingsDescription",
-					"Configure Impostor preferences, including its required Parent Material Instance."),
+					"Configure Impostor preferences, including its default Parent Material Instance."),
 				&GetMutableSettingsObject<UFoliageBakerImpostorSettings>
+			},
+			{
+				MultiBillboardSettingsSectionName,
+				LOCTEXT("MultiBillboardSettingsName", "Foliage Baker - MultiBillboard"),
+				LOCTEXT(
+					"MultiBillboardSettingsDescription",
+					"Configure MultiBillboard preferences, including its default Parent Material Instance."),
+				&GetMutableSettingsObject<UFoliageBakerMultiBillboardSettings>
 			},
 			{
 				BillboardCloudsSettingsSectionName,
 				LOCTEXT("BillboardCloudsSettingsName", "Foliage Baker - Billboard Clouds"),
 				LOCTEXT(
 					"BillboardCloudsSettingsDescription",
-					"Configure Billboard Clouds preferences, including its required Parent Material Instance."),
+					"Configure Billboard Clouds preferences, including its default Parent Material Instance."),
 				&GetMutableSettingsObject<UFoliageBakerBillboardCloudsSettings>
 			}
 		};
@@ -241,7 +262,7 @@ void FFoliageBakerEditorModule::RegisterMenus()
 	Section.AddMenuEntry(
 		TEXT("OpenFoliageBaker"),
 		LOCTEXT("OpenFoliageBakerLabel", "Foliage Baker"),
-		LOCTEXT("OpenFoliageBakerTooltip", "Open the unified Billboard, Cross Cards, Impostor, and BillboardClouds tool."),
+		LOCTEXT("OpenFoliageBakerTooltip", "Open the unified Billboard, Cross Cards, Impostor, MultiBillboard, and BillboardClouds tool."),
 		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"),
 		FToolMenuExecuteAction::CreateRaw(this, &FFoliageBakerEditorModule::ExecuteOpenTool));
 }
@@ -288,6 +309,9 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 						EFoliageBakerCardMode::CrossCards);
 				case EFoliageBakerFeatureKind::Impostor:
 					return ImpostorModule.CreateFeaturePanel();
+				case EFoliageBakerFeatureKind::MultiBillboard:
+					return CardsModule.CreateFeaturePanel(
+						EFoliageBakerCardMode::MultiBillboard);
 				case EFoliageBakerFeatureKind::BillboardClouds:
 					return BillboardCloudsModule.CreateFeaturePanel();
 				default:

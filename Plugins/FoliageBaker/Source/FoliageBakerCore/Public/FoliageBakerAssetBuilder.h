@@ -71,9 +71,23 @@ enum class EFoliageBakerMeshAssetOutputMode : uint8
 	ReplaceSourceMeshLOD
 };
 
+struct FOLIAGEBAKERCORE_API FFoliageBakerGeneratedAssetOutputFolders
+{
+	// Long package paths such as /Game/Trees/Textures. Empty keeps the configured-folder behavior.
+	FString TexturePackagePath;
+	FString MaterialPackagePath;
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerMeshMaterialSlot
+{
+	FName MaterialSlotName = NAME_None;
+	UMaterialInterface* Material = nullptr;
+};
+
 struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 {
 	FString OutputFolderName;
+	FString OutputPackagePathOverride;
 	FString AssetNamePrefix;
 	FString AssetNameSuffix;
 	int32 Width = 0;
@@ -98,6 +112,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	};
 
 	FString OutputFolderName;
+	FString OutputPackagePathOverride;
 	FString AssetNamePrefix;
 	FString AssetNameSuffix;
 	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
@@ -107,7 +122,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	TArray<FTextureParameterValue> AdditionalTextureParameterValues;
 	TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue> ScalarParameterValues;
 	TOptional<bool> TwoSidedOverride;
-	FString MissingTemplateError = TEXT("A parent Material Instance Constant must be configured in Editor Preferences.");
+	FString MissingTemplateError = TEXT("A parent Material Instance Constant must be provided.");
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerStaticMeshAssetParams
@@ -115,7 +130,10 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerStaticMeshAssetParams
 	FString AssetNameSuffix;
 	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
 	int32 DesiredUVChannelCount = 2;
+	// Used as a legacy/fallback identifier; generated slots are named after the assigned material asset.
 	FName MaterialSlotName = FName(TEXT("BillboardProxy"));
+	// Optional non-proxy material slots already referenced by the MeshDescription.
+	TArray<FFoliageBakerMeshMaterialSlot> AdditionalMaterialSlots;
 	bool bRecomputeNormals = false;
 	bool bRecomputeTangents = false;
 	int32 BaseLODModel = INDEX_NONE;
@@ -128,7 +146,10 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerSourceLODAssetParams
 	int32 RequestedInsertAfterLODIndex = INDEX_NONE;
 	int32 SourceLODIndex = 0;
 	int32 DesiredUVChannelCount = 2;
+	// Used as a legacy/fallback identifier; generated slots are named after the assigned material asset.
 	FName MaterialSlotName = FName(TEXT("BillboardProxy"));
+	// Optional non-proxy material slots already referenced by the MeshDescription.
+	TArray<FFoliageBakerMeshMaterialSlot> AdditionalMaterialSlots;
 	bool bRecomputeNormals = false;
 	bool bRecomputeTangents = false;
 	int32 BaseLODModel = INDEX_NONE;
@@ -148,6 +169,22 @@ public:
 		FString& OutBasePackageName,
 		FString& OutBaseAssetName,
 		FString& OutError);
+
+	static bool BuildGeneratedAssetBasePath(
+		const UStaticMesh& SourceStaticMesh,
+		const FString& ConfiguredOutputFolder,
+		const FString& OutputPackagePathOverride,
+		const FString& AssetNamePrefix,
+		const FString& AssetNameSuffix,
+		FString& OutBasePackageName,
+		FString& OutBaseAssetName,
+		FString& OutError);
+
+	// Resolves folders from the materials actually used by the selected source LOD.
+	// Material output follows those materials; texture output prefers their nearest project texture folder.
+	static FFoliageBakerGeneratedAssetOutputFolders ResolveSourceLODAssetOutputFolders(
+		const UStaticMesh& SourceStaticMesh,
+		int32 LODIndex);
 
 	static UTexture2D* CreateTextureAsset(
 		const UStaticMesh& SourceStaticMesh,

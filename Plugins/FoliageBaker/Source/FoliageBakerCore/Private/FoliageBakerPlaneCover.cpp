@@ -2162,6 +2162,99 @@ namespace UE::FoliageBaker::PlaneCover
 			OutError);
 	}
 
+	bool ApplyGroupedPlaneProxyBoundsAndRebuildMeshDescription(
+		TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
+		const TArray<int32>& PlaneGroupIndices,
+		const FPlaneProxySettings& Settings,
+		FMeshDescription& OutMeshDescription,
+		FPlaneProxyMeshStats& InOutStats,
+		FString& OutError)
+	{
+		OutError.Reset();
+		if (PlaneInfos.IsEmpty())
+		{
+			OutError = TEXT("No proxy planes are available for grouped bounds.");
+			return false;
+		}
+		if (PlaneGroupIndices.Num() != PlaneInfos.Num())
+		{
+			OutError = TEXT("Proxy-plane group count does not match proxy plane count.");
+			return false;
+		}
+
+		struct FGroupedBounds
+		{
+			double MinU = TNumericLimits<double>::Max();
+			double MaxU = -TNumericLimits<double>::Max();
+			double MinV = TNumericLimits<double>::Max();
+			double MaxV = -TNumericLimits<double>::Max();
+		};
+
+		TMap<int32, FGroupedBounds> BoundsByGroup;
+		for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
+		{
+			const int32 GroupIndex = PlaneGroupIndices[PlaneIndex];
+			if (GroupIndex < 0)
+			{
+				OutError = TEXT("Proxy-plane group indices must be non-negative.");
+				return false;
+			}
+			const FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
+			FGroupedBounds& Bounds = BoundsByGroup.FindOrAdd(GroupIndex);
+			Bounds.MinU = FMath::Min(Bounds.MinU, PlaneInfo.MinU);
+			Bounds.MaxU = FMath::Max(Bounds.MaxU, PlaneInfo.MaxU);
+			Bounds.MinV = FMath::Min(Bounds.MinV, PlaneInfo.MinV);
+			Bounds.MaxV = FMath::Max(Bounds.MaxV, PlaneInfo.MaxV);
+		}
+
+		for (const TPair<int32, FGroupedBounds>& Pair : BoundsByGroup)
+		{
+			const FGroupedBounds& Bounds = Pair.Value;
+			if (!FMath::IsFinite(Bounds.MinU)
+				|| !FMath::IsFinite(Bounds.MaxU)
+				|| !FMath::IsFinite(Bounds.MinV)
+				|| !FMath::IsFinite(Bounds.MaxV)
+				|| Bounds.MaxU <= Bounds.MinU
+				|| Bounds.MaxV <= Bounds.MinV)
+			{
+				OutError = FString::Printf(
+					TEXT("Could not resolve valid shared proxy-plane bounds for group %d."),
+					Pair.Key);
+				return false;
+			}
+		}
+
+		for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
+		{
+			FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
+			const FGroupedBounds& Bounds = BoundsByGroup.FindChecked(PlaneGroupIndices[PlaneIndex]);
+			PlaneInfo.MinU = Bounds.MinU;
+			PlaneInfo.MaxU = Bounds.MaxU;
+			PlaneInfo.MinV = Bounds.MinV;
+			PlaneInfo.MaxV = Bounds.MaxV;
+			UpdatePlaneInfoCornersFromBounds(PlaneInfo);
+		}
+
+		if (!PackPlaneInfosIntoAtlas(
+			PlaneInfos,
+			Settings,
+			InOutStats.AtlasWidth,
+			InOutStats.AtlasHeight,
+			InOutStats.AtlasTileResolution,
+			InOutStats.AtlasTilePaddingPixels))
+		{
+			OutError = TEXT("Could not pack grouped billboard texture tiles into the configured atlas resolution.");
+			return false;
+		}
+
+		return RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
+			PlaneInfos,
+			Settings,
+			OutMeshDescription,
+			InOutStats,
+			OutError);
+	}
+
 	bool ApplyPlaneProxyTileCropsAndRebuildMeshDescription(
 		TArray<FPlaneProxyPlaneInfo>& PlaneInfos,
 		const TArray<FPlaneProxyTileCrop>& TileCrops,

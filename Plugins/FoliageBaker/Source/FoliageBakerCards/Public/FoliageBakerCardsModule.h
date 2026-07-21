@@ -24,6 +24,8 @@ private:
 
 	TStrongObjectPtr<UFoliageBakerCardsSettings> SingleBillboardSettings;
 	TStrongObjectPtr<UFoliageBakerCardsSettings> CrossCardsSettings;
+	TStrongObjectPtr<UFoliageBakerCardsSettings> MultiBillboardSettings;
 	TSharedPtr<FFoliageBakerFeatureController> SingleBillboardController;
 	TSharedPtr<FFoliageBakerFeatureController> CrossCardsController;
+	TSharedPtr<FFoliageBakerFeatureController> MultiBillboardController;
 };

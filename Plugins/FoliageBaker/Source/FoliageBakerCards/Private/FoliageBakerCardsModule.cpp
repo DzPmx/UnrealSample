@@ -12,6 +12,10 @@ namespace
 {
 	constexpr int32 MinCardPlaneCount = 2;
 	constexpr int32 MaxCardPlaneCount = 5;
+	constexpr int32 MinMultiBillboardClusterCount = 1;
+	constexpr int32 MaxMultiBillboardClusterCount = 128;
+	constexpr int32 MinMultiBillboardsPerCluster = 2;
+	constexpr int32 MaxMultiBillboardsPerCluster = 8;
 	constexpr int32 MinTextureResolution = 256;
 	constexpr int32 MaxTextureResolution = 4096;
 	constexpr int32 MinAlphaCropGuardPixels = 2;
@@ -22,20 +26,23 @@ namespace
 		return Mode == EFoliageBakerCardMode::SingleBillboard;
 	}
 
-	const UFoliageBakerCardsSettings* GetEditorPreferences(const EFoliageBakerCardMode Mode)
+	bool IsMultiBillboardMode(const EFoliageBakerCardMode Mode)
 	{
-		if (IsSingleBillboardMode(Mode))
-		{
-			return GetDefault<UFoliageBakerSingleBillboardSettings>();
-		}
-		return GetDefault<UFoliageBakerCrossCardsSettings>();
+		return Mode == EFoliageBakerCardMode::MultiBillboard;
 	}
 
 	EFoliageBakerCardBakeMode ToCoreMode(const EFoliageBakerCardMode Mode)
 	{
-		return Mode == EFoliageBakerCardMode::CrossCards
-			? EFoliageBakerCardBakeMode::CrossCards
-			: EFoliageBakerCardBakeMode::SingleBillboard;
+		switch (Mode)
+		{
+		case EFoliageBakerCardMode::CrossCards:
+			return EFoliageBakerCardBakeMode::CrossCards;
+		case EFoliageBakerCardMode::MultiBillboard:
+			return EFoliageBakerCardBakeMode::MultiBillboard;
+		case EFoliageBakerCardMode::SingleBillboard:
+		default:
+			return EFoliageBakerCardBakeMode::SingleBillboard;
+		}
 	}
 
 	EFoliageBakerCaptureAxis ToCoreAxis(const EFoliageBakerSingleCaptureAxis Axis)
@@ -66,23 +73,18 @@ namespace
 	}
 
 	TSoftObjectPtr<UMaterialInstanceConstant> GetConfiguredMaterialTemplate(
-		const UFoliageBakerCardsSettings& ToolSettings,
-		const UFoliageBakerCardsSettings* EditorPreferences)
+		const UFoliageBakerCardsSettings& ToolSettings)
 	{
-		if (!EditorPreferences)
-		{
-			return {};
-		}
 		if (IsSingleBillboardMode(ToolSettings.Mode)
 			&& ToolSettings.BillboardMode == EFoliageBakerBillboardMode::DoublePlanes)
 		{
-			const UFoliageBakerSingleBillboardSettings* BillboardPreferences =
-				Cast<UFoliageBakerSingleBillboardSettings>(EditorPreferences);
-			return BillboardPreferences
-				? BillboardPreferences->DoublePlanesMaterialInstanceTemplate
+			const UFoliageBakerSingleBillboardSettings* BillboardSettings =
+				Cast<UFoliageBakerSingleBillboardSettings>(&ToolSettings);
+			return BillboardSettings
+				? BillboardSettings->DoublePlanesMaterialInstanceTemplate
 				: TSoftObjectPtr<UMaterialInstanceConstant>();
 		}
-		return EditorPreferences->MaterialInstanceTemplate;
+		return ToolSettings.MaterialInstanceTemplate;
 	}
 
 	FFoliageBakerCardBakeRequest BuildRequest(
@@ -103,10 +105,26 @@ namespace
 			MaxCardPlaneCount);
 		Request.CrossCardGeometryMode = ToCoreGeometryMode(Settings.CrossCardFaceMode);
 		Request.TrunkMaterialKeywords = Settings.TrunkMaterialKeywords;
+		Request.LeafMaterialKeywords = Settings.LeafMaterialKeywords;
+		Request.MultiBillboardClusterCount = FMath::Clamp(
+			Settings.MultiBillboardClusterCount,
+			MinMultiBillboardClusterCount,
+			MaxMultiBillboardClusterCount);
+		Request.MultiBillboardsPerCluster = FMath::Clamp(
+			Settings.MultiBillboardsPerCluster,
+			MinMultiBillboardsPerCluster,
+			MaxMultiBillboardsPerCluster);
+		Request.bIncludeReducedTrunk = Settings.bIncludeReducedTrunk;
+		Request.TrunkTrianglePercentage = FMath::Clamp(
+			Settings.TrunkTrianglePercentage,
+			0.05f,
+			1.0f);
 		Request.TextureResolution = FMath::Clamp(
 			IsSingleBillboardMode(Settings.Mode)
 				? Settings.SingleTextureResolution
-				: Settings.CrossTextureResolution,
+				: IsMultiBillboardMode(Settings.Mode)
+					? Settings.MultiBillboardTextureResolution
+					: Settings.CrossTextureResolution,
 			MinTextureResolution,
 			MaxTextureResolution);
 		Request.AlphaCropGuardPixels = FMath::Clamp(
@@ -145,6 +163,8 @@ namespace
 		Request.TrunkSpecularParameterName = Settings.TrunkSpecularParameterName;
 		Request.TextureOutputFolderName = Settings.TextureOutputFolderName;
 		Request.MaterialOutputFolderName = Settings.MaterialOutputFolderName;
+		Request.bPlaceGeneratedAssetsNearReplacedLODAssets =
+			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
 		Request.TextureNamePrefix = Settings.TextureNamePrefix;
 		Request.BaseColorOpacityTextureSuffix = Settings.BaseColorOpacityTextureSuffix;
 		Request.NormalDepthTextureSuffix = Settings.NormalDepthTextureSuffix;
@@ -161,42 +181,56 @@ void FFoliageBakerCardsModule::ShutdownModule()
 {
 	SingleBillboardController.Reset();
 	CrossCardsController.Reset();
+	MultiBillboardController.Reset();
 	SingleBillboardSettings.Reset();
 	CrossCardsSettings.Reset();
+	MultiBillboardSettings.Reset();
 }
 
 void FFoliageBakerCardsModule::EnsureToolSettings(const EFoliageBakerCardMode Mode)
 {
-	TStrongObjectPtr<UFoliageBakerCardsSettings>& Settings = IsSingleBillboardMode(Mode)
-		? SingleBillboardSettings
-		: CrossCardsSettings;
-	if (!Settings.IsValid())
+	TStrongObjectPtr<UFoliageBakerCardsSettings>* Settings = IsSingleBillboardMode(Mode)
+		? &SingleBillboardSettings
+		: IsMultiBillboardMode(Mode)
+			? &MultiBillboardSettings
+			: &CrossCardsSettings;
+	if (!Settings->IsValid())
 	{
 		if (IsSingleBillboardMode(Mode))
 		{
 			FFoliageBakerFeatureTool::EnsureTransientSettings<
 				UFoliageBakerCardsSettings,
 				UFoliageBakerSingleBillboardSettings>(
-					Settings,
+					*Settings,
 					FName(TEXT("FoliageBakerSingleBillboardSettings")));
+		}
+		else if (IsMultiBillboardMode(Mode))
+		{
+			FFoliageBakerFeatureTool::EnsureTransientSettings<
+				UFoliageBakerCardsSettings,
+				UFoliageBakerMultiBillboardSettings>(
+					*Settings,
+					FName(TEXT("FoliageBakerMultiBillboardSettings")));
 		}
 		else
 		{
 			FFoliageBakerFeatureTool::EnsureTransientSettings<
 				UFoliageBakerCardsSettings,
 				UFoliageBakerCrossCardsSettings>(
-					Settings,
+					*Settings,
 					FName(TEXT("FoliageBakerCrossCardsSettings")));
 		}
 	}
-	Settings->Mode = Mode;
+	(*Settings)->Mode = Mode;
 }
 
 UFoliageBakerCardsSettings* FFoliageBakerCardsModule::GetToolSettings(const EFoliageBakerCardMode Mode) const
 {
 	return IsSingleBillboardMode(Mode)
 		? SingleBillboardSettings.Get()
-		: CrossCardsSettings.Get();
+		: IsMultiBillboardMode(Mode)
+			? MultiBillboardSettings.Get()
+			: CrossCardsSettings.Get();
 }
 
 TSharedPtr<FFoliageBakerFeatureController>& FFoliageBakerCardsModule::GetFeatureController(
@@ -204,7 +238,9 @@ TSharedPtr<FFoliageBakerFeatureController>& FFoliageBakerCardsModule::GetFeature
 {
 	return IsSingleBillboardMode(Mode)
 		? SingleBillboardController
-		: CrossCardsController;
+		: IsMultiBillboardMode(Mode)
+			? MultiBillboardController
+			: CrossCardsController;
 }
 
 TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageBakerCardMode Mode)
@@ -217,13 +253,17 @@ TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageB
 	ControllerArgs.SourceStaticMeshes = &Settings->SourceStaticMeshes;
 	ControllerArgs.BakeButtonText = IsSingleBillboardMode(Mode)
 		? LOCTEXT("BakeBillboardButton", "Bake Billboard")
-		: LOCTEXT("BakeCrossCardsButton", "Bake Cross Cards");
+		: IsMultiBillboardMode(Mode)
+			? LOCTEXT("BakeMultiBillboardButton", "Bake MultiBillboard")
+			: LOCTEXT("BakeCrossCardsButton", "Bake Cross Cards");
 	ControllerArgs.BakeButtonTooltip = IsSingleBillboardMode(Mode)
 		? LOCTEXT("BakeBillboardTooltip", "Bake the selected Single Plane or Double Planes Billboard mode for every queued Static Mesh.")
-		: LOCTEXT("BakeCrossCardsTooltip", "Bake one Cross Cards asset for every queued Static Mesh.");
+		: IsMultiBillboardMode(Mode)
+			? LOCTEXT("BakeMultiBillboardTooltip", "Bake clustered leaf Billboards and, when enabled, retain and simplify the non-leaf trunk and branch geometry with its original materials.")
+			: LOCTEXT("BakeCrossCardsTooltip", "Bake one Cross Cards asset for every queued Static Mesh.");
 	ControllerArgs.RequirementsHint = LOCTEXT(
 		"BakeRequirementsHint",
-		"Configure the Parent Material Instance required by the selected mode in Editor Preferences and queue at least one Static Mesh.");
+		"Select the Parent Material Instance required by the current mode and queue at least one Static Mesh. Editor Preferences provides the initial default.");
 	ControllerArgs.AddMeshesTransactionText =
 		LOCTEXT("AddCardsSourceMeshesTransaction", "Add Foliage Baker Card Source Meshes");
 	ControllerArgs.ClearMeshesTransactionText =
@@ -243,15 +283,19 @@ TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageB
 bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 {
 	const UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
-	const UFoliageBakerCardsSettings* EditorPreferences = GetEditorPreferences(Mode);
 	if (!Settings)
 	{
 		return false;
 	}
 	const TSoftObjectPtr<UMaterialInstanceConstant> MaterialTemplate =
-		GetConfiguredMaterialTemplate(*Settings, EditorPreferences);
+		GetConfiguredMaterialTemplate(*Settings);
+	const bool bHasLeafKeyword = !IsMultiBillboardMode(Mode)
+		|| Settings->LeafMaterialKeywords.ContainsByPredicate([](const FString& Keyword)
+		{
+			return !Keyword.TrimStartAndEnd().IsEmpty();
+		});
 	return FFoliageBakerFeatureTool::CanBakeFeature(
-		!MaterialTemplate.IsNull(),
+		!MaterialTemplate.IsNull() && bHasLeafKeyword,
 		Settings->bBakeBaseColorOpacity
 			|| Settings->bBakeNormalDepth
 			|| Settings->bBakeMix
@@ -264,15 +308,14 @@ void FFoliageBakerCardsModule::Bake(const EFoliageBakerCardMode Mode)
 {
 	EnsureToolSettings(Mode);
 	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
-	const UFoliageBakerCardsSettings* EditorPreferences = GetEditorPreferences(Mode);
 	TSoftObjectPtr<UMaterialInstanceConstant> ConfiguredMaterialTemplate =
-		GetConfiguredMaterialTemplate(*Settings, EditorPreferences);
+		GetConfiguredMaterialTemplate(*Settings);
 	UMaterialInstanceConstant* MaterialTemplate = ConfiguredMaterialTemplate.LoadSynchronous();
 	if (!MaterialTemplate)
 	{
 		FFoliageBakerFeatureTool::ShowMessage(LOCTEXT(
 			"MissingTemplate",
-			"Configure the Parent Material Instance required by the selected Billboard or Cross Cards mode in Editor Preferences before baking."));
+			"Select the Parent Material Instance required by the current Billboard, Cross Cards, or MultiBillboard mode before baking."));
 		return;
 	}
 

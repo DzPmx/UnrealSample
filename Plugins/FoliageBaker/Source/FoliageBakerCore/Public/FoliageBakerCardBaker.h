@@ -9,7 +9,8 @@ class UTexture2D;
 enum class EFoliageBakerCardBakeMode : uint8
 {
 	SingleBillboard,
-	CrossCards
+	CrossCards,
+	MultiBillboard
 };
 
 enum class EFoliageBakerCaptureAxis : uint8
@@ -44,6 +45,11 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	int32 CrossCardPlaneCount = 2;
 	EFoliageBakerCrossCardGeometryMode CrossCardGeometryMode = EFoliageBakerCrossCardGeometryMode::TwoSidedTwoUVs;
 	TArray<FString> TrunkMaterialKeywords = { TEXT("Trunk") };
+	TArray<FString> LeafMaterialKeywords = { TEXT("Leaf") };
+	int32 MultiBillboardClusterCount = 16;
+	int32 MultiBillboardsPerCluster = 3;
+	bool bIncludeReducedTrunk = true;
+	float TrunkTrianglePercentage = 0.5f;
 
 	int32 TextureResolution = 1024;
 	int32 AlphaCropGuardPixels = 2;
@@ -68,6 +74,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 
 	FString TextureOutputFolderName = TEXT("Textures");
 	FString MaterialOutputFolderName = TEXT("Materials");
+	bool bPlaceGeneratedAssetsNearReplacedLODAssets = true;
 	FString TextureNamePrefix = TEXT("T_");
 	FString BaseColorOpacityTextureSuffix = TEXT("_DA");
 	FString NormalDepthTextureSuffix = TEXT("_NR");

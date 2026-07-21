@@ -15,3 +15,9 @@ UFoliageBakerCrossCardsSettings::UFoliageBakerCrossCardsSettings()
 {
 	Mode = EFoliageBakerCardMode::CrossCards;
 }
+
+UFoliageBakerMultiBillboardSettings::UFoliageBakerMultiBillboardSettings()
+{
+	Mode = EFoliageBakerCardMode::MultiBillboard;
+	bTrimUnusedAtlasSpace = true;
+}

@@ -58,6 +58,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MaterialOutputFolderName = TEXT("Materials");
 
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Place Assets Near Replaced LOD Assets", ToolTip = "When enabled and Replace LOD is selected, creates the generated material near the materials used by the target LOD and creates generated textures in the nearest referenced texture folder. Falls back to the configured output folders when no suitable source folder can be resolved."))
+	bool bPlaceGeneratedAssetsNearReplacedLODAssets = true;
+
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString TextureNamePrefix = TEXT("T_");
 
@@ -76,7 +79,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MaterialInstanceNameSuffix = TEXT("_Impostor");
 
-	UPROPERTY(config, EditDefaultsOnly, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Configured only in Editor Preferences. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
 	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter"))

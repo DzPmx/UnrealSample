@@ -9,6 +9,18 @@ namespace UE::FoliageBaker::Atlas
 
 	FOLIAGEBAKERCORE_API void NormalizeEncodedObjectSpaceNormals(TArray<FColor>& Pixels);
 
+	FOLIAGEBAKERCORE_API bool ResizeTileIsolated(
+		const TArray<FColor>& SourcePixels,
+		int32 SourceWidth,
+		int32 SourceHeight,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& SourcePlaneInfos,
+		int32 RequestedMaximumDimension,
+		FColor BackgroundColor,
+		TArray<FColor>& OutPixels,
+		int32& OutWidth,
+		int32& OutHeight,
+		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& OutPlaneInfos,
+		FString& OutError);
 
 	FOLIAGEBAKERCORE_API void FillTransparentRGBInsideTiles(
 		TArray<FColor>& Pixels,

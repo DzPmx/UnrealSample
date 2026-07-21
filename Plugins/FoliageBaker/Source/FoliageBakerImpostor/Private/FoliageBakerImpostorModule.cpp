@@ -35,7 +35,7 @@ TSharedRef<SWidget> FFoliageBakerImpostorModule::CreateFeaturePanel()
 		LOCTEXT("BakeImpostorTooltip", "Bake one Impostor asset for every queued Static Mesh.");
 	ControllerArgs.RequirementsHint = LOCTEXT(
 		"BakeRequirementsHint",
-		"Configure the Parent Material Instance in Editor Preferences and queue at least one Static Mesh.");
+		"Select the Parent Material Instance and queue at least one Static Mesh. Editor Preferences provides the initial default.");
 	ControllerArgs.AddMeshesTransactionText =
 		LOCTEXT("AddImpostorSourceMeshesTransaction", "Add Foliage Baker Impostor Source Meshes");
 	ControllerArgs.ClearMeshesTransactionText =
@@ -58,9 +58,8 @@ bool FFoliageBakerImpostorModule::CanBake() const
 	{
 		return false;
 	}
-	const UFoliageBakerImpostorSettings* EditorPreferences = GetDefault<UFoliageBakerImpostorSettings>();
 	return FFoliageBakerFeatureTool::CanBakeFeature(
-		EditorPreferences && !EditorPreferences->MaterialInstanceTemplate.IsNull(),
+		!ToolSettings->MaterialInstanceTemplate.IsNull(),
 		ToolSettings->bBakeBaseColorSdf
 			|| ToolSettings->bBakeNormalDepth
 			|| ToolSettings->bBakeMix,
@@ -70,15 +69,13 @@ bool FFoliageBakerImpostorModule::CanBake() const
 void FFoliageBakerImpostorModule::Bake()
 {
 	EnsureToolSettings();
-	const UFoliageBakerImpostorSettings* EditorPreferences = GetDefault<UFoliageBakerImpostorSettings>();
-	UMaterialInstanceConstant* MaterialTemplate = EditorPreferences
-		? EditorPreferences->MaterialInstanceTemplate.LoadSynchronous()
-		: nullptr;
+	UMaterialInstanceConstant* MaterialTemplate =
+		ToolSettings->MaterialInstanceTemplate.LoadSynchronous();
 	if (!MaterialTemplate)
 	{
 		FFoliageBakerFeatureTool::ShowMessage(LOCTEXT(
 			"MissingTemplate",
-			"Configure the Parent Material Instance in Editor Preferences before baking."));
+			"Select the Parent Material Instance in the Impostor tool before baking."));
 		return;
 	}
 

@@ -31,6 +31,8 @@ public class FoliageBakerCore : ModuleRules
 				"ImageCore",
 				"InputCore",
 				"MaterialBaking",
+				"MeshReductionInterface",
+				"MeshUtilitiesCommon",
 				"Projects",
 				"RenderCore",
 				"RHI",

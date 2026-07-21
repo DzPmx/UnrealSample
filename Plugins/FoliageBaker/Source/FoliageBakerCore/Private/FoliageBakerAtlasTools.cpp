@@ -1,5 +1,7 @@
 #include "FoliageBakerAtlasTools.h"
 
+#include "ImageCore.h"
+
 namespace UE::FoliageBaker::Atlas
 {
 	uint8 EncodeTrunkLeafAlpha(const bool bIsTrunk)
@@ -287,6 +289,201 @@ namespace UE::FoliageBaker::Atlas
 		{
 			Pixel = NormalizeEncodedObjectSpaceNormal(Pixel);
 		}
+	}
+
+	bool ResizeTileIsolated(
+		const TArray<FColor>& SourcePixels,
+		const int32 SourceWidth,
+		const int32 SourceHeight,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& SourcePlaneInfos,
+		const int32 RequestedMaximumDimension,
+		const FColor BackgroundColor,
+		TArray<FColor>& OutPixels,
+		int32& OutWidth,
+		int32& OutHeight,
+		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& OutPlaneInfos,
+		FString& OutError)
+	{
+		if (SourceWidth <= 0
+			|| SourceHeight <= 0
+			|| SourcePixels.Num() != SourceWidth * SourceHeight
+			|| SourcePlaneInfos.IsEmpty())
+		{
+			OutError = TEXT("Tile-isolated atlas resize received invalid source data.");
+			return false;
+		}
+
+		const int32 MaximumDimension = FMath::Max(4, RequestedMaximumDimension);
+		const double Scale =
+			static_cast<double>(MaximumDimension)
+			/ static_cast<double>(FMath::Max(SourceWidth, SourceHeight));
+		OutWidth = MaximumDimension;
+		OutHeight = MaximumDimension;
+		if (SourceWidth >= SourceHeight)
+		{
+			OutHeight = FMath::Clamp(
+				Align(FMath::Max(1, FMath::RoundToInt(SourceHeight * Scale)), 4),
+				4,
+				MaximumDimension);
+		}
+		else
+		{
+			OutWidth = FMath::Clamp(
+				Align(FMath::Max(1, FMath::RoundToInt(SourceWidth * Scale)), 4),
+				4,
+				MaximumDimension);
+		}
+
+		OutPixels.Init(BackgroundColor, OutWidth * OutHeight);
+		OutPlaneInfos = SourcePlaneInfos;
+
+		auto ScaleTileRect = [SourceWidth,
+							  SourceHeight,
+							  TargetWidth = OutWidth,
+							  TargetHeight = OutHeight](
+			const FIntPoint& SourcePixelMin,
+			const FIntPoint& SourceTileSize)
+		{
+			const int32 TargetMinX = FMath::Clamp(
+				FMath::RoundToInt(
+					static_cast<double>(SourcePixelMin.X) * TargetWidth / SourceWidth),
+				0,
+				TargetWidth - 1);
+			const int32 TargetMinY = FMath::Clamp(
+				FMath::RoundToInt(
+					static_cast<double>(SourcePixelMin.Y) * TargetHeight / SourceHeight),
+				0,
+				TargetHeight - 1);
+			const int32 TargetMaxX = FMath::Clamp(
+				FMath::RoundToInt(
+					static_cast<double>(SourcePixelMin.X + SourceTileSize.X)
+						* TargetWidth / SourceWidth),
+				TargetMinX + 1,
+				TargetWidth);
+			const int32 TargetMaxY = FMath::Clamp(
+				FMath::RoundToInt(
+					static_cast<double>(SourcePixelMin.Y + SourceTileSize.Y)
+						* TargetHeight / SourceHeight),
+				TargetMinY + 1,
+				TargetHeight);
+			return FIntRect(
+				FIntPoint(TargetMinX, TargetMinY),
+				FIntPoint(TargetMaxX, TargetMaxY));
+		};
+
+		auto ResizeTile = [&](const FIntPoint& SourcePixelMin,
+							  const FIntPoint& SourceTileSize,
+							  FIntPoint& OutPixelMin,
+							  FIntPoint& OutTileSize)
+		{
+			const FIntRect SourceRect(
+				SourcePixelMin,
+				SourcePixelMin + SourceTileSize);
+			if (SourceRect.Min.X < 0
+				|| SourceRect.Min.Y < 0
+				|| SourceRect.Max.X > SourceWidth
+				|| SourceRect.Max.Y > SourceHeight
+				|| SourceRect.Width() <= 0
+				|| SourceRect.Height() <= 0)
+			{
+				OutError = TEXT("Tile-isolated atlas resize contains an invalid source tile.");
+				return false;
+			}
+
+			const FIntRect TargetRect = ScaleTileRect(SourcePixelMin, SourceTileSize);
+			FImage SourceImage(
+				SourceRect.Width(),
+				SourceRect.Height(),
+				1,
+				ERawImageFormat::BGRA8,
+				EGammaSpace::Linear);
+			FColor* SourceImagePixels =
+				reinterpret_cast<FColor*>(SourceImage.RawData.GetData());
+			for (int32 LocalY = 0; LocalY < SourceRect.Height(); ++LocalY)
+			{
+				FMemory::Memcpy(
+					SourceImagePixels + LocalY * SourceRect.Width(),
+					SourcePixels.GetData()
+						+ (SourceRect.Min.Y + LocalY) * SourceWidth
+						+ SourceRect.Min.X,
+					static_cast<SIZE_T>(SourceRect.Width()) * sizeof(FColor));
+			}
+
+			FImage TargetImage(
+				TargetRect.Width(),
+				TargetRect.Height(),
+				1,
+				ERawImageFormat::BGRA8,
+				EGammaSpace::Linear);
+			if (SourceRect.Size() == TargetRect.Size())
+			{
+				FMemory::Memcpy(
+					TargetImage.RawData.GetData(),
+					SourceImage.RawData.GetData(),
+					SourceImage.RawData.Num());
+			}
+			else
+			{
+				const FImageCore::EResizeImageFilter Filter =
+					TargetRect.Width() < SourceRect.Width()
+						|| TargetRect.Height() < SourceRect.Height()
+					? FImageCore::EResizeImageFilter::Box
+					: FImageCore::EResizeImageFilter::Bilinear;
+				FImageCore::ResizeImage(SourceImage, TargetImage, Filter);
+			}
+
+			const FColor* TargetImagePixels =
+				reinterpret_cast<const FColor*>(TargetImage.RawData.GetData());
+			for (int32 LocalY = 0; LocalY < TargetRect.Height(); ++LocalY)
+			{
+				FMemory::Memcpy(
+					OutPixels.GetData()
+						+ (TargetRect.Min.Y + LocalY) * OutWidth
+						+ TargetRect.Min.X,
+					TargetImagePixels + LocalY * TargetRect.Width(),
+					static_cast<SIZE_T>(TargetRect.Width()) * sizeof(FColor));
+			}
+
+			OutPixelMin = TargetRect.Min;
+			OutTileSize = TargetRect.Size();
+			return true;
+		};
+
+		const double PixelScale = FMath::Min(
+			static_cast<double>(OutWidth) / SourceWidth,
+			static_cast<double>(OutHeight) / SourceHeight);
+		for (int32 PlaneIndex = 0; PlaneIndex < SourcePlaneInfos.Num(); ++PlaneIndex)
+		{
+			const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& SourcePlaneInfo =
+				SourcePlaneInfos[PlaneIndex];
+			UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& TargetPlaneInfo =
+				OutPlaneInfos[PlaneIndex];
+			if (!ResizeTile(
+					SourcePlaneInfo.AtlasPixelMin,
+					SourcePlaneInfo.AtlasTileSize,
+					TargetPlaneInfo.AtlasPixelMin,
+					TargetPlaneInfo.AtlasTileSize))
+			{
+				return false;
+			}
+			if (SourcePlaneInfo.bHasBackFaceAtlas
+				&& !ResizeTile(
+					SourcePlaneInfo.BackAtlasPixelMin,
+					SourcePlaneInfo.BackAtlasTileSize,
+					TargetPlaneInfo.BackAtlasPixelMin,
+					TargetPlaneInfo.BackAtlasTileSize))
+			{
+				return false;
+			}
+
+			TargetPlaneInfo.AtlasTileResolution = FMath::Max(
+				1,
+				FMath::RoundToInt(SourcePlaneInfo.AtlasTileResolution * PixelScale));
+			TargetPlaneInfo.AtlasTilePaddingPixels = FMath::Max(
+				0,
+				FMath::RoundToInt(SourcePlaneInfo.AtlasTilePaddingPixels * PixelScale));
+		}
+		return true;
 	}
 
 	void FillTransparentRGBInsideTiles(

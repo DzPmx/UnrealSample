@@ -6,10 +6,12 @@
 #include "Editor.h"
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
 #include "ImageCore.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialParameters.h"
 #include "MeshDescription.h"
@@ -18,6 +20,7 @@
 #include "ObjectTools.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshResources.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "UObject/MetaData.h"
 #include "UObject/UObjectGlobals.h"
@@ -46,6 +49,156 @@ namespace
 			&& SourceName.Len() > 3
 			? SourceName.RightChop(3)
 			: SourceName;
+	}
+
+	FString NormalizeLongPackageFolder(FString PackageFolder)
+	{
+		PackageFolder.TrimStartAndEndInline();
+		PackageFolder.ReplaceInline(TEXT("\\"), TEXT("/"));
+		while (PackageFolder.RemoveFromEnd(TEXT("/")))
+		{
+		}
+		return PackageFolder;
+	}
+
+	FString GetPackageRoot(const FString& PackagePath)
+	{
+		const int32 SecondSlashIndex = PackagePath.Find(
+			TEXT("/"),
+			ESearchCase::CaseSensitive,
+			ESearchDir::FromStart,
+			1);
+		return SecondSlashIndex == INDEX_NONE
+			? PackagePath
+			: PackagePath.Left(SecondSlashIndex);
+	}
+
+	bool TryGetAssetPackageFolder(const UObject* Asset, FString& OutPackageFolder)
+	{
+		OutPackageFolder.Reset();
+		if (!IsValid(Asset))
+		{
+			return false;
+		}
+		const FString PackageName = Asset->GetOutermost()->GetName();
+		if (!FPackageName::IsValidLongPackageName(PackageName))
+		{
+			return false;
+		}
+		OutPackageFolder = FPackageName::GetLongPackagePath(PackageName);
+		return !OutPackageFolder.IsEmpty();
+	}
+
+	int32 CountCommonPackagePathComponents(const FString& A, const FString& B)
+	{
+		TArray<FString> AComponents;
+		TArray<FString> BComponents;
+		A.ParseIntoArray(AComponents, TEXT("/"), true);
+		B.ParseIntoArray(BComponents, TEXT("/"), true);
+		const int32 ComponentCount = FMath::Min(AComponents.Num(), BComponents.Num());
+		int32 CommonComponentCount = 0;
+		while (CommonComponentCount < ComponentCount
+			&& AComponents[CommonComponentCount] == BComponents[CommonComponentCount])
+		{
+			++CommonComponentCount;
+		}
+		return CommonComponentCount;
+	}
+
+	FString FindCommonPackageFolder(const TArray<FString>& PackageFolders)
+	{
+		if (PackageFolders.IsEmpty())
+		{
+			return FString();
+		}
+		TArray<FString> CommonComponents;
+		PackageFolders[0].ParseIntoArray(CommonComponents, TEXT("/"), true);
+		for (int32 FolderIndex = 1; FolderIndex < PackageFolders.Num() && !CommonComponents.IsEmpty(); ++FolderIndex)
+		{
+			TArray<FString> FolderComponents;
+			PackageFolders[FolderIndex].ParseIntoArray(FolderComponents, TEXT("/"), true);
+			const int32 SharedCount = FMath::Min(CommonComponents.Num(), FolderComponents.Num());
+			int32 ComponentIndex = 0;
+			while (ComponentIndex < SharedCount
+				&& CommonComponents[ComponentIndex] == FolderComponents[ComponentIndex])
+			{
+				++ComponentIndex;
+			}
+			CommonComponents.SetNum(ComponentIndex);
+		}
+		return CommonComponents.IsEmpty()
+			? FString()
+			: TEXT("/") + FString::Join(CommonComponents, TEXT("/"));
+	}
+
+	FString SelectMaterialOutputFolder(
+		const TArray<UMaterialInterface*>& Materials,
+		const FString& SourcePackageRoot)
+	{
+		TArray<FString> MaterialFolders;
+		for (const UMaterialInterface* Material : Materials)
+		{
+			FString MaterialFolder;
+			if (TryGetAssetPackageFolder(Material, MaterialFolder)
+				&& GetPackageRoot(MaterialFolder) == SourcePackageRoot)
+			{
+				MaterialFolders.AddUnique(MaterialFolder);
+			}
+		}
+		const FString CommonFolder = FindCommonPackageFolder(MaterialFolders);
+		if (!CommonFolder.IsEmpty() && CommonFolder != SourcePackageRoot)
+		{
+			return CommonFolder;
+		}
+		return MaterialFolders.IsEmpty() ? FString() : MaterialFolders[0];
+	}
+
+	FString SelectTextureOutputFolder(
+		const TArray<UMaterialInterface*>& Materials,
+		const FString& MaterialFolder,
+		const FString& SourcePackageRoot)
+	{
+		TMap<FString, int32> FolderUseCounts;
+		for (UMaterialInterface* Material : Materials)
+		{
+			TArray<UTexture*> UsedTextures;
+			Material->GetUsedTextures(UsedTextures);
+			TSet<FString> MaterialTextureFolders;
+			for (const UTexture* Texture : UsedTextures)
+			{
+				FString TextureFolder;
+				if (TryGetAssetPackageFolder(Texture, TextureFolder)
+					&& GetPackageRoot(TextureFolder) == SourcePackageRoot)
+				{
+					MaterialTextureFolders.Add(TextureFolder);
+				}
+			}
+			for (const FString& TextureFolder : MaterialTextureFolders)
+			{
+				++FolderUseCounts.FindOrAdd(TextureFolder);
+			}
+		}
+
+		FString BestFolder;
+		int32 BestCommonComponentCount = INDEX_NONE;
+		int32 BestUseCount = INDEX_NONE;
+		for (const TPair<FString, int32>& Entry : FolderUseCounts)
+		{
+			const int32 CommonComponentCount = MaterialFolder.IsEmpty()
+				? 0
+				: CountCommonPackagePathComponents(MaterialFolder, Entry.Key);
+			if (CommonComponentCount > BestCommonComponentCount
+				|| (CommonComponentCount == BestCommonComponentCount && Entry.Value > BestUseCount)
+				|| (CommonComponentCount == BestCommonComponentCount
+					&& Entry.Value == BestUseCount
+					&& (BestFolder.IsEmpty() || Entry.Key < BestFolder)))
+			{
+				BestFolder = Entry.Key;
+				BestCommonComponentCount = CommonComponentCount;
+				BestUseCount = Entry.Value;
+			}
+		}
+		return BestFolder;
 	}
 
 	void ResolveAssetPathForPolicy(
@@ -118,21 +271,102 @@ namespace
 		MaterialInstance.SetExportResolutionScale(Defaults->GetExportResolutionScale());
 	}
 
-	int32 EnsureProxyMaterialSlot(UStaticMesh& StaticMesh, UMaterialInterface* ProxyMaterial, const FName MaterialSlotName)
+	UMaterialInterface* ResolveProxyMaterial(UMaterialInterface* ProxyMaterial)
 	{
-		UMaterialInterface* Material = ProxyMaterial ? ProxyMaterial : UMaterial::GetDefaultMaterial(MD_Surface);
-		TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
+		return ProxyMaterial ? ProxyMaterial : UMaterial::GetDefaultMaterial(MD_Surface);
+	}
+
+	void PrepareMeshDescriptionMaterialSlotNames(
+		FMeshDescription& MeshDescription,
+		const FName ProxyMaterialSlotName,
+		const FName LegacyProxyMaterialSlotName,
+		const bool bPreserveAdditionalMaterialSlots)
+	{
+		FStaticMeshAttributes Attributes(MeshDescription);
+		Attributes.Register(true);
+		TPolygonGroupAttributesRef<FName> MaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
+		for (const FPolygonGroupID PolygonGroupID : MeshDescription.PolygonGroups().GetElementIDs())
+		{
+			if (!bPreserveAdditionalMaterialSlots
+				|| MaterialSlotNames[PolygonGroupID].IsNone()
+				|| MaterialSlotNames[PolygonGroupID] == LegacyProxyMaterialSlotName)
+			{
+				MaterialSlotNames[PolygonGroupID] = ProxyMaterialSlotName;
+			}
+		}
+	}
+
+	int32 FindMaterialSlotIndex(const TArray<FStaticMaterial>& StaticMaterials, const FName MaterialSlotName)
+	{
 		for (int32 MaterialIndex = 0; MaterialIndex < StaticMaterials.Num(); ++MaterialIndex)
 		{
-			FStaticMaterial& StaticMaterial = StaticMaterials[MaterialIndex];
+			const FStaticMaterial& StaticMaterial = StaticMaterials[MaterialIndex];
 			if (StaticMaterial.MaterialSlotName == MaterialSlotName
 				|| StaticMaterial.ImportedMaterialSlotName == MaterialSlotName)
 			{
-				StaticMaterial.MaterialInterface = Material;
-				StaticMaterial.MaterialSlotName = MaterialSlotName;
-				StaticMaterial.ImportedMaterialSlotName = MaterialSlotName;
 				return MaterialIndex;
 			}
+		}
+		return INDEX_NONE;
+	}
+
+	void AssignMaterialSlot(
+		FStaticMaterial& StaticMaterial,
+		UMaterialInterface* Material,
+		const FName MaterialSlotName)
+	{
+		StaticMaterial.MaterialInterface = Material;
+		StaticMaterial.MaterialSlotName = MaterialSlotName;
+		StaticMaterial.ImportedMaterialSlotName = MaterialSlotName;
+	}
+
+	int32 EnsureNamedMaterialSlot(
+		UStaticMesh& StaticMesh,
+		UMaterialInterface* MaterialInterface,
+		const FName RequestedSlotName)
+	{
+		UMaterialInterface* Material = ResolveProxyMaterial(MaterialInterface);
+		const FName MaterialSlotName = RequestedSlotName.IsNone()
+			? Material->GetFName()
+			: RequestedSlotName;
+		TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
+		const int32 MaterialIndex = FindMaterialSlotIndex(StaticMaterials, MaterialSlotName);
+		if (MaterialIndex != INDEX_NONE)
+		{
+			AssignMaterialSlot(StaticMaterials[MaterialIndex], Material, MaterialSlotName);
+			return MaterialIndex;
+		}
+
+		return StaticMaterials.Add(FStaticMaterial(Material, MaterialSlotName, MaterialSlotName));
+	}
+
+	void EnsureAdditionalMaterialSlots(
+		UStaticMesh& StaticMesh,
+		const TArray<FFoliageBakerMeshMaterialSlot>& AdditionalMaterialSlots)
+	{
+		for (const FFoliageBakerMeshMaterialSlot& MaterialSlot : AdditionalMaterialSlots)
+		{
+			if (!MaterialSlot.MaterialSlotName.IsNone())
+			{
+				EnsureNamedMaterialSlot(StaticMesh, MaterialSlot.Material, MaterialSlot.MaterialSlotName);
+			}
+		}
+	}
+
+	int32 EnsureProxyMaterialSlot(UStaticMesh& StaticMesh, UMaterialInterface* ProxyMaterial, const FName LegacySlotName)
+	{
+		UMaterialInterface* Material = ResolveProxyMaterial(ProxyMaterial);
+		const FName MaterialSlotName = Material->GetFName();
+		TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
+		int32 MaterialIndex = FindMaterialSlotIndex(StaticMaterials, MaterialSlotName);
+		if (MaterialIndex == INDEX_NONE && LegacySlotName != MaterialSlotName)
+		{
+			MaterialIndex = FindMaterialSlotIndex(StaticMaterials, LegacySlotName);
+		}
+		if (MaterialIndex != INDEX_NONE)
+		{
+			AssignMaterialSlot(StaticMaterials[MaterialIndex], Material, MaterialSlotName);
+			return MaterialIndex;
 		}
 
 		return StaticMaterials.Add(FStaticMaterial(Material, MaterialSlotName, MaterialSlotName));
@@ -247,6 +481,35 @@ namespace
 		for (int32 SectionIndex = 0; SectionIndex < SectionCount; ++SectionIndex)
 		{
 			StaticMesh.GetOriginalSectionInfoMap().Remove(LODIndex, SectionIndex);
+		}
+	}
+
+	void ConfigureSectionMaterialsFromMeshDescription(
+		UStaticMesh& StaticMesh,
+		const int32 LODIndex,
+		const FMeshDescription& MeshDescription,
+		const int32 FallbackMaterialIndex)
+	{
+		const TPolygonGroupAttributesConstRef<FName> MaterialSlotNames =
+			FStaticMeshConstAttributes(MeshDescription).GetPolygonGroupMaterialSlotNames();
+		for (const FPolygonGroupID PolygonGroupID : MeshDescription.PolygonGroups().GetElementIDs())
+		{
+			const FName MaterialSlotName = MaterialSlotNames[PolygonGroupID];
+			int32 MaterialIndex = StaticMesh.GetMaterialIndex(MaterialSlotName);
+			if (MaterialIndex == INDEX_NONE)
+			{
+				MaterialIndex = StaticMesh.GetMaterialIndexFromImportedMaterialSlotName(MaterialSlotName);
+			}
+			if (MaterialIndex == INDEX_NONE)
+			{
+				MaterialIndex = FallbackMaterialIndex;
+			}
+
+			FMeshSectionInfo SectionInfo;
+			SectionInfo.MaterialIndex = MaterialIndex;
+			const int32 SectionIndex = PolygonGroupID.GetValue();
+			StaticMesh.GetSectionInfoMap().Set(LODIndex, SectionIndex, SectionInfo);
+			StaticMesh.GetOriginalSectionInfoMap().Set(LODIndex, SectionIndex, SectionInfo);
 		}
 	}
 
@@ -1033,6 +1296,27 @@ bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
 	FString& OutBaseAssetName,
 	FString& OutError)
 {
+	return BuildGeneratedAssetBasePath(
+		SourceStaticMesh,
+		ConfiguredOutputFolder,
+		FString(),
+		AssetNamePrefix,
+		AssetNameSuffix,
+		OutBasePackageName,
+		OutBaseAssetName,
+		OutError);
+}
+
+bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
+	const UStaticMesh& SourceStaticMesh,
+	const FString& ConfiguredOutputFolder,
+	const FString& OutputPackagePathOverride,
+	const FString& AssetNamePrefix,
+	const FString& AssetNameSuffix,
+	FString& OutBasePackageName,
+	FString& OutBaseAssetName,
+	FString& OutError)
+{
 	OutError.Reset();
 	const FString SourceFolderPath = FPackageName::GetLongPackagePath(SourceStaticMesh.GetOutermost()->GetName());
 	FString ParentFolderPath = SourceFolderPath;
@@ -1042,10 +1326,14 @@ bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
 		ParentFolderPath = SourceFolderPath.Left(LastSeparatorIndex);
 	}
 
+	const FString NormalizedOutputPackagePathOverride =
+		NormalizeLongPackageFolder(OutputPackagePathOverride);
 	const FString RelativeOutputFolder = NormalizeRelativeOutputFolder(ConfiguredOutputFolder);
-	const FString OutputFolderPath = RelativeOutputFolder.IsEmpty()
-		? ParentFolderPath
-		: ParentFolderPath / RelativeOutputFolder;
+	const FString OutputFolderPath = !NormalizedOutputPackagePathOverride.IsEmpty()
+		? NormalizedOutputPackagePathOverride
+		: RelativeOutputFolder.IsEmpty()
+			? ParentFolderPath
+			: ParentFolderPath / RelativeOutputFolder;
 	OutBaseAssetName = ObjectTools::SanitizeObjectName(
 		AssetNamePrefix + GetGeneratedAssetSourceName(SourceStaticMesh) + AssetNameSuffix);
 	OutBasePackageName = OutputFolderPath / OutBaseAssetName;
@@ -1062,6 +1350,74 @@ bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
 		return false;
 	}
 	return true;
+}
+
+FFoliageBakerGeneratedAssetOutputFolders
+FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
+	const UStaticMesh& SourceStaticMesh,
+	const int32 LODIndex)
+{
+	FFoliageBakerGeneratedAssetOutputFolders Result;
+	TArray<int32> UsedMaterialIndices;
+	if (const FStaticMeshRenderData* RenderData = SourceStaticMesh.GetRenderData();
+		RenderData && RenderData->LODResources.IsValidIndex(LODIndex))
+	{
+		for (const FStaticMeshSection& Section : RenderData->LODResources[LODIndex].Sections)
+		{
+			UsedMaterialIndices.AddUnique(Section.MaterialIndex);
+		}
+	}
+
+	if (UsedMaterialIndices.IsEmpty())
+	{
+		if (const FMeshDescription* MeshDescription = SourceStaticMesh.GetMeshDescription(LODIndex);
+			MeshDescription
+			&& MeshDescription->PolygonGroupAttributes().HasAttribute(
+				MeshAttribute::PolygonGroup::ImportedMaterialSlotName))
+		{
+			const TPolygonGroupAttributesConstRef<FName> MaterialSlotNames =
+				FStaticMeshConstAttributes(*MeshDescription).GetPolygonGroupMaterialSlotNames();
+			for (const FPolygonGroupID PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+			{
+				const FName MaterialSlotName = MaterialSlotNames[PolygonGroupID];
+				int32 MaterialIndex = SourceStaticMesh.GetMaterialIndex(MaterialSlotName);
+				if (MaterialIndex == INDEX_NONE)
+				{
+					MaterialIndex = SourceStaticMesh.GetMaterialIndexFromImportedMaterialSlotName(
+						MaterialSlotName);
+				}
+				if (MaterialIndex != INDEX_NONE)
+				{
+					UsedMaterialIndices.AddUnique(MaterialIndex);
+				}
+			}
+		}
+	}
+
+	TArray<UMaterialInterface*> UsedMaterials;
+	const TArray<FStaticMaterial>& StaticMaterials = SourceStaticMesh.GetStaticMaterials();
+	for (const int32 MaterialIndex : UsedMaterialIndices)
+	{
+		if (StaticMaterials.IsValidIndex(MaterialIndex)
+			&& IsValid(StaticMaterials[MaterialIndex].MaterialInterface))
+		{
+			UsedMaterials.AddUnique(StaticMaterials[MaterialIndex].MaterialInterface);
+		}
+	}
+	if (UsedMaterials.IsEmpty())
+	{
+		return Result;
+	}
+
+	const FString SourcePackagePath =
+		FPackageName::GetLongPackagePath(SourceStaticMesh.GetOutermost()->GetName());
+	const FString SourcePackageRoot = GetPackageRoot(SourcePackagePath);
+	Result.MaterialPackagePath = SelectMaterialOutputFolder(UsedMaterials, SourcePackageRoot);
+	Result.TexturePackagePath = SelectTextureOutputFolder(
+		UsedMaterials,
+		Result.MaterialPackagePath,
+		SourcePackageRoot);
+	return Result;
 }
 
 UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
@@ -1084,6 +1440,7 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 	if (!BuildGeneratedAssetBasePath(
 		SourceStaticMesh,
 		Params.OutputFolderName,
+		Params.OutputPackagePathOverride,
 		Params.AssetNamePrefix,
 		Params.AssetNameSuffix,
 		BasePackageName,
@@ -1178,6 +1535,7 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 	if (!BuildGeneratedAssetBasePath(
 		SourceStaticMesh,
 		Params.OutputFolderName,
+		Params.OutputPackagePathOverride,
 		Params.AssetNamePrefix,
 		Params.AssetNameSuffix,
 		BasePackageName,
@@ -1368,13 +1726,27 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 
 	ProxyMesh->InitResources();
 	ProxyMesh->SetLightingGuid();
-	EnsureProxyMaterialSlot(*ProxyMesh, ProxyMaterial, Params.MaterialSlotName);
+	UMaterialInterface* Material = ResolveProxyMaterial(ProxyMaterial);
+	const FName MaterialSlotName = Material->GetFName();
+	EnsureProxyMaterialSlot(*ProxyMesh, Material, Params.MaterialSlotName);
+	EnsureAdditionalMaterialSlots(*ProxyMesh, Params.AdditionalMaterialSlots);
 	ProxyMesh->SetLightMapCoordinateIndex(0);
 	ProxyMesh->SetLightMapResolution(64);
 	ProxyMesh->SetImportVersion(EImportStaticMeshVersion::LastVersion);
 
+	FMeshDescription MeshDescriptionCopy = MeshDescription;
+	PrepareMeshDescriptionMaterialSlotNames(
+		MeshDescriptionCopy,
+		MaterialSlotName,
+		Params.MaterialSlotName,
+		!Params.AdditionalMaterialSlots.IsEmpty());
+	if (MeshDescriptionCopy.NeedsCompact())
+	{
+		FElementIDRemappings Remappings;
+		MeshDescriptionCopy.Compact(Remappings);
+	}
 	TArray<const FMeshDescription*> MeshDescriptions;
-	MeshDescriptions.Add(&MeshDescription);
+	MeshDescriptions.Add(&MeshDescriptionCopy);
 	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
 	BuildParams.bBuildSimpleCollision = false;
 
@@ -1499,14 +1871,27 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		return FailAndRollback();
 	}
 
+	UMaterialInterface* Material = ResolveProxyMaterial(ProxyMaterial);
+	const FName MaterialSlotName = Material->GetFName();
 	FMeshDescription MeshDescriptionCopy = MeshDescription;
+	PrepareMeshDescriptionMaterialSlotNames(
+		MeshDescriptionCopy,
+		MaterialSlotName,
+		Params.MaterialSlotName,
+		!Params.AdditionalMaterialSlots.IsEmpty());
+	if (MeshDescriptionCopy.NeedsCompact())
+	{
+		FElementIDRemappings Remappings;
+		MeshDescriptionCopy.Compact(Remappings);
+	}
 	if (!SourceStaticMesh.CreateMeshDescription(OutLODIndex, MoveTemp(MeshDescriptionCopy)))
 	{
 		OutError = FString::Printf(TEXT("Could not create MeshDescription for source LOD %d on %s."), OutLODIndex, *SourceStaticMesh.GetName());
 		return FailAndRollback();
 	}
 
-	const int32 MaterialIndex = EnsureProxyMaterialSlot(SourceStaticMesh, ProxyMaterial, Params.MaterialSlotName);
+	const int32 MaterialIndex = EnsureProxyMaterialSlot(SourceStaticMesh, Material, Params.MaterialSlotName);
+	EnsureAdditionalMaterialSlots(SourceStaticMesh, Params.AdditionalMaterialSlots);
 	ClearSectionInfoForLOD(SourceStaticMesh, OutLODIndex);
 
 	UStaticMesh::FCommitMeshDescriptionParams CommitParams;
@@ -1536,10 +1921,14 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	}
 	KeepOnlyUVChannels(SourceStaticMesh, OutLODIndex, Params.DesiredUVChannelCount, false);
 
-	FMeshSectionInfo SectionInfo;
-	SectionInfo.MaterialIndex = MaterialIndex;
-	SourceStaticMesh.GetSectionInfoMap().Set(OutLODIndex, 0, SectionInfo);
-	SourceStaticMesh.GetOriginalSectionInfoMap().Set(OutLODIndex, 0, SectionInfo);
+	if (const FMeshDescription* InstalledMeshDescription = SourceStaticMesh.GetMeshDescription(OutLODIndex))
+	{
+		ConfigureSectionMaterialsFromMeshDescription(
+			SourceStaticMesh,
+			OutLODIndex,
+			*InstalledMeshDescription,
+			MaterialIndex);
+	}
 	SourceStaticMesh.SetImportVersion(EImportStaticMeshVersion::LastVersion);
 	SourceStaticMesh.PostEditChange();
 	SourceStaticMesh.MarkPackageDirty();
