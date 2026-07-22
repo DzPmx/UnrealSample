@@ -7,6 +7,8 @@
 #include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedAtlasBake.h"
+#include "FoliageBakerProxyGeometry.h"
+#include "FoliageBakerSourceMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "MaterialDomain.h"
@@ -53,28 +55,6 @@ namespace
 		return UsesSeparateOneSidedCrossFaces(Request) ? 1 : 2;
 	}
 
-	bool ComputeSourceTriangleBounds(
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
-		FBoxSphereBounds& OutBounds)
-	{
-		FBox Bounds(ForceInit);
-		for (const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle : Triangles)
-		{
-			for (const FVector& Vertex : Triangle.Vertices)
-			{
-				Bounds += Vertex;
-			}
-		}
-		if (!Bounds.IsValid)
-		{
-			OutBounds = FBoxSphereBounds(ForceInitToZero);
-			return false;
-		}
-
-		OutBounds = FBoxSphereBounds(Bounds);
-		return true;
-	}
-
 	UE::FoliageBaker::PlaneCover::FPlaneProxySettings BuildSettingsForMesh(
 		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& SourceTriangles,
 		const FFoliageBakerCardBakeRequest& Request)
@@ -92,7 +72,9 @@ namespace
 		Settings.AtlasVConvention = UE::FoliageBaker::PlaneCover::EAtlasVConvention::GeometryMinVToTextureMaxV;
 		Settings.TrunkCardAtlasScale = 1.0;
 		FBoxSphereBounds SourceBounds(ForceInitToZero);
-		ComputeSourceTriangleBounds(SourceTriangles, SourceBounds);
+		FFoliageBakerSourceMeshReader::ComputeBounds(
+			SourceTriangles,
+			SourceBounds);
 		Settings.ErrorTolerance = FMath::Max(0.01, static_cast<double>(SourceBounds.SphereRadius) * 1.0e-6);
 		Settings.bEnableAlphaAwareTileCrop = true;
 		Settings.AlphaAwareTileCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
@@ -1058,11 +1040,8 @@ namespace
 		}
 	}
 
-	struct FProxyPlaneCoverBuildData
+	struct FProxyPlaneCoverBuildData : FFoliageBakerSourceMeshData
 	{
-		int32 SourceLODIndex = INDEX_NONE;
-		FBoxSphereBounds SourceLODBounds = FBoxSphereBounds(ForceInitToZero);
-		TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle> Triangles;
 		TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle> RetainedTrunkTriangles;
 		UE::FoliageBaker::PlaneCover::FPlaneProxySettings Settings;
 		FTrunkLeafClassification TrunkLeafClassification;
@@ -1071,11 +1050,8 @@ namespace
 		TArray<FVector> MultiBillboardClusterCenters;
 	};
 
-	struct FProxyMeshBuildData
+	struct FProxyMeshBuildData : FFoliageBakerProxyGeometry
 	{
-		FMeshDescription MeshDescription;
-		UE::FoliageBaker::PlaneCover::FPlaneProxyMeshStats Stats;
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> PlaneInfos;
 		TArray<FFoliageBakerMeshMaterialSlot> AdditionalMaterialSlots;
 		int32 OriginalTrunkTriangleCount = 0;
 		int32 ReducedTrunkTriangleCount = 0;
@@ -1218,24 +1194,12 @@ namespace
 		FProxyPlaneCoverBuildData& OutData,
 		FString& OutError)
 	{
-		OutData.SourceLODIndex = EditorSettings.SourceLODIndex;
-		if (!UE::FoliageBaker::PlaneCover::ExtractTrianglesFromStaticMesh(
-			&StaticMesh,
-			OutData.SourceLODIndex,
-			OutData.Triangles,
-			OutError))
+		if (!FFoliageBakerSourceMeshReader::Read(
+				StaticMesh,
+				EditorSettings.SourceLODIndex,
+				OutData,
+				OutError))
 		{
-			return false;
-		}
-
-		if (OutData.Triangles.IsEmpty())
-		{
-			OutError = FString::Printf(TEXT("Source LOD %d contains no bakeable triangles."), OutData.SourceLODIndex);
-			return false;
-		}
-		if (!ComputeSourceTriangleBounds(OutData.Triangles, OutData.SourceLODBounds))
-		{
-			OutError = FString::Printf(TEXT("Source LOD %d has no valid bounds."), OutData.SourceLODIndex);
 			return false;
 		}
 

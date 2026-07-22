@@ -8,6 +8,8 @@
 #include "FoliageBakerKMeansPlaneCover.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedAtlasBake.h"
+#include "FoliageBakerProxyGeometry.h"
+#include "FoliageBakerSourceMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceConstant.h"
@@ -19,28 +21,6 @@ DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerBillboardClouds, Log, All);
 
 namespace
 {
-	bool ComputeSourceTriangleBounds(
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
-		FBoxSphereBounds& OutBounds)
-	{
-		FBox Bounds(ForceInit);
-		for (const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle : Triangles)
-		{
-			for (const FVector& Vertex : Triangle.Vertices)
-			{
-				Bounds += Vertex;
-			}
-		}
-		if (!Bounds.IsValid)
-		{
-			OutBounds = FBoxSphereBounds(ForceInitToZero);
-			return false;
-		}
-
-		OutBounds = FBoxSphereBounds(Bounds);
-		return true;
-	}
-
 	UE::FoliageBaker::PlaneCover::FPlaneProxySettings BuildSettingsForMesh(const FBoxSphereBounds& SourceLODBounds, const UFoliageBakerBillboardCloudsSettings& EditorSettings)
 	{
 		UE::FoliageBaker::PlaneCover::FPlaneProxySettings Settings;
@@ -464,11 +444,8 @@ namespace
 		return Params;
 	}
 
-	struct FProxyPlaneCoverBuildData
+	struct FProxyPlaneCoverBuildData : FFoliageBakerSourceMeshData
 	{
-		int32 SourceLODIndex = INDEX_NONE;
-		FBoxSphereBounds SourceLODBounds = FBoxSphereBounds(ForceInitToZero);
-		TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle> Triangles;
 		UE::FoliageBaker::PlaneCover::FPlaneProxySettings Settings;
 		UE::FoliageBaker::BillboardClouds::FKMeansPlaneCoverSettings KMeansSettings;
 		FTrunkCardTriangleSplit TrunkSplit;
@@ -478,12 +455,7 @@ namespace
 		int32 TrunkPlaneCount = 0;
 	};
 
-	struct FProxyMeshBuildData
-	{
-		FMeshDescription MeshDescription;
-		UE::FoliageBaker::PlaneCover::FPlaneProxyMeshStats Stats;
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> PlaneInfos;
-	};
+	using FProxyMeshBuildData = FFoliageBakerProxyGeometry;
 
 	struct FProxyTextureBuildData
 	{
@@ -576,26 +548,12 @@ namespace
 		FProxyPlaneCoverBuildData& OutData,
 		FString& OutError)
 	{
-		OutData.SourceLODIndex = EditorSettings.SourceLODIndex;
-		if (OutData.SourceLODIndex < 0 || OutData.SourceLODIndex >= MAX_STATIC_MESH_LODS)
+		if (!FFoliageBakerSourceMeshReader::Read(
+				StaticMesh,
+				EditorSettings.SourceLODIndex,
+				OutData,
+				OutError))
 		{
-			OutError = FString::Printf(
-				TEXT("Source LOD index %d is outside the supported range 0-%d."),
-				OutData.SourceLODIndex,
-				MAX_STATIC_MESH_LODS - 1);
-			return false;
-		}
-		if (!UE::FoliageBaker::PlaneCover::ExtractTrianglesFromStaticMesh(
-			&StaticMesh,
-			OutData.SourceLODIndex,
-			OutData.Triangles,
-			OutError))
-		{
-			return false;
-		}
-		if (!ComputeSourceTriangleBounds(OutData.Triangles, OutData.SourceLODBounds))
-		{
-			OutError = FString::Printf(TEXT("Source LOD %d has no valid bounds."), OutData.SourceLODIndex);
 			return false;
 		}
 
