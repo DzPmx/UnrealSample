@@ -6,6 +6,9 @@
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerProxyGeometry
 {
+	FFoliageBakerProxyGeometry();
+	~FFoliageBakerProxyGeometry();
+
 	FMeshDescription MeshDescription;
 	UE::FoliageBaker::PlaneCover::FPlaneProxyMeshStats Stats;
 	TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> PlaneInfos;

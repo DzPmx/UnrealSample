@@ -20,6 +20,7 @@ public class FoliageBakerEditorCommon : ModuleRules
 			{
 				"AssetRegistry",
 				"Engine",
+				"InputCore",
 				"Slate",
 				"SlateCore",
 				"UnrealEd",
