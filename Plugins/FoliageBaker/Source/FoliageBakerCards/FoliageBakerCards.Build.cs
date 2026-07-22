@@ -20,6 +20,11 @@ public class FoliageBakerCards : ModuleRules
 				"Engine",
 				"FoliageBakerCore",
 				"FoliageBakerEditorCommon",
+				"MaterialBaking",
+				"MeshDescription",
+				"MeshReductionInterface",
+				"MeshUtilitiesCommon",
+				"StaticMeshDescription",
 			}
 		);
 	}

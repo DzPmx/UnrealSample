@@ -33,7 +33,7 @@ enum class EFoliageBakerCrossCardGeometryMode : uint8
 	SeparateOneSidedFaces
 };
 
-struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
+struct FFoliageBakerCardBakeRequest
 {
 	UStaticMesh* SourceStaticMesh = nullptr;
 	UMaterialInstanceConstant* MaterialTemplate = nullptr;
@@ -84,7 +84,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeRequest
 	FString MaterialInstanceNameSuffix;
 };
 
-struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeResult
+struct FFoliageBakerCardBakeResult
 {
 	bool bSucceeded = false;
 	bool bCancelled = false;
@@ -100,7 +100,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerCardBakeResult
 };
 
 
-class FOLIAGEBAKERCORE_API FFoliageBakerCardBaker final
+class FFoliageBakerCardBaker final
 {
 public:
 	static FFoliageBakerCardBakeResult Bake(const FFoliageBakerCardBakeRequest& Request);

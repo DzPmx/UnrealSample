@@ -5,14 +5,14 @@
 
 class UStaticMesh;
 
-struct FOLIAGEBAKERCORE_API FFoliageBakerMeshOutputSelection
+struct FOLIAGEBAKEREDITORCOMMON_API FFoliageBakerMeshOutputSelection
 {
 	EFoliageBakerMeshAssetOutputMode OutputMode = EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
 	int32 ReplaceLODIndex = INDEX_NONE;
 	int32 InsertAfterLODIndex = INDEX_NONE;
 };
 
-class FOLIAGEBAKERCORE_API FFoliageBakerMeshOutputDialog final
+class FOLIAGEBAKEREDITORCOMMON_API FFoliageBakerMeshOutputDialog final
 {
 public:
 	static TOptional<FFoliageBakerMeshOutputSelection> OpenAfterBake(

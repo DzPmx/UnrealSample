@@ -23,7 +23,7 @@
 #include "StaticMeshOperations.h"
 #include "StaticMeshResources.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerCardsCore, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerCards, Log, All);
 
 namespace
 {
@@ -1146,7 +1146,7 @@ namespace
 	{
 		FProxyAssetBuildResult Result;
 		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *StaticMesh.GetName(), *Error);
-		UE_LOG(LogFoliageBakerCardsCore, Warning, TEXT("%s"), *Result.Report);
+		UE_LOG(LogFoliageBakerCards, Warning, TEXT("%s"), *Result.Report);
 		return Result;
 	}
 
@@ -2490,7 +2490,7 @@ namespace
 
 		Result.bSucceeded = true;
 		Result.Report = BuildProxySuccessReport(StaticMesh, EditorSettings, CoverData, MeshData, TextureData, Result);
-		UE_LOG(LogFoliageBakerCardsCore, Display, TEXT("\n%s"), *Result.Report);
+		UE_LOG(LogFoliageBakerCards, Display, TEXT("\n%s"), *Result.Report);
 		return Result;
 	}
 
