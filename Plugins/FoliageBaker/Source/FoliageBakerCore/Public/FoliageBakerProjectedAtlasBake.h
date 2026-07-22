@@ -41,14 +41,34 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		MaterialResolver::FTrunkLeafMaterialAverages MaterialAverages;
 	};
 
-	struct FOLIAGEBAKERCORE_API FRequest
+	struct FOLIAGEBAKERCORE_API FInputs
 	{
-		const UStaticMesh* SourceStaticMesh = nullptr;
-		FBoxSphereBounds SourceLODBounds = FBoxSphereBounds(ForceInitToZero);
-		const TArray<PlaneCover::FSourceTriangle>* Triangles = nullptr;
-		const TArray<PlaneCover::FPlaneProxyPlaneInfo>* PlaneInfos = nullptr;
-		const PlaneCover::FPlaneProxyMeshStats* ProxyStats = nullptr;
-		const PlaneCover::FPlaneProxySettings* Settings = nullptr;
+		FInputs(
+			const UStaticMesh& InSourceStaticMesh,
+			const FBoxSphereBounds& InSourceLODBounds,
+			const TArray<PlaneCover::FSourceTriangle>& InTriangles,
+			const TArray<PlaneCover::FPlaneProxyPlaneInfo>& InPlaneInfos,
+			const PlaneCover::FPlaneProxyMeshStats& InProxyStats,
+			const PlaneCover::FPlaneProxySettings& InSettings)
+			: SourceStaticMesh(InSourceStaticMesh)
+			, SourceLODBounds(InSourceLODBounds)
+			, Triangles(InTriangles)
+			, PlaneInfos(InPlaneInfos)
+			, ProxyStats(InProxyStats)
+			, Settings(InSettings)
+		{
+		}
+
+		const UStaticMesh& SourceStaticMesh;
+		FBoxSphereBounds SourceLODBounds;
+		const TArray<PlaneCover::FSourceTriangle>& Triangles;
+		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos;
+		const PlaneCover::FPlaneProxyMeshStats& ProxyStats;
+		const PlaneCover::FPlaneProxySettings& Settings;
+	};
+
+	struct FOLIAGEBAKERCORE_API FPolicy
+	{
 		MaterialResolver::FMaterialOutputSelection OutputSelection;
 		ENormalAlphaMode NormalAlphaMode = ENormalAlphaMode::TrunkLeafClassification;
 		EInvalidMaterialPolicy InvalidMaterialPolicy = EInvalidMaterialPolicy::Fail;
@@ -87,7 +107,8 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 	 * Feature modules only select the normal representation and crack policy.
 	 */
 	FOLIAGEBAKERCORE_API bool Bake(
-		const FRequest& Request,
+		const FInputs& Inputs,
+		const FPolicy& Policy,
 		FResult& OutResult,
 		FString& OutError);
 

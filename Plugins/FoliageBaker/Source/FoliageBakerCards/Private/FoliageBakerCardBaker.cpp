@@ -597,24 +597,29 @@ namespace
 		FAtlasBakeStats& OutStats,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FRequest Request;
-		Request.SourceStaticMesh = &SourceStaticMesh;
-		Request.SourceLODBounds = SourceLODBounds;
-		Request.Triangles = &Triangles;
-		Request.PlaneInfos = &PlaneInfos;
-		Request.ProxyStats = &ProxyStats;
-		Request.Settings = &Settings;
-		Request.OutputSelection = OutputSelection;
-		Request.NormalAlphaMode =
+		const UE::FoliageBaker::ProjectedAtlasBake::FInputs Inputs(
+			SourceStaticMesh,
+			SourceLODBounds,
+			Triangles,
+			PlaneInfos,
+			ProxyStats,
+			Settings);
+		UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy;
+		Policy.OutputSelection = OutputSelection;
+		Policy.NormalAlphaMode =
 			UE::FoliageBaker::ProjectedAtlasBake::ENormalAlphaMode::TrunkLeafClassification;
-		Request.bConvertNormalsToCaptureFrame = bConvertNormalsToCaptureFrame;
-		Request.bCaptureSourceTriangleIdAndDepth = bCaptureSourceDepth;
-		Request.DiagnosticName = TEXT("Card atlas");
-		Request.MaterialAlphaPolicyDetails =
+		Policy.bConvertNormalsToCaptureFrame = bConvertNormalsToCaptureFrame;
+		Policy.bCaptureSourceTriangleIdAndDepth = bCaptureSourceDepth;
+		Policy.DiagnosticName = TEXT("Card atlas");
+		Policy.MaterialAlphaPolicyDetails =
 			TEXT("\n    card BaseColor/source-triangle-id/normal/Mix=per-tile source masked shader with shared GPU depth; all materials compete in one depth buffer; no CPU material-property fallback");
 
 		UE::FoliageBaker::ProjectedAtlasBake::FResult Result;
-		if (!UE::FoliageBaker::ProjectedAtlasBake::Bake(Request, Result, OutError))
+		if (!UE::FoliageBaker::ProjectedAtlasBake::Bake(
+				Inputs,
+				Policy,
+				Result,
+				OutError))
 		{
 			return false;
 		}

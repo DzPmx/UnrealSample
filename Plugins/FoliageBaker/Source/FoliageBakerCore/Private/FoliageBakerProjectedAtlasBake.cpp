@@ -30,11 +30,11 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			FMeshData MeshSettings;
 		};
 
-		FString GetDiagnosticName(const FRequest& Request)
+		FString GetDiagnosticName(const FPolicy& Policy)
 		{
-			return Request.DiagnosticName.IsEmpty()
+			return Policy.DiagnosticName.IsEmpty()
 				? FString(TEXT("Projected atlas"))
-				: Request.DiagnosticName;
+				: Policy.DiagnosticName;
 		}
 
 		FColor ConvertEncodedObjectSpaceNormalToCaptureFrame(
@@ -171,10 +171,8 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 		struct FAtlasBakeContext
 		{
-			const FRequest& Request;
-			const UStaticMesh& SourceStaticMesh;
-			const TArray<PlaneCover::FSourceTriangle>& Triangles;
-			const PlaneCover::FPlaneProxySettings& Settings;
+			const FInputs& Inputs;
+			const FPolicy& Policy;
 			const TArray<FStaticMaterial>& SourceMaterials;
 			const FString& DiagnosticName;
 			FResult& OutResult;
@@ -184,72 +182,47 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			TBitArray<>& NormalCoverage;
 		};
 
-		bool BakePlaneSide(
+		struct FPlaneSideTileInputs
+		{
+			TArray<TUniquePtr<FMaterialBakeStorage>> MaterialStorage;
+			FFoliageBakerDepthCorrectTileRequest TileRequest;
+		};
+
+		bool BuildPlaneSideTileInputs(
 			FAtlasBakeContext& Context,
 			const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
-			const FIntPoint& TilePixelMin,
 			const FIntPoint& TileSize,
 			const FVector& CaptureRayDirection,
-			const bool bBackSide)
+			const bool bBackSide,
+			const FPlaneFragments& Fragments,
+			FPlaneSideTileInputs& OutInputs)
 		{
-			const FRequest& Request = Context.Request;
-			const UStaticMesh& SourceStaticMesh = Context.SourceStaticMesh;
-			const TArray<PlaneCover::FSourceTriangle>& Triangles = Context.Triangles;
-			const PlaneCover::FPlaneProxySettings& Settings = Context.Settings;
-			const TArray<FStaticMaterial>& SourceMaterials = Context.SourceMaterials;
-			const FString& DiagnosticName = Context.DiagnosticName;
-			FResult& OutResult = Context.OutResult;
-			FStats& Stats = Context.Stats;
-			FString& OutError = Context.OutError;
-			TBitArray<>& AtlasCoverage = Context.AtlasCoverage;
-			TBitArray<>& NormalCoverage = Context.NormalCoverage;
-			if (TileSize.X <= 0
-				|| TileSize.Y <= 0
-				|| FMath::IsNearlyEqual(PlaneInfo.MaxU, PlaneInfo.MinU)
-				|| FMath::IsNearlyEqual(PlaneInfo.MaxV, PlaneInfo.MinV))
-			{
-				return true;
-			}
-
-			const FPlaneFragments Fragments = CollectPlaneFragments(
-				Triangles,
-				PlaneInfo,
-				Request.bIncludeCrackReductionForTrunkCards,
-				Stats);
-			if (Fragments.TriangleIndices.IsEmpty()
-				&& Fragments.CrackReductionProjections.IsEmpty())
-			{
-				return true;
-			}
-
+			const FInputs& Inputs = Context.Inputs;
+			const FPolicy& Policy = Context.Policy;
+			const TArray<PlaneCover::FSourceTriangle>& Triangles = Inputs.Triangles;
 			const TArray<int32> MaterialIndices =
-				CollectMaterialIndices(
-					Triangles,
-					Fragments);
-			TArray<TUniquePtr<FMaterialBakeStorage>> MaterialStorage;
-			MaterialStorage.Reserve(MaterialIndices.Num());
+				CollectMaterialIndices(Triangles, Fragments);
 
-			FFoliageBakerDepthCorrectTileRequest TileRequest;
+			OutInputs.MaterialStorage.Reserve(MaterialIndices.Num());
+			FFoliageBakerDepthCorrectTileRequest& TileRequest = OutInputs.TileRequest;
 			TileRequest.TextureSize = TileSize;
 			TileRequest.CaptureRayDirection = CaptureRayDirection;
-			TileRequest.SourceBounds = Request.SourceLODBounds;
-			TileRequest.bBakeBaseColor =
-				Request.OutputSelection.bBaseColorOpacity;
-			TileRequest.bBakeObjectSpaceNormal =
-				Request.OutputSelection.bNormalMask;
-			TileRequest.bBakePackedMix = Request.OutputSelection.bMix;
+			TileRequest.SourceBounds = Inputs.SourceLODBounds;
+			TileRequest.bBakeBaseColor = Policy.OutputSelection.bBaseColorOpacity;
+			TileRequest.bBakeObjectSpaceNormal = Policy.OutputSelection.bNormalMask;
+			TileRequest.bBakePackedMix = Policy.OutputSelection.bMix;
 			TileRequest.bBakeRoughnessSpecular =
-				Request.OutputSelection.bMaterialScalarAverages;
+				Policy.OutputSelection.bMaterialScalarAverages;
 			TileRequest.Materials.Reserve(MaterialIndices.Num());
 
 			for (const int32 MaterialIndex : MaterialIndices)
 			{
-				if (!SourceMaterials.IsValidIndex(MaterialIndex)
-					&& Request.InvalidMaterialPolicy == EInvalidMaterialPolicy::Fail)
+				if (!Context.SourceMaterials.IsValidIndex(MaterialIndex)
+					&& Policy.InvalidMaterialPolicy == EInvalidMaterialPolicy::Fail)
 				{
-					OutError = FString::Printf(
+					Context.OutError = FString::Printf(
 						TEXT("%s references invalid material index %d on plane %d (%s)."),
-						*DiagnosticName,
+						*Context.DiagnosticName,
 						MaterialIndex,
 						PlaneInfo.SourcePlaneIndex,
 						bBackSide ? TEXT("back") : TEXT("front"));
@@ -258,18 +231,17 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 				TUniquePtr<FMaterialBakeStorage> Storage =
 					MakeUnique<FMaterialBakeStorage>();
-				Storage->MaterialInterface = SourceMaterials.IsValidIndex(MaterialIndex)
-					? SourceMaterials[MaterialIndex].MaterialInterface
+				Storage->MaterialInterface = Context.SourceMaterials.IsValidIndex(MaterialIndex)
+					? Context.SourceMaterials[MaterialIndex].MaterialInterface
 					: nullptr;
 				if (!Storage->MaterialInterface)
 				{
-					Storage->MaterialInterface =
-						UMaterial::GetDefaultMaterial(MD_Surface);
+					Storage->MaterialInterface = UMaterial::GetDefaultMaterial(MD_Surface);
 				}
 
 				ProjectedMaterialBake::FPlaneSideBakeParams ProjectedBakeParams;
 				ProjectedBakeParams.CaptureRayDirection = CaptureRayDirection;
-				ProjectedBakeParams.AtlasVConvention = Settings.AtlasVConvention;
+				ProjectedBakeParams.AtlasVConvention = Inputs.Settings.AtlasVConvention;
 				ProjectedBakeParams.MaterialIndexFilter = MaterialIndex;
 				ProjectedBakeParams.bBackSide = bBackSide;
 
@@ -293,9 +265,9 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				}
 				if (!bBuiltInput)
 				{
-					OutError = FString::Printf(
+					Context.OutError = FString::Printf(
 						TEXT("%s material input failed for plane %d (%s), material %d: %s"),
-						*DiagnosticName,
+						*Context.DiagnosticName,
 						PlaneInfo.SourcePlaneIndex,
 						bBackSide ? TEXT("back") : TEXT("front"),
 						MaterialIndex,
@@ -303,26 +275,26 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					return false;
 				}
 
-				Stats.RasterizedTriangleReferences += MatchingTriangleCount;
+				Context.Stats.RasterizedTriangleReferences += MatchingTriangleCount;
 				if (Storage->MaterialInterface->GetBlendMode() == BLEND_Masked)
 				{
-					Stats.MaskedMaterialBakeReferences += MatchingTriangleCount;
+					Context.Stats.MaskedMaterialBakeReferences += MatchingTriangleCount;
 				}
 
 				Storage->MeshSettings.MeshDescription = &Storage->MeshDescription;
-				Storage->MeshSettings.Mesh = &SourceStaticMesh;
+				Storage->MeshSettings.Mesh = &Inputs.SourceStaticMesh;
 				Storage->MeshSettings.MaterialIndices.Add(0);
 				Storage->MeshSettings.TextureCoordinateBox =
 					FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
 				Storage->MeshSettings.TextureCoordinateIndex = 0;
 				Storage->MeshSettings.LightMapIndex = 0;
 				Storage->MeshSettings.PrimitiveData =
-					FPrimitiveData(Request.SourceLODBounds);
+					FPrimitiveData(Inputs.SourceLODBounds);
 				Storage->MeshSettings.CustomTextureCoordinates =
 					MoveTemp(Storage->CustomTileUVs);
 
 				FMaterialBakeStorage* StoragePtr = Storage.Get();
-				MaterialStorage.Add(MoveTemp(Storage));
+				OutInputs.MaterialStorage.Add(MoveTemp(Storage));
 				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput =
 					TileRequest.Materials.AddDefaulted_GetRef();
 				MaterialInput.MaterialInterface = StoragePtr->MaterialInterface;
@@ -330,52 +302,66 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				MaterialInput.RasterSourceTriangleIndices =
 					&StoragePtr->RasterSourceTriangleIndices;
 			}
+			return true;
+		}
 
-			if (TileRequest.Materials.IsEmpty())
-			{
-				return true;
-			}
-
-			FFoliageBakerDepthCorrectTileResult TileResult;
+		bool BakePlaneSideTile(
+			FAtlasBakeContext& Context,
+			const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
+			const bool bBackSide,
+			const FPlaneSideTileInputs& Inputs,
+			FFoliageBakerDepthCorrectTileResult& OutResult)
+		{
 			FString TileError;
 			if (!FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
-					TileRequest,
-					TileResult,
+					Inputs.TileRequest,
+					OutResult,
 					&TileError))
 			{
-				OutError = FString::Printf(
+				Context.OutError = FString::Printf(
 					TEXT("%s tile bake failed for plane %d (%s): %s"),
-					*DiagnosticName,
+					*Context.DiagnosticName,
 					PlaneInfo.SourcePlaneIndex,
 					bBackSide ? TEXT("back") : TEXT("front"),
 					*TileError);
 				return false;
 			}
 
-			const int32 TilePixelCount = TileSize.X * TileSize.Y;
-			if (!ValidateTileResult(
-					TileResult,
-					Request.OutputSelection,
-					TilePixelCount,
-					DiagnosticName,
-					PlaneInfo,
-					bBackSide,
-					OutError))
-			{
-				return false;
-			}
+			const int32 ExpectedPixelCount =
+				Inputs.TileRequest.TextureSize.X * Inputs.TileRequest.TextureSize.Y;
+			return ValidateTileResult(
+				OutResult,
+				Context.Policy.OutputSelection,
+				ExpectedPixelCount,
+				Context.DiagnosticName,
+				PlaneInfo,
+				bBackSide,
+				Context.OutError);
+		}
 
+		bool ResolvePlaneSideTile(
+			FAtlasBakeContext& Context,
+			const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
+			const FIntPoint& TilePixelMin,
+			const FIntPoint& TileSize,
+			const FVector& CaptureRayDirection,
+			const bool bBackSide,
+			const FFoliageBakerDepthCorrectTileResult& TileResult)
+		{
+			const FPolicy& Policy = Context.Policy;
+			const TArray<PlaneCover::FSourceTriangle>& Triangles =
+				Context.Inputs.Triangles;
 			for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
 			{
 				const int32 AtlasY = TilePixelMin.Y + LocalY;
-				if (AtlasY < 0 || AtlasY >= Stats.Height)
+				if (AtlasY < 0 || AtlasY >= Context.Stats.Height)
 				{
 					continue;
 				}
 				for (int32 LocalX = 0; LocalX < TileSize.X; ++LocalX)
 				{
 					const int32 AtlasX = TilePixelMin.X + LocalX;
-					if (AtlasX < 0 || AtlasX >= Stats.Width)
+					if (AtlasX < 0 || AtlasX >= Context.Stats.Width)
 					{
 						continue;
 					}
@@ -390,9 +376,9 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					}
 					if (!Triangles.IsValidIndex(SourceTriangleIndex))
 					{
-						OutError = FString::Printf(
+						Context.OutError = FString::Printf(
 							TEXT("%s decoded invalid triangle %d at pixel (%d,%d) for plane %d (%s)."),
-							*DiagnosticName,
+							*Context.DiagnosticName,
 							SourceTriangleIndex,
 							LocalX,
 							LocalY,
@@ -405,84 +391,137 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 						Triangles[SourceTriangleIndex];
 					const uint8 ClassificationValue =
 						Atlas::EncodeTrunkLeafAlpha(SourceTriangle.bIsTrunk);
-					const int32 AtlasPixelIndex = AtlasY * Stats.Width + AtlasX;
+					const int32 AtlasPixelIndex =
+						AtlasY * Context.Stats.Width + AtlasX;
 
-					if (Request.OutputSelection.bMaterialScalarAverages)
+					if (Policy.OutputSelection.bMaterialScalarAverages)
 					{
-						Stats.MaterialAverages.AddSample(
+						Context.Stats.MaterialAverages.AddSample(
 							SourceTriangle.bIsTrunk,
 							TileResult.Roughness[TilePixelIndex].R,
 							TileResult.Specular[TilePixelIndex].R);
 					}
-					if (Request.OutputSelection.bBaseColorOpacity)
+					if (Policy.OutputSelection.bBaseColorOpacity)
 					{
 						FColor Color = TileResult.BaseColor[TilePixelIndex];
 						Color.A = ClassificationValue;
-						OutResult.BaseColorOpacityPixels[AtlasPixelIndex] = Color;
+						Context.OutResult.BaseColorOpacityPixels[AtlasPixelIndex] = Color;
 					}
-					AtlasCoverage[AtlasPixelIndex] = true;
+					Context.AtlasCoverage[AtlasPixelIndex] = true;
 
-					if (Request.bCaptureSourceTriangleIdAndDepth)
+					if (Policy.bCaptureSourceTriangleIdAndDepth)
 					{
-						OutResult.SourceTriangleIdAndDepthPixels[AtlasPixelIndex] =
+						Context.OutResult.SourceTriangleIdAndDepthPixels[AtlasPixelIndex] =
 							TileResult.SourceTriangleIdAndDepth[TilePixelIndex];
 					}
-					if (Request.OutputSelection.bNormalMask)
+					if (Policy.OutputSelection.bNormalMask)
 					{
 						FColor Normal = TileResult.ObjectSpaceNormal[TilePixelIndex];
-						if (Request.bConvertNormalsToCaptureFrame)
+						if (Policy.bConvertNormalsToCaptureFrame)
 						{
 							Normal = ConvertEncodedObjectSpaceNormalToCaptureFrame(
 								Normal,
 								CaptureRayDirection);
 						}
-						Normal.A = Request.NormalAlphaMode
+						Normal.A = Policy.NormalAlphaMode
 							== ENormalAlphaMode::TrunkLeafClassification
 							? ClassificationValue
 							: TileResult.SourceTriangleIdAndDepth[TilePixelIndex].A;
-						OutResult.NormalPixels[AtlasPixelIndex] = Normal;
-						NormalCoverage[AtlasPixelIndex] = true;
+						Context.OutResult.NormalPixels[AtlasPixelIndex] = Normal;
+						Context.NormalCoverage[AtlasPixelIndex] = true;
 					}
-					if (Request.OutputSelection.bMix)
+					if (Policy.OutputSelection.bMix)
 					{
-						OutResult.MixPixels[AtlasPixelIndex] =
+						Context.OutResult.MixPixels[AtlasPixelIndex] =
 							TileResult.PackedMix[TilePixelIndex];
 					}
-					++Stats.PaintedPixels;
+					++Context.Stats.PaintedPixels;
 				}
 			}
 			return true;
 		}
+
+		bool BakePlaneSide(
+			FAtlasBakeContext& Context,
+			const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo,
+			const FIntPoint& TilePixelMin,
+			const FIntPoint& TileSize,
+			const FVector& CaptureRayDirection,
+			const bool bBackSide)
+		{
+			if (TileSize.X <= 0
+				|| TileSize.Y <= 0
+				|| FMath::IsNearlyEqual(PlaneInfo.MaxU, PlaneInfo.MinU)
+				|| FMath::IsNearlyEqual(PlaneInfo.MaxV, PlaneInfo.MinV))
+			{
+				return true;
+			}
+
+			const FPlaneFragments Fragments = CollectPlaneFragments(
+				Context.Inputs.Triangles,
+				PlaneInfo,
+				Context.Policy.bIncludeCrackReductionForTrunkCards,
+				Context.Stats);
+			if (Fragments.TriangleIndices.IsEmpty()
+				&& Fragments.CrackReductionProjections.IsEmpty())
+			{
+				return true;
+			}
+
+			FPlaneSideTileInputs TileInputs;
+			if (!BuildPlaneSideTileInputs(
+					Context,
+					PlaneInfo,
+					TileSize,
+					CaptureRayDirection,
+					bBackSide,
+					Fragments,
+					TileInputs))
+			{
+				return false;
+			}
+			if (TileInputs.TileRequest.Materials.IsEmpty())
+			{
+				return true;
+			}
+
+			FFoliageBakerDepthCorrectTileResult TileResult;
+			return BakePlaneSideTile(
+					Context,
+					PlaneInfo,
+					bBackSide,
+					TileInputs,
+					TileResult)
+				&& ResolvePlaneSideTile(
+					Context,
+					PlaneInfo,
+					TilePixelMin,
+					TileSize,
+					CaptureRayDirection,
+					bBackSide,
+					TileResult);
+		}
 	}
 
-	bool Bake(const FRequest& Request, FResult& OutResult, FString& OutError)
+	bool Bake(
+		const FInputs& Inputs,
+		const FPolicy& Policy,
+		FResult& OutResult,
+		FString& OutError)
 	{
 		OutResult = FResult();
 		OutError.Reset();
 
-		const FString DiagnosticName = GetDiagnosticName(Request);
-		if (!Request.SourceStaticMesh
-			|| !Request.Triangles
-			|| !Request.PlaneInfos
-			|| !Request.ProxyStats
-			|| !Request.Settings)
-		{
-			OutError = FString::Printf(
-				TEXT("%s request is missing required source or atlas data."),
-				*DiagnosticName);
-			return false;
-		}
-
-		const UStaticMesh& SourceStaticMesh = *Request.SourceStaticMesh;
-		const TArray<PlaneCover::FSourceTriangle>& Triangles = *Request.Triangles;
-		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos = *Request.PlaneInfos;
-		const PlaneCover::FPlaneProxyMeshStats& ProxyStats = *Request.ProxyStats;
-		const PlaneCover::FPlaneProxySettings& Settings = *Request.Settings;
+		const FString DiagnosticName = GetDiagnosticName(Policy);
+		const UStaticMesh& SourceStaticMesh = Inputs.SourceStaticMesh;
+		const TArray<PlaneCover::FSourceTriangle>& Triangles = Inputs.Triangles;
+		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos = Inputs.PlaneInfos;
+		const PlaneCover::FPlaneProxyMeshStats& ProxyStats = Inputs.ProxyStats;
 		FStats& Stats = OutResult.Stats;
 		Stats.Width = ProxyStats.AtlasWidth;
 		Stats.Height = ProxyStats.AtlasHeight;
 		Stats.TileResolution = ProxyStats.AtlasTileResolution;
-		Stats.MaterialAlphaPolicyDetails = Request.MaterialAlphaPolicyDetails;
+		Stats.MaterialAlphaPolicyDetails = Policy.MaterialAlphaPolicyDetails;
 
 		const int64 AtlasPixelCount64 =
 			static_cast<int64>(Stats.Width) * static_cast<int64>(Stats.Height);
@@ -500,7 +539,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		const int32 AtlasPixelCount = static_cast<int32>(AtlasPixelCount64);
 
 		OutResult.BaseColorOpacityPixels.Init(FColor(0, 0, 0, 0), AtlasPixelCount);
-		if (Request.OutputSelection.bNormalMask)
+		if (Policy.OutputSelection.bNormalMask)
 		{
 			OutResult.NormalPixels.Init(
 				ProjectedMaterialBake::EncodeObjectSpaceNormalToColor(
@@ -508,11 +547,11 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					255),
 				AtlasPixelCount);
 		}
-		if (Request.OutputSelection.bMix)
+		if (Policy.OutputSelection.bMix)
 		{
 			OutResult.MixPixels.Init(FColor(255, 128, 0, 0), AtlasPixelCount);
 		}
-		if (Request.bCaptureSourceTriangleIdAndDepth)
+		if (Policy.bCaptureSourceTriangleIdAndDepth)
 		{
 			OutResult.SourceTriangleIdAndDepthPixels.Init(
 				FColor::Black,
@@ -569,10 +608,8 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			SourceStaticMesh.GetStaticMaterials();
 
 		FAtlasBakeContext Context{
-			Request,
-			SourceStaticMesh,
-			Triangles,
-			Settings,
+			Inputs,
+			Policy,
 			SourceMaterials,
 			DiagnosticName,
 			OutResult,
@@ -612,7 +649,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			Stats.Width,
 			Stats.Height,
 			PlaneInfos);
-		if (Request.OutputSelection.bNormalMask)
+		if (Policy.OutputSelection.bNormalMask)
 		{
 			Atlas::FillTransparentRGBInsideTiles(
 				OutResult.NormalPixels,
@@ -621,7 +658,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				PlaneInfos,
 				&NormalCoverage,
 				false);
-			const uint8 UncoveredAlpha = Request.NormalAlphaMode
+			const uint8 UncoveredAlpha = Policy.NormalAlphaMode
 				== ENormalAlphaMode::TrunkLeafClassification
 				? 0
 				: 255;
@@ -634,7 +671,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			}
 			Atlas::NormalizeEncodedObjectSpaceNormals(OutResult.NormalPixels);
 		}
-		if (Request.OutputSelection.bMix)
+		if (Policy.OutputSelection.bMix)
 		{
 			Atlas::FillTransparentRGBInsideTiles(
 				OutResult.MixPixels,

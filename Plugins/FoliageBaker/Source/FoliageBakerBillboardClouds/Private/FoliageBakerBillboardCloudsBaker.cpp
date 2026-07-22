@@ -291,25 +291,30 @@ namespace
 		FAtlasBakeStats& OutStats,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FRequest Request;
-		Request.SourceStaticMesh = &SourceStaticMesh;
-		Request.SourceLODBounds = SourceLODBounds;
-		Request.Triangles = &Triangles;
-		Request.PlaneInfos = &PlaneInfos;
-		Request.ProxyStats = &ProxyStats;
-		Request.Settings = &Settings;
-		Request.OutputSelection = OutputSelection;
-		Request.NormalAlphaMode =
+		const UE::FoliageBaker::ProjectedAtlasBake::FInputs Inputs(
+			SourceStaticMesh,
+			SourceLODBounds,
+			Triangles,
+			PlaneInfos,
+			ProxyStats,
+			Settings);
+		UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy;
+		Policy.OutputSelection = OutputSelection;
+		Policy.NormalAlphaMode =
 			UE::FoliageBaker::ProjectedAtlasBake::ENormalAlphaMode::SourceDepth;
-		Request.InvalidMaterialPolicy =
+		Policy.InvalidMaterialPolicy =
 			UE::FoliageBaker::ProjectedAtlasBake::EInvalidMaterialPolicy::UseDefaultMaterial;
-		Request.bIncludeCrackReductionForTrunkCards = false;
-		Request.DiagnosticName = TEXT("BillboardClouds atlas");
-		Request.MaterialAlphaPolicyDetails =
+		Policy.bIncludeCrackReductionForTrunkCards = false;
+		Policy.DiagnosticName = TEXT("BillboardClouds atlas");
+		Policy.MaterialAlphaPolicyDetails =
 			TEXT(" source masked-shader coverage controls one shared per-tile RDG depth competition; the winning fragment supplies BaseColor, object normal, source triangle ID, packed Mix, and shared-range depth; no CPU material-property fallback");
 
 		UE::FoliageBaker::ProjectedAtlasBake::FResult Result;
-		if (!UE::FoliageBaker::ProjectedAtlasBake::Bake(Request, Result, OutError))
+		if (!UE::FoliageBaker::ProjectedAtlasBake::Bake(
+				Inputs,
+				Policy,
+				Result,
+				OutError))
 		{
 			return false;
 		}
