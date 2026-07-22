@@ -221,7 +221,8 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 				const PlaneCover::FSourceTriangle& Triangle,
 				const FVector Positions[3]) -> bool
 			{
-				if (Params.MaterialIndexFilter != INDEX_NONE && Triangle.MaterialIndex != Params.MaterialIndexFilter)
+				if (Params.MaterialIndexFilter.IsSet()
+					&& Triangle.MaterialIndex != Params.MaterialIndexFilter.GetValue())
 				{
 					return false;
 				}
@@ -433,7 +434,9 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 			{
 				*OutError = FString::Printf(
 					TEXT("Projected material bake found no triangles for material %d."),
-					Params.MaterialIndexFilter);
+					Params.MaterialIndexFilter.IsSet()
+						? Params.MaterialIndexFilter.GetValue()
+						: INDEX_NONE);
 			}
 			return false;
 		}

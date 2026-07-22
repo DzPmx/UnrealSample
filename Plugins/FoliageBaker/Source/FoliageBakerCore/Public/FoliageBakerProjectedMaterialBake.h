@@ -11,7 +11,7 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 	{
 		FVector CaptureRayDirection = FVector::ZeroVector;
 		PlaneCover::EAtlasVConvention AtlasVConvention = PlaneCover::EAtlasVConvention::GeometryMinVToTextureMinV;
-		int32 MaterialIndexFilter = INDEX_NONE;
+		TOptional<int32> MaterialIndexFilter;
 		int32 NumSourceUVChannels = 0;
 		bool bBackSide = false;
 	};

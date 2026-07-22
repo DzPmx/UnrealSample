@@ -104,23 +104,14 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 		TArray<int32> CollectMaterialIndices(
 			const TArray<PlaneCover::FSourceTriangle>& Triangles,
-			const FPlaneFragments& Fragments,
-			const EInvalidMaterialPolicy InvalidMaterialPolicy)
+			const FPlaneFragments& Fragments)
 		{
 			TSet<int32> MaterialIndices;
-			auto AddMaterialIndex = [&MaterialIndices, InvalidMaterialPolicy](
-				const int32 MaterialIndex)
-			{
-				MaterialIndices.Add(
-					InvalidMaterialPolicy == EInvalidMaterialPolicy::UseDefaultMaterial
-						? FMath::Max(0, MaterialIndex)
-						: MaterialIndex);
-			};
 			for (const int32 TriangleIndex : Fragments.TriangleIndices)
 			{
 				if (Triangles.IsValidIndex(TriangleIndex))
 				{
-					AddMaterialIndex(Triangles[TriangleIndex].MaterialIndex);
+					MaterialIndices.Add(Triangles[TriangleIndex].MaterialIndex);
 				}
 			}
 			for (const PlaneCover::FCrackReductionProjection& Projection :
@@ -128,7 +119,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			{
 				if (Triangles.IsValidIndex(Projection.TriangleIndex))
 				{
-					AddMaterialIndex(
+					MaterialIndices.Add(
 						Triangles[Projection.TriangleIndex].MaterialIndex);
 				}
 			}
@@ -234,8 +225,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			const TArray<int32> MaterialIndices =
 				CollectMaterialIndices(
 					Triangles,
-					Fragments,
-					Request.InvalidMaterialPolicy);
+					Fragments);
 			TArray<TUniquePtr<FMaterialBakeStorage>> MaterialStorage;
 			MaterialStorage.Reserve(MaterialIndices.Num());
 
