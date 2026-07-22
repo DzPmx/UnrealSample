@@ -7,6 +7,9 @@ struct FMeshDescription;
 
 namespace UE::FoliageBaker::PlaneCover
 {
+	// Unreal Static Meshes support up to eight source UV channels. Material
+	// projection keeps the last two renderer texcoords reserved for bake data.
+	constexpr int32 MaxSourceMeshUVChannels = 8;
 	constexpr int32 MaxMaterialBakeUVChannels = 6;
 
 	enum class EPlaneProxyCrackReductionMode : uint8
@@ -37,7 +40,7 @@ namespace UE::FoliageBaker::PlaneCover
 	{
 		FVector Vertices[3] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 		FVector2f UVs[3] = { FVector2f::ZeroVector, FVector2f::ZeroVector, FVector2f::ZeroVector };
-		FVector2f UVChannels[MaxMaterialBakeUVChannels][3] = {};
+		FVector2f UVChannels[MaxSourceMeshUVChannels][3] = {};
 		FVector VertexNormals[3] = { FVector::UpVector, FVector::UpVector, FVector::UpVector };
 		FVector VertexTangents[3] = { FVector::ForwardVector, FVector::ForwardVector, FVector::ForwardVector };
 		FVector4f VertexColors[3] =

@@ -1352,7 +1352,7 @@ namespace UE::FoliageBaker::PlaneCover
 			const bool bHasUVs = SourceUVChannelCount > 0;
 			const bool bHasVertexColors = ColorVertexBuffer.GetNumVertices() == PositionBuffer.GetNumVertices();
 			const int32 StoredUVChannelCount = bHasUVs
-				? FMath::Min(SourceUVChannelCount, UE::FoliageBaker::PlaneCover::MaxMaterialBakeUVChannels)
+				? FMath::Min(SourceUVChannelCount, UE::FoliageBaker::PlaneCover::MaxSourceMeshUVChannels)
 				: 0;
 			OutTriangles.Reserve(Indices.Num() / 3);
 
@@ -1626,7 +1626,7 @@ namespace UE::FoliageBaker::PlaneCover
 				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
 				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
-					const int32 StoredUVChannelCount = FMath::Min(VertexInstanceUVs.GetNumChannels(), UE::FoliageBaker::PlaneCover::MaxMaterialBakeUVChannels);
+					const int32 StoredUVChannelCount = FMath::Min(VertexInstanceUVs.GetNumChannels(), UE::FoliageBaker::PlaneCover::MaxSourceMeshUVChannels);
 					for (int32 UVChannel = 0; UVChannel < StoredUVChannelCount; ++UVChannel)
 					{
 						for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
