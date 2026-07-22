@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerMeshOutput.h"
 
 class UMaterialInstanceConstant;
 class UStaticMesh;
@@ -27,5 +28,6 @@ public:
 	static FFoliageBakerImpostorBakeResult Bake(
 		UStaticMesh& SourceStaticMesh,
 		UMaterialInstanceConstant& MaterialTemplate,
-		const UFoliageBakerImpostorSettings& Settings);
+		const UFoliageBakerImpostorSettings& Settings,
+		const FFoliageBakerMeshOutputSelector& MeshOutputSelector);
 };

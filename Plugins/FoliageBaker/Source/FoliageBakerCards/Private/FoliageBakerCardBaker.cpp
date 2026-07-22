@@ -4,7 +4,6 @@
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerL1Visibility.h"
 #include "FoliageBakerMaterialResolver.h"
-#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedAtlasBake.h"
 #include "FoliageBakerProxyGeometry.h"
@@ -2382,7 +2381,8 @@ namespace
 
 	FProxyAssetBuildResult BuildCardProxyAsset(
 		UStaticMesh& StaticMesh,
-		const FFoliageBakerCardBakeRequest& EditorSettings)
+		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 	{
 		FString Error;
 		FProxyPlaneCoverBuildData CoverData;
@@ -2398,7 +2398,7 @@ namespace
 		}
 
 		const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
-			FFoliageBakerMeshOutputDialog::OpenAfterBake(StaticMesh, EditorSettings.SourceLODIndex);
+			MeshOutputSelector.Execute(StaticMesh, EditorSettings.SourceLODIndex);
 		if (!MeshOutputSelection.IsSet())
 		{
 			return MakeProxyBuildCancelled(StaticMesh);
@@ -2497,7 +2497,9 @@ namespace
 }
 
 
-FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCardBakeRequest& Request)
+FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(
+	const FFoliageBakerCardBakeRequest& Request,
+	const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 {
 	FFoliageBakerCardBakeResult OutResult;
 	if (!Request.SourceStaticMesh)
@@ -2525,6 +2527,13 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 		&& !Request.bBakeUpperHemisphereL1Visibility)
 	{
 		OutResult.Report = FString::Printf(TEXT("%s\n  failed: no texture output is enabled."), *Request.SourceStaticMesh->GetName());
+		return OutResult;
+	}
+	if (!MeshOutputSelector.IsBound())
+	{
+		OutResult.Report = FString::Printf(
+			TEXT("%s\n  failed: mesh output selector is not bound."),
+			*Request.SourceStaticMesh->GetName());
 		return OutResult;
 	}
 	if (Request.bBakeUpperHemisphereL1Visibility
@@ -2610,7 +2619,10 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 		FeatureSuffix + Request.UpperHemisphereL1VisibilityTextureSuffix;
 	SanitizedRequest.MaterialInstanceNameSuffix = FeatureSuffix + Request.MaterialInstanceNameSuffix;
 
-	const FProxyAssetBuildResult InternalResult = BuildCardProxyAsset(*Request.SourceStaticMesh, SanitizedRequest);
+	const FProxyAssetBuildResult InternalResult = BuildCardProxyAsset(
+		*Request.SourceStaticMesh,
+		SanitizedRequest,
+		MeshOutputSelector);
 	OutResult.bSucceeded = InternalResult.bSucceeded;
 	OutResult.bCancelled = InternalResult.bCancelled;
 	OutResult.ProxyMesh = InternalResult.ProxyMesh;

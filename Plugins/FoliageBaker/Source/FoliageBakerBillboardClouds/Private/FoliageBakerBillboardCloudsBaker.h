@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerMeshOutput.h"
 
 class UFoliageBakerBillboardCloudsSettings;
 class UStaticMesh;
@@ -21,5 +22,6 @@ public:
 
 	static FFoliageBakerBillboardCloudsBakeResult Bake(
 		UStaticMesh& StaticMesh,
-		const UFoliageBakerBillboardCloudsSettings& Settings);
+		const UFoliageBakerBillboardCloudsSettings& Settings,
+		const FFoliageBakerMeshOutputSelector& MeshOutputSelector);
 };

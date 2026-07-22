@@ -4,6 +4,7 @@
 #include "FoliageBakerCardBaker.h"
 #include "FoliageBakerCardsSettings.h"
 #include "FoliageBakerFeatureTool.h"
+#include "FoliageBakerMeshOutputDialog.h"
 #include "Materials/MaterialInstanceConstant.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerCardsModule"
@@ -254,7 +255,9 @@ void FFoliageBakerCardsModule::Bake(const EFoliageBakerCardMode Mode)
 				{
 					const FFoliageBakerCardBakeResult Result =
 						FFoliageBakerCardBaker::Bake(
-							BuildRequest(StaticMesh, *MaterialTemplate, *Settings));
+							BuildRequest(StaticMesh, *MaterialTemplate, *Settings),
+							FFoliageBakerMeshOutputSelector::CreateStatic(
+								&FFoliageBakerMeshOutputDialog::OpenAfterBake));
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);
 				}));
 

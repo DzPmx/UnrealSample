@@ -3,6 +3,7 @@
 #include "FoliageBakerBillboardCloudsBaker.h"
 #include "FoliageBakerBillboardCloudsSettings.h"
 #include "FoliageBakerFeatureTool.h"
+#include "FoliageBakerMeshOutputDialog.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceConstant.h"
 
@@ -112,7 +113,9 @@ void FFoliageBakerBillboardCloudsModule::Bake()
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(
 						FFoliageBakerBillboardCloudsBaker::Bake(
 							StaticMesh,
-							*ToolSettings));
+							*ToolSettings,
+							FFoliageBakerMeshOutputSelector::CreateStatic(
+								&FFoliageBakerMeshOutputDialog::OpenAfterBake)));
 				}));
 	FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(
 		BatchResult.CreatedAssets);

@@ -4,7 +4,6 @@
 #include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerMaterialResolver.h"
-#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerKMeansPlaneCover.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedAtlasBake.h"
@@ -954,7 +953,8 @@ namespace
 
 	FProxyAssetBuildResult BuildBillboardCloudProxyAsset(
 		UStaticMesh& StaticMesh,
-		const UFoliageBakerBillboardCloudsSettings& EditorSettings)
+		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
+		const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 	{
 		FString Error;
 		FProxyPlaneCoverBuildData CoverData;
@@ -970,7 +970,7 @@ namespace
 		}
 
 		const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
-			FFoliageBakerMeshOutputDialog::OpenAfterBake(StaticMesh, EditorSettings.SourceLODIndex);
+			MeshOutputSelector.Execute(StaticMesh, EditorSettings.SourceLODIndex);
 		if (!MeshOutputSelection.IsSet())
 		{
 			return MakeProxyBuildCancelled(StaticMesh);
@@ -1062,10 +1062,22 @@ bool FFoliageBakerBillboardCloudsBaker::HasAnyAtlasOutput(
 
 FFoliageBakerBillboardCloudsBakeResult FFoliageBakerBillboardCloudsBaker::Bake(
 	UStaticMesh& StaticMesh,
-	const UFoliageBakerBillboardCloudsSettings& Settings)
+	const UFoliageBakerBillboardCloudsSettings& Settings,
+	const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 {
+	if (!MeshOutputSelector.IsBound())
+	{
+		FFoliageBakerBillboardCloudsBakeResult Result;
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: mesh output selector is not bound."),
+			*StaticMesh.GetName());
+		return Result;
+	}
 	const FProxyAssetBuildResult BuildResult =
-		BuildBillboardCloudProxyAsset(StaticMesh, Settings);
+		BuildBillboardCloudProxyAsset(
+			StaticMesh,
+			Settings,
+			MeshOutputSelector);
 	FFoliageBakerBillboardCloudsBakeResult Result;
 	Result.bSucceeded = BuildResult.bSucceeded;
 	Result.bCancelled = BuildResult.bCancelled;

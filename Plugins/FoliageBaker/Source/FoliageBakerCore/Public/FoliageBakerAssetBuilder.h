@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Engine/TextureDefines.h"
 #include "FoliageBakerMaterialResolver.h"
+#include "FoliageBakerMeshOutput.h"
 #include "FoliageBakerPlaneCover.h"
 #include "UObject/StrongObjectPtr.h"
 
@@ -62,14 +63,6 @@ enum class EFoliageBakerExistingAssetPolicy : uint8
 {
 	ReuseOrCreate,
 	CreateUnique
-};
-
-enum class EFoliageBakerMeshAssetOutputMode : uint8
-{
-	SeparateMeshAsset,
-	AddToSourceMeshLOD,
-	InsertIntoSourceMeshLOD,
-	ReplaceSourceMeshLOD
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerGeneratedAssetOutputFolders

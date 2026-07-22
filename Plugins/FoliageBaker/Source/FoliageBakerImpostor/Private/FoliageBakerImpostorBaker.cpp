@@ -5,7 +5,6 @@
 #include "FoliageBakerImpostorSettings.h"
 #include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerMaterialResolver.h"
-#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedMaterialBake.h"
 #include "Containers/Set.h"
@@ -1124,10 +1123,18 @@ namespace
 FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	UStaticMesh& SourceStaticMesh,
 	UMaterialInstanceConstant& MaterialTemplate,
-	const UFoliageBakerImpostorSettings& Settings)
+	const UFoliageBakerImpostorSettings& Settings,
+	const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 {
 	FFoliageBakerImpostorBakeResult Result;
 	FString Error;
+	if (!MeshOutputSelector.IsBound())
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: no mesh output selector was provided."),
+			*SourceStaticMesh.GetName());
+		return Result;
+	}
 	if (Settings.SourceLODIndex < 0 || Settings.SourceLODIndex >= MAX_STATIC_MESH_LODS)
 	{
 		Result.Report = FString::Printf(TEXT("%s\n  failed: Source LOD Index is outside the supported range."), *SourceStaticMesh.GetName());
@@ -1203,7 +1210,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	}
 
 	const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
-		FFoliageBakerMeshOutputDialog::OpenAfterBake(SourceStaticMesh, Settings.SourceLODIndex);
+		MeshOutputSelector.Execute(SourceStaticMesh, Settings.SourceLODIndex);
 	if (!MeshOutputSelection.IsSet())
 	{
 		Result.bCancelled = true;

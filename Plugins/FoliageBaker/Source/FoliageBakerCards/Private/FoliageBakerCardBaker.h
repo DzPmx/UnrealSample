@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "FoliageBakerCardsSettings.h"
+#include "FoliageBakerMeshOutput.h"
 
 class UMaterialInstanceConstant;
 class UStaticMesh;
@@ -77,5 +78,7 @@ struct FFoliageBakerCardBakeResult
 class FFoliageBakerCardBaker final
 {
 public:
-	static FFoliageBakerCardBakeResult Bake(const FFoliageBakerCardBakeRequest& Request);
+	static FFoliageBakerCardBakeResult Bake(
+		const FFoliageBakerCardBakeRequest& Request,
+		const FFoliageBakerMeshOutputSelector& MeshOutputSelector);
 };

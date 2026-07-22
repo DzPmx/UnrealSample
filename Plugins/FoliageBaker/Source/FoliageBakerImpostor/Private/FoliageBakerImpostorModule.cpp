@@ -4,6 +4,7 @@
 #include "FoliageBakerFeatureTool.h"
 #include "FoliageBakerImpostorBaker.h"
 #include "FoliageBakerImpostorSettings.h"
+#include "FoliageBakerMeshOutputDialog.h"
 #include "Materials/MaterialInstanceConstant.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerImpostorModule"
@@ -92,7 +93,9 @@ void FFoliageBakerImpostorModule::Bake()
 						FFoliageBakerImpostorBaker::Bake(
 							StaticMesh,
 							*MaterialTemplate,
-							*ToolSettings);
+							*ToolSettings,
+							FFoliageBakerMeshOutputSelector::CreateStatic(
+								&FFoliageBakerMeshOutputDialog::OpenAfterBake));
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);
 				}));
 
