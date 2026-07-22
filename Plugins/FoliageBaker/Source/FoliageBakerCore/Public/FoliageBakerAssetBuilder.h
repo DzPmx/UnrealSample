@@ -72,12 +72,6 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerGeneratedAssetOutputFolders
 	FString MaterialPackagePath;
 };
 
-struct FOLIAGEBAKERCORE_API FFoliageBakerMeshMaterialSlot
-{
-	FName MaterialSlotName = NAME_None;
-	UMaterialInterface* Material = nullptr;
-};
-
 struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 {
 	FString OutputFolderName;

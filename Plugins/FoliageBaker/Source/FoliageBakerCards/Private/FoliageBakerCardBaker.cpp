@@ -2,6 +2,8 @@
 
 #include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerAtlasTools.h"
+#include "FoliageBakerCardAtlas.h"
+#include "FoliageBakerCardGeometry.h"
 #include "FoliageBakerL1Visibility.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerMultiBillboardLayout.h"
@@ -11,24 +13,18 @@
 #include "FoliageBakerSourceMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
-#include "MaterialDomain.h"
-#include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MeshDescription.h"
-#include "MeshReductionSettings.h"
-#include "IMeshReductionInterfaces.h"
-#include "IMeshReductionManagerModule.h"
-#include "Modules/ModuleManager.h"
-#include "OverlappingCorners.h"
 #include "StaticMeshAttributes.h"
-#include "StaticMeshOperations.h"
 #include "StaticMeshResources.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerCards, Log, All);
 
 namespace
 {
+	namespace CardAtlas = UE::FoliageBaker::Cards::Atlas;
+	namespace CardGeometry = UE::FoliageBaker::Cards::Geometry;
 	namespace MultiBillboardLayout = UE::FoliageBaker::Cards::MultiBillboardLayout;
 
 	bool UsesDoublePlanesBillboard(const FFoliageBakerCardBakeRequest& Request)
@@ -118,114 +114,6 @@ namespace
 
 	using FAtlasOutputSelection = UE::FoliageBaker::MaterialResolver::FMaterialOutputSelection;
 
-	int32 MergeDoublePlaneTileCrops(
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop>& TileCrops)
-	{
-		if (TileCrops.Num() != 2 || !TileCrops[0].bEnabled || !TileCrops[1].bEnabled)
-		{
-			for (UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop& Crop : TileCrops)
-			{
-				Crop = UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop();
-			}
-			return 0;
-		}
-
-		UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop SharedCrop;
-		SharedCrop.bEnabled = true;
-		SharedCrop.MinUFraction = FMath::Min(TileCrops[0].MinUFraction, TileCrops[1].MinUFraction);
-		SharedCrop.MaxUFraction = FMath::Max(TileCrops[0].MaxUFraction, TileCrops[1].MaxUFraction);
-		SharedCrop.MinVFraction = FMath::Min(TileCrops[0].MinVFraction, TileCrops[1].MinVFraction);
-		SharedCrop.MaxVFraction = FMath::Max(TileCrops[0].MaxVFraction, TileCrops[1].MaxVFraction);
-
-		constexpr double CropEpsilon = 1.0e-5;
-		const bool bCropsTile = SharedCrop.MinUFraction > CropEpsilon
-			|| SharedCrop.MaxUFraction < 1.0 - CropEpsilon
-			|| SharedCrop.MinVFraction > CropEpsilon
-			|| SharedCrop.MaxVFraction < 1.0 - CropEpsilon;
-		if (!bCropsTile
-			|| SharedCrop.MaxUFraction <= SharedCrop.MinUFraction
-			|| SharedCrop.MaxVFraction <= SharedCrop.MinVFraction)
-		{
-			for (UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop& Crop : TileCrops)
-			{
-				Crop = UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop();
-			}
-			return 0;
-		}
-
-		TileCrops[0] = SharedCrop;
-		TileCrops[1] = SharedCrop;
-		return 2;
-	}
-
-	int32 MergeGroupedTileCrops(
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop>& TileCrops,
-		const TArray<int32>& PlaneGroupIndices)
-	{
-		if (TileCrops.Num() != PlaneGroupIndices.Num())
-		{
-			return 0;
-		}
-
-		TMap<int32, UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop> SharedCrops;
-		TSet<int32> GroupsWithoutCrop;
-		for (int32 PlaneIndex = 0; PlaneIndex < TileCrops.Num(); ++PlaneIndex)
-		{
-			const int32 GroupIndex = PlaneGroupIndices[PlaneIndex];
-			const UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop& Crop = TileCrops[PlaneIndex];
-			if (!Crop.bEnabled)
-			{
-				GroupsWithoutCrop.Add(GroupIndex);
-				continue;
-			}
-			UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop& SharedCrop =
-				SharedCrops.FindOrAdd(GroupIndex);
-			if (!SharedCrop.bEnabled)
-			{
-				SharedCrop = Crop;
-			}
-			else
-			{
-				SharedCrop.MinUFraction = FMath::Min(SharedCrop.MinUFraction, Crop.MinUFraction);
-				SharedCrop.MaxUFraction = FMath::Max(SharedCrop.MaxUFraction, Crop.MaxUFraction);
-				SharedCrop.MinVFraction = FMath::Min(SharedCrop.MinVFraction, Crop.MinVFraction);
-				SharedCrop.MaxVFraction = FMath::Max(SharedCrop.MaxVFraction, Crop.MaxVFraction);
-			}
-		}
-
-		constexpr double CropEpsilon = 1.0e-5;
-		int32 CroppedPlaneCount = 0;
-		for (int32 PlaneIndex = 0; PlaneIndex < TileCrops.Num(); ++PlaneIndex)
-		{
-			const int32 GroupIndex = PlaneGroupIndices[PlaneIndex];
-			if (GroupsWithoutCrop.Contains(GroupIndex))
-			{
-				TileCrops[PlaneIndex] =
-					UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop();
-				continue;
-			}
-			const UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop* SharedCrop =
-				SharedCrops.Find(GroupIndex);
-			const bool bValidCrop = SharedCrop
-				&& SharedCrop->bEnabled
-				&& SharedCrop->MaxUFraction > SharedCrop->MinUFraction
-				&& SharedCrop->MaxVFraction > SharedCrop->MinVFraction
-				&& (SharedCrop->MinUFraction > CropEpsilon
-					|| SharedCrop->MaxUFraction < 1.0 - CropEpsilon
-					|| SharedCrop->MinVFraction > CropEpsilon
-					|| SharedCrop->MaxVFraction < 1.0 - CropEpsilon);
-			if (!bValidCrop)
-			{
-				TileCrops[PlaneIndex] =
-					UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop();
-				continue;
-			}
-			TileCrops[PlaneIndex] = *SharedCrop;
-			++CroppedPlaneCount;
-		}
-		return CroppedPlaneCount;
-	}
-
 	using FAtlasBakeStats = UE::FoliageBaker::ProjectedAtlasBake::FStats;
 
 	bool BakeCardAtlasOrthographic(
@@ -278,202 +166,6 @@ namespace
 		OutSourceTriangleIdAndDepth =
 			MoveTemp(Result.SourceTriangleIdAndDepthPixels);
 		OutStats = MoveTemp(Result.Stats);
-		return true;
-	}
-
-	enum class EAtlasOuterCropMode : uint8
-	{
-		TightBlockAligned,
-		PowerOfTwoUsedBounds
-	};
-
-	bool CropAtlasToUsedSpace(
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		FMeshDescription& MeshDescription,
-		TArray<FColor>& AtlasPixels,
-		TArray<FColor>& NormalAtlasPixels,
-		TArray<FColor>& MixAtlasPixels,
-		TArray<FColor>& SourceTriangleIdAndDepthPixels,
-		FAtlasBakeStats& AtlasStats,
-		const EAtlasOuterCropMode CropMode,
-		FString& OutError)
-	{
-		const int32 OldWidth = AtlasStats.Width;
-		const int32 OldHeight = AtlasStats.Height;
-		if (OldWidth <= 0 || OldHeight <= 0 || PlaneInfos.IsEmpty())
-		{
-			return true;
-		}
-
-		int32 UsedMinX = OldWidth;
-		int32 UsedMinY = OldHeight;
-		int32 UsedMaxX = 0;
-		int32 UsedMaxY = 0;
-		auto AccumulateTileBounds = [&](const FIntPoint& PixelMin, const FIntPoint& TileSize, const int32 Padding)
-		{
-			if (TileSize.X <= 0 || TileSize.Y <= 0)
-			{
-				return;
-			}
-			const int32 SafePadding = FMath::Max(0, Padding);
-			UsedMinX = FMath::Min(UsedMinX, FMath::Max(0, PixelMin.X - SafePadding));
-			UsedMinY = FMath::Min(UsedMinY, FMath::Max(0, PixelMin.Y - SafePadding));
-			UsedMaxX = FMath::Max(UsedMaxX, FMath::Min(OldWidth, PixelMin.X + TileSize.X + SafePadding));
-			UsedMaxY = FMath::Max(UsedMaxY, FMath::Min(OldHeight, PixelMin.Y + TileSize.Y + SafePadding));
-		};
-		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
-		{
-			AccumulateTileBounds(PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize, PlaneInfo.AtlasTilePaddingPixels);
-			if (PlaneInfo.bHasBackFaceAtlas)
-			{
-				AccumulateTileBounds(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize, PlaneInfo.AtlasTilePaddingPixels);
-			}
-		}
-		if (UsedMaxX <= UsedMinX || UsedMaxY <= UsedMinY)
-		{
-			OutError = TEXT("Could not determine the used atlas bounds for outer-space cropping.");
-			return false;
-		}
-
-		constexpr int32 TextureBlockSize = 4;
-		int32 CropMinX = 0;
-		int32 CropMinY = 0;
-		int32 NewWidth = OldWidth;
-		int32 NewHeight = OldHeight;
-		if (CropMode == EAtlasOuterCropMode::PowerOfTwoUsedBounds)
-		{
-			const int32 UsedWidth = UsedMaxX - UsedMinX;
-			const int32 UsedHeight = UsedMaxY - UsedMinY;
-			NewWidth = FMath::Min(
-				OldWidth,
-				static_cast<int32>(FMath::RoundUpToPowerOfTwo(
-					static_cast<uint32>(FMath::Max(TextureBlockSize, UsedWidth)))));
-			NewHeight = FMath::Min(
-				OldHeight,
-				static_cast<int32>(FMath::RoundUpToPowerOfTwo(
-					static_cast<uint32>(FMath::Max(TextureBlockSize, UsedHeight)))));
-			CropMinX = FMath::Clamp(UsedMinX, 0, OldWidth - NewWidth);
-			CropMinY = FMath::Clamp(UsedMinY, 0, OldHeight - NewHeight);
-		}
-		else
-		{
-			CropMinX = FMath::Clamp(
-				(UsedMinX / TextureBlockSize) * TextureBlockSize,
-				0,
-				OldWidth - 1);
-			CropMinY = FMath::Clamp(
-				(UsedMinY / TextureBlockSize) * TextureBlockSize,
-				0,
-				OldHeight - 1);
-			const int32 CropMaxX = FMath::Clamp(
-				((UsedMaxX + TextureBlockSize - 1) / TextureBlockSize) * TextureBlockSize,
-				CropMinX + 1,
-				OldWidth);
-			const int32 CropMaxY = FMath::Clamp(
-				((UsedMaxY + TextureBlockSize - 1) / TextureBlockSize) * TextureBlockSize,
-				CropMinY + 1,
-				OldHeight);
-			NewWidth = CropMaxX - CropMinX;
-			NewHeight = CropMaxY - CropMinY;
-		}
-		if (CropMinX == 0 && CropMinY == 0 && NewWidth == OldWidth && NewHeight == OldHeight)
-		{
-			return true;
-		}
-
-		auto BuildCroppedPixels = [&](const TArray<FColor>& SourcePixels, TArray<FColor>& OutCroppedPixels) -> bool
-		{
-			OutCroppedPixels.Reset();
-			if (SourcePixels.IsEmpty())
-			{
-				return true;
-			}
-			if (SourcePixels.Num() != OldWidth * OldHeight)
-			{
-				return false;
-			}
-			OutCroppedPixels.SetNumUninitialized(NewWidth * NewHeight);
-			for (int32 Y = 0; Y < NewHeight; ++Y)
-			{
-				const FColor* SourceRow = SourcePixels.GetData() + (CropMinY + Y) * OldWidth + CropMinX;
-				FColor* DestinationRow = OutCroppedPixels.GetData() + Y * NewWidth;
-				FMemory::Memcpy(DestinationRow, SourceRow, static_cast<SIZE_T>(NewWidth) * sizeof(FColor));
-			}
-			return true;
-		};
-
-		TArray<FColor> CroppedAtlasPixels;
-		TArray<FColor> CroppedNormalAtlasPixels;
-		TArray<FColor> CroppedMixAtlasPixels;
-		TArray<FColor> CroppedSourceTriangleIdAndDepthPixels;
-		if (!BuildCroppedPixels(AtlasPixels, CroppedAtlasPixels)
-			|| !BuildCroppedPixels(NormalAtlasPixels, CroppedNormalAtlasPixels)
-			|| !BuildCroppedPixels(MixAtlasPixels, CroppedMixAtlasPixels)
-			|| !BuildCroppedPixels(
-				SourceTriangleIdAndDepthPixels,
-				CroppedSourceTriangleIdAndDepthPixels))
-		{
-			OutError = TEXT("Atlas pixel count did not match the atlas dimensions during outer-space cropping.");
-			return false;
-		}
-
-		FStaticMeshAttributes MeshAttributes(MeshDescription);
-		TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = MeshAttributes.GetVertexInstanceUVs();
-		if (VertexInstanceUVs.GetNumChannels() < 2)
-		{
-			OutError = TEXT("Generated card mesh does not contain UV0 and UV1 for atlas cropping.");
-			return false;
-		}
-		auto RemapAtlasUV = [&](const FVector2f& OldUV)
-		{
-			return FVector2f(
-				(static_cast<float>(OldUV.X) * static_cast<float>(OldWidth) - static_cast<float>(CropMinX)) / static_cast<float>(NewWidth),
-				(static_cast<float>(OldUV.Y) * static_cast<float>(OldHeight) - static_cast<float>(CropMinY)) / static_cast<float>(NewHeight));
-		};
-		for (const FVertexInstanceID VertexInstanceID : MeshDescription.VertexInstances().GetElementIDs())
-		{
-			VertexInstanceUVs.Set(VertexInstanceID, 0, RemapAtlasUV(VertexInstanceUVs.Get(VertexInstanceID, 0)));
-			VertexInstanceUVs.Set(VertexInstanceID, 1, RemapAtlasUV(VertexInstanceUVs.Get(VertexInstanceID, 1)));
-		}
-
-		for (UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
-		{
-			PlaneInfo.AtlasPixelMin -= FIntPoint(CropMinX, CropMinY);
-			if (PlaneInfo.bHasBackFaceAtlas)
-			{
-				PlaneInfo.BackAtlasPixelMin -= FIntPoint(CropMinX, CropMinY);
-			}
-			for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
-			{
-				PlaneInfo.AtlasUVs[CornerIndex] = RemapAtlasUV(PlaneInfo.AtlasUVs[CornerIndex]);
-				PlaneInfo.BackAtlasUVs[CornerIndex] = RemapAtlasUV(PlaneInfo.BackAtlasUVs[CornerIndex]);
-			}
-		}
-
-		AtlasPixels = MoveTemp(CroppedAtlasPixels);
-		NormalAtlasPixels = MoveTemp(CroppedNormalAtlasPixels);
-		MixAtlasPixels = MoveTemp(CroppedMixAtlasPixels);
-		SourceTriangleIdAndDepthPixels =
-			MoveTemp(CroppedSourceTriangleIdAndDepthPixels);
-		AtlasStats.Width = NewWidth;
-		AtlasStats.Height = NewHeight;
-
-		int64 PackedPaddedTilePixels = 0;
-		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
-		{
-			const int32 Padding = FMath::Max(0, PlaneInfo.AtlasTilePaddingPixels);
-			PackedPaddedTilePixels += static_cast<int64>(PlaneInfo.AtlasTileSize.X + Padding * 2)
-				* static_cast<int64>(PlaneInfo.AtlasTileSize.Y + Padding * 2);
-			if (PlaneInfo.bHasBackFaceAtlas)
-			{
-				PackedPaddedTilePixels += static_cast<int64>(PlaneInfo.BackAtlasTileSize.X + Padding * 2)
-					* static_cast<int64>(PlaneInfo.BackAtlasTileSize.Y + Padding * 2);
-			}
-		}
-		const int64 NewAtlasPixelCount = static_cast<int64>(NewWidth) * static_cast<int64>(NewHeight);
-		AtlasStats.PackedTileUtilizationPercent = NewAtlasPixelCount > 0
-			? 100.0 * static_cast<double>(PackedPaddedTilePixels) / static_cast<double>(NewAtlasPixelCount)
-			: 0.0;
 		return true;
 	}
 
@@ -584,68 +276,6 @@ namespace
 			OutError);
 	}
 
-	bool ResizeTileIsolatedAtlas(
-		const TArray<FColor>& SourcePixels,
-		const FAtlasBakeStats& SourceStats,
-		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& SourcePlaneInfos,
-		const int32 RequestedMaximumDimension,
-		const FColor BackgroundColor,
-		TArray<FColor>& OutPixels,
-		FAtlasBakeStats& OutStats,
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& OutPlaneInfos,
-		FString& OutError)
-	{
-		int32 OutputWidth = 0;
-		int32 OutputHeight = 0;
-		if (!UE::FoliageBaker::Atlas::ResizeTileIsolated(
-				SourcePixels,
-				SourceStats.Width,
-				SourceStats.Height,
-				SourcePlaneInfos,
-				FMath::Clamp(RequestedMaximumDimension, 64, 1024),
-				BackgroundColor,
-				OutPixels,
-				OutputWidth,
-				OutputHeight,
-				OutPlaneInfos,
-				OutError))
-		{
-			return false;
-		}
-
-		OutStats = SourceStats;
-		OutStats.Width = OutputWidth;
-		OutStats.Height = OutputHeight;
-		OutStats.TileResolution = FMath::Max(
-			1,
-			FMath::RoundToInt(
-				SourceStats.TileResolution
-					* FMath::Min(
-						static_cast<double>(OutputWidth) / SourceStats.Width,
-						static_cast<double>(OutputHeight) / SourceStats.Height)));
-		int64 PackedTilePixels = 0;
-		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo
-			: OutPlaneInfos)
-		{
-			PackedTilePixels +=
-				static_cast<int64>(PlaneInfo.AtlasTileSize.X)
-				* PlaneInfo.AtlasTileSize.Y;
-			if (PlaneInfo.bHasBackFaceAtlas)
-			{
-				PackedTilePixels +=
-					static_cast<int64>(PlaneInfo.BackAtlasTileSize.X)
-					* PlaneInfo.BackAtlasTileSize.Y;
-			}
-		}
-		const int64 TargetPixelCount =
-			static_cast<int64>(OutputWidth) * OutputHeight;
-		OutStats.PackedTileUtilizationPercent = TargetPixelCount > 0
-			? 100.0 * static_cast<double>(PackedTilePixels)
-				/ static_cast<double>(TargetPixelCount)
-			: 0.0;
-		return true;
-	}
-
 	UTexture2D* CreateUpperHemisphereL1VisibilityTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
@@ -656,23 +286,6 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
-		TArray<FColor> ResizedPixels;
-		FAtlasBakeStats ResizedStats;
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> ResizedPlaneInfos;
-		if (!ResizeTileIsolatedAtlas(
-				Pixels,
-				AtlasStats,
-				PlaneInfos,
-				EditorSettings.UpperHemisphereL1TextureResolution,
-				FColor(128, 128, 128, 255),
-				ResizedPixels,
-				ResizedStats,
-				ResizedPlaneInfos,
-				OutError))
-		{
-			return nullptr;
-		}
-
 		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
@@ -687,10 +300,10 @@ namespace
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
-			ResizedPixels,
-			ResizedStats.Width,
-			ResizedStats.Height,
-			ResizedPlaneInfos,
+			Pixels,
+			AtlasStats.Width,
+			AtlasStats.Height,
+			PlaneInfos,
 			OutError);
 	}
 
@@ -722,13 +335,18 @@ namespace
 
 	struct FProxyMeshBuildData : FFoliageBakerProxyGeometry
 	{
+		// The inherited geometry stays in capture space through atlas and L1 baking.
+		TArray<int32> MultiBillboardPlaneGroupIndices;
+		// Runtime-only UV payloads and retained trunk geometry live in this copy.
+		FMeshDescription OutputMeshDescription;
+		UE::FoliageBaker::PlaneCover::FPlaneProxyMeshStats OutputStats;
 		TArray<FFoliageBakerMeshMaterialSlot> AdditionalMaterialSlots;
 		int32 OriginalTrunkTriangleCount = 0;
 		int32 ReducedTrunkTriangleCount = 0;
 		int32 RetainedTrunkUVChannelCount = 0;
 	};
 
-	struct FProxyTextureBuildData
+	struct FProxyAtlasBuildData
 	{
 		FAtlasOutputSelection OutputSelection;
 		TArray<FColor> AtlasPixels;
@@ -737,6 +355,20 @@ namespace
 		TArray<FColor> SourceTriangleIdAndDepthPixels;
 		TArray<FColor> UpperHemisphereL1VisibilityPixels;
 		FAtlasBakeStats AtlasStats;
+		FAtlasBakeStats UpperHemisphereL1VisibilityStats;
+		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>
+			UpperHemisphereL1VisibilityPlaneInfos;
+	};
+
+	struct FProxyMaterialRecipe
+	{
+		TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue>
+			ScalarParameterValues;
+		TOptional<bool> TwoSidedOverride;
+	};
+
+	struct FProxyMaterialAssetData
+	{
 		UTexture2D* AtlasTexture = nullptr;
 		UTexture2D* NormalAtlasTexture = nullptr;
 		UTexture2D* MixAtlasTexture = nullptr;
@@ -806,7 +438,7 @@ namespace
 		FProxyAssetBuildResult Result;
 		Result.bCancelled = true;
 		Result.Report = FString::Printf(
-			TEXT("%s\n  cancelled after bake: no mesh output was selected and no generated assets were committed."),
+			TEXT("%s\n  cancelled: no mesh output was selected and no generated assets were committed."),
 			*StaticMesh.GetName());
 		return Result;
 	}
@@ -1017,13 +649,16 @@ namespace
 			: FMath::Clamp(EditorSettings.CrossCardPlaneCount, 2, 5);
 		for (int32 PlaneIndex = 0; PlaneIndex < PlaneCount; ++PlaneIndex)
 		{
+			// Cross planes bake both sides, so their unique physical directions span 180 degrees.
+			const double CrossCaptureAngle = static_cast<double>(PlaneIndex) * UE_DOUBLE_PI
+				/ static_cast<double>(PlaneCount);
 			const FVector Normal = EditorSettings.Mode == EFoliageBakerCardMode::SingleBillboard
 				? PlaneIndex == 0
 					? PrimaryCaptureNormal
 					: RotateHorizontalNormal90Degrees(PrimaryCaptureNormal)
 				: FVector(
-					FMath::Cos(static_cast<double>(PlaneIndex) * UE_DOUBLE_PI / static_cast<double>(PlaneCount)),
-					FMath::Sin(static_cast<double>(PlaneIndex) * UE_DOUBLE_PI / static_cast<double>(PlaneCount)),
+					FMath::Cos(CrossCaptureAngle),
+					FMath::Sin(CrossCaptureAngle),
 					0.0);
 			FVector AxisU = FVector::CrossProduct(FVector::UpVector, Normal).GetSafeNormal();
 			if (AxisU.IsNearlyZero())
@@ -1060,147 +695,6 @@ namespace
 			&OutData.PlaneInfos);
 	}
 
-	FName MakeUniqueRetainedMaterialSlotName(
-		UMaterialInterface* Material,
-		const int32 SourceMaterialIndex,
-		TSet<FName>& InOutUsedSlotNames)
-	{
-		const FString BaseSlotName = Material && !Material->GetName().IsEmpty()
-			? Material->GetName()
-			: FString::Printf(TEXT("RetainedMaterial_%d"), SourceMaterialIndex);
-		FName Candidate(*BaseSlotName);
-		for (int32 Suffix = 1; InOutUsedSlotNames.Contains(Candidate); ++Suffix)
-		{
-			Candidate = FName(*FString::Printf(TEXT("%s_%d"), *BaseSlotName, Suffix));
-		}
-		InOutUsedSlotNames.Add(Candidate);
-		return Candidate;
-	}
-
-	bool BuildRetainedTrunkMeshDescription(
-		const UStaticMesh& StaticMesh,
-		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& TrunkTriangles,
-		UMaterialInterface* ProxyMaterial,
-		FMeshDescription& OutMeshDescription,
-		TArray<FFoliageBakerMeshMaterialSlot>& OutMaterialSlots,
-		FString& OutError)
-	{
-		OutMeshDescription.Empty();
-		OutMaterialSlots.Reset();
-		if (TrunkTriangles.IsEmpty())
-		{
-			return true;
-		}
-
-		FStaticMeshAttributes Attributes(OutMeshDescription);
-		Attributes.Register();
-		Attributes.RegisterTriangleNormalAndTangentAttributes();
-		TVertexAttributesRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
-		TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
-		TVertexInstanceAttributesRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
-		TVertexInstanceAttributesRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
-		TVertexInstanceAttributesRef<FVector4f> VertexInstanceColors = Attributes.GetVertexInstanceColors();
-		TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
-		TPolygonGroupAttributesRef<FName> MaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
-
-		int32 UVChannelCount = 1;
-		for (const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle : TrunkTriangles)
-		{
-			UVChannelCount = FMath::Max(UVChannelCount, Triangle.NumUVChannels);
-		}
-		UVChannelCount = FMath::Clamp(
-			UVChannelCount,
-			1,
-			UE::FoliageBaker::PlaneCover::MaxSourceMeshUVChannels);
-		VertexInstanceUVs.SetNumChannels(UVChannelCount);
-
-		OutMeshDescription.ReserveNewVertices(TrunkTriangles.Num() * 3);
-		OutMeshDescription.ReserveNewVertexInstances(TrunkTriangles.Num() * 3);
-		OutMeshDescription.ReserveNewTriangles(TrunkTriangles.Num());
-
-		const TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
-		TMap<int32, FPolygonGroupID> PolygonGroupByMaterialIndex;
-		TMap<FVector3f, FVertexID> VertexByPosition;
-		TSet<FName> UsedMaterialSlotNames;
-		UsedMaterialSlotNames.Add(TEXT("BillboardProxy"));
-		if (ProxyMaterial && !ProxyMaterial->GetFName().IsNone())
-		{
-			UsedMaterialSlotNames.Add(ProxyMaterial->GetFName());
-		}
-
-		for (const UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle : TrunkTriangles)
-		{
-			FPolygonGroupID PolygonGroupID = INDEX_NONE;
-			if (const FPolygonGroupID* ExistingGroup = PolygonGroupByMaterialIndex.Find(Triangle.MaterialIndex))
-			{
-				PolygonGroupID = *ExistingGroup;
-			}
-			else
-			{
-				UMaterialInterface* Material = StaticMaterials.IsValidIndex(Triangle.MaterialIndex)
-					? StaticMaterials[Triangle.MaterialIndex].MaterialInterface
-					: nullptr;
-				if (!Material)
-				{
-					Material = UMaterial::GetDefaultMaterial(MD_Surface);
-				}
-				const FName MaterialSlotName = MakeUniqueRetainedMaterialSlotName(
-					Material,
-					Triangle.MaterialIndex,
-					UsedMaterialSlotNames);
-				PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
-				MaterialSlotNames[PolygonGroupID] = MaterialSlotName;
-				PolygonGroupByMaterialIndex.Add(Triangle.MaterialIndex, PolygonGroupID);
-				FFoliageBakerMeshMaterialSlot& MaterialSlot = OutMaterialSlots.AddDefaulted_GetRef();
-				MaterialSlot.MaterialSlotName = MaterialSlotName;
-				MaterialSlot.Material = Material;
-			}
-
-			TArray<FVertexInstanceID, TInlineAllocator<3>> VertexInstanceIDs;
-			for (int32 CornerIndex = 0; CornerIndex < 3; ++CornerIndex)
-			{
-				const FVector3f Position(Triangle.Vertices[CornerIndex]);
-				FVertexID VertexID = INDEX_NONE;
-				if (const FVertexID* ExistingVertexID = VertexByPosition.Find(Position))
-				{
-					VertexID = *ExistingVertexID;
-				}
-				else
-				{
-					VertexID = OutMeshDescription.CreateVertex();
-					VertexPositions[VertexID] = Position;
-					VertexByPosition.Add(Position, VertexID);
-				}
-
-				const FVertexInstanceID VertexInstanceID =
-					OutMeshDescription.CreateVertexInstance(VertexID);
-				VertexInstanceNormals[VertexInstanceID] = FVector3f(Triangle.VertexNormals[CornerIndex]);
-				VertexInstanceTangents[VertexInstanceID] = FVector3f(Triangle.VertexTangents[CornerIndex]);
-				VertexInstanceBinormalSigns[VertexInstanceID] = Triangle.BinormalSigns[CornerIndex];
-				VertexInstanceColors[VertexInstanceID] = Triangle.VertexColors[CornerIndex];
-				for (int32 UVChannel = 0; UVChannel < UVChannelCount; ++UVChannel)
-				{
-					VertexInstanceUVs.Set(
-						VertexInstanceID,
-						UVChannel,
-						Triangle.UVChannels[UVChannel][CornerIndex]);
-				}
-				VertexInstanceIDs.Add(VertexInstanceID);
-			}
-
-			OutMeshDescription.CreateTriangle(PolygonGroupID, VertexInstanceIDs);
-		}
-
-		if (OutMeshDescription.Triangles().Num() == 0)
-		{
-			OutError = TEXT("MultiBillboard retained trunk geometry contains no valid triangles.");
-			return false;
-		}
-		FStaticMeshOperations::ComputeTriangleTangentsAndNormals(OutMeshDescription);
-		FStaticMeshOperations::DetermineEdgeHardnessesFromVertexInstanceNormals(OutMeshDescription);
-		return true;
-	}
-
 	bool AppendReducedMultiBillboardTrunk(
 		const UStaticMesh& StaticMesh,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
@@ -1216,98 +710,22 @@ namespace
 			return true;
 		}
 
-		FMeshDescription TrunkMeshDescription;
-		TArray<FFoliageBakerMeshMaterialSlot> TrunkMaterialSlots;
-		if (!BuildRetainedTrunkMeshDescription(
+		CardGeometry::FRetainedTrunkResult TrunkResult;
+		if (!CardGeometry::AppendReducedTrunk(
 			StaticMesh,
 			CoverData.RetainedTrunkTriangles,
+			EditorSettings.TrunkTrianglePercentage,
 			ProxyMaterial,
-			TrunkMeshDescription,
-			TrunkMaterialSlots,
+			MeshData.OutputMeshDescription,
+			TrunkResult,
 			OutError))
 		{
 			return false;
 		}
-
-		MeshData.OriginalTrunkTriangleCount = TrunkMeshDescription.Triangles().Num();
-		FMeshDescription ReducedTrunkMeshDescription(TrunkMeshDescription);
-		const float TrianglePercentage = FMath::Clamp(
-			EditorSettings.TrunkTrianglePercentage,
-			0.05f,
-			1.0f);
-		if (TrianglePercentage < 1.0f && TrunkMeshDescription.Triangles().Num() > 2)
-		{
-			IMeshReductionManagerModule* MeshReductionModule =
-				FModuleManager::Get().LoadModulePtr<IMeshReductionManagerModule>("MeshReductionInterface");
-			IMeshReduction* MeshReduction = MeshReductionModule
-				? MeshReductionModule->GetStaticMeshReductionInterface()
-				: nullptr;
-			if (!MeshReduction || !MeshReduction->IsSupported())
-			{
-				OutError = TEXT("MultiBillboard could not load a supported Unreal Static Mesh reduction interface for the retained trunk.");
-				return false;
-			}
-
-			FOverlappingCorners OverlappingCorners;
-			FStaticMeshOperations::FindOverlappingCorners(
-				OverlappingCorners,
-				TrunkMeshDescription,
-				1.0e-5f);
-			FMeshReductionSettings ReductionSettings;
-			ReductionSettings.TerminationCriterion =
-				EStaticMeshReductionTerimationCriterion::Triangles;
-			ReductionSettings.PercentTriangles = TrianglePercentage;
-			ReductionSettings.PercentVertices = 1.0f;
-			ReductionSettings.SilhouetteImportance = EMeshFeatureImportance::High;
-			ReductionSettings.TextureImportance = EMeshFeatureImportance::High;
-			ReductionSettings.ShadingImportance = EMeshFeatureImportance::High;
-			ReductionSettings.VertexColorImportance = EMeshFeatureImportance::High;
-			float MaxDeviation = 0.0f;
-			MeshReduction->ReduceMeshDescription(
-				ReducedTrunkMeshDescription,
-				MaxDeviation,
-				TrunkMeshDescription,
-				OverlappingCorners,
-				ReductionSettings);
-		}
-
-		if (ReducedTrunkMeshDescription.Triangles().Num() == 0)
-		{
-			OutError = TEXT("MultiBillboard trunk reduction produced an empty mesh.");
-			return false;
-		}
-		MeshData.ReducedTrunkTriangleCount = ReducedTrunkMeshDescription.Triangles().Num();
-		MeshData.RetainedTrunkUVChannelCount =
-			FStaticMeshConstAttributes(ReducedTrunkMeshDescription)
-				.GetVertexInstanceUVs()
-				.GetNumChannels();
-
-		TSet<FName> RetainedSlotNames;
-		const TPolygonGroupAttributesConstRef<FName> ReducedMaterialSlotNames =
-			FStaticMeshConstAttributes(ReducedTrunkMeshDescription).GetPolygonGroupMaterialSlotNames();
-		for (const FPolygonGroupID PolygonGroupID :
-			ReducedTrunkMeshDescription.PolygonGroups().GetElementIDs())
-		{
-			RetainedSlotNames.Add(ReducedMaterialSlotNames[PolygonGroupID]);
-		}
-		TrunkMaterialSlots.RemoveAll(
-			[&RetainedSlotNames](const FFoliageBakerMeshMaterialSlot& MaterialSlot)
-			{
-				return !RetainedSlotNames.Contains(MaterialSlot.MaterialSlotName);
-			});
-
-		FStaticMeshOperations::FAppendSettings AppendSettings;
-		FStaticMeshOperations::AppendMeshDescription(
-			ReducedTrunkMeshDescription,
-			MeshData.MeshDescription,
-			AppendSettings);
-		if (MeshData.MeshDescription.NeedsCompact())
-		{
-			FElementIDRemappings Remappings;
-			MeshData.MeshDescription.Compact(Remappings);
-		}
-		FStaticMeshOperations::ComputeTriangleTangentsAndNormals(MeshData.MeshDescription);
-		MeshData.AdditionalMaterialSlots = MoveTemp(TrunkMaterialSlots);
+		MeshData.AdditionalMaterialSlots = MoveTemp(TrunkResult.MaterialSlots);
+		MeshData.OriginalTrunkTriangleCount = TrunkResult.OriginalTriangleCount;
+		MeshData.ReducedTrunkTriangleCount = TrunkResult.ReducedTriangleCount;
+		MeshData.RetainedTrunkUVChannelCount = TrunkResult.UVChannelCount;
 		return true;
 	}
 
@@ -1321,74 +739,13 @@ namespace
 		{
 			return true;
 		}
-		if (MeshData.PlaneInfos.Num() != 2)
-		{
-			OutError = FString::Printf(
-				TEXT("Double Planes Billboard requires exactly two captured planes, but %d were generated."),
-				MeshData.PlaneInfos.Num());
-			return false;
-		}
-
-		const FVector OutputNormal =
-			ResolveSingleCaptureNormal(EditorSettings.SingleCaptureAxis).GetSafeNormal();
-		FVector OutputAxisU = FVector::CrossProduct(FVector::UpVector, OutputNormal).GetSafeNormal();
-		if (OutputAxisU.IsNearlyZero())
-		{
-			OutError = TEXT("Double Planes Billboard could not construct a horizontal output plane frame.");
-			return false;
-		}
-
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> OutputPlaneInfos =
-			MeshData.PlaneInfos;
-		for (int32 PlaneIndex = 0; PlaneIndex < OutputPlaneInfos.Num(); ++PlaneIndex)
-		{
-			UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& OutputPlane =
-				OutputPlaneInfos[PlaneIndex];
-			const FVector CaptureNormal = OutputPlane.Normal.GetSafeNormal();
-			if (CaptureNormal.IsNearlyZero())
-			{
-				OutError = FString::Printf(
-					TEXT("Double Planes Billboard capture plane %d has an invalid direction."),
-					PlaneIndex);
-				return false;
-			}
-
-			for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
-			{
-				OutputPlane.BackAtlasUVs[CornerIndex] =
-					FVector2f(static_cast<float>(CaptureNormal.X), static_cast<float>(CaptureNormal.Y));
-			}
-			OutputPlane.bUseCustomAuxiliaryUV = true;
-			OutputPlane.AuxiliaryUV = FVector2f(static_cast<float>(PlaneIndex), 0.0f);
-
-			OutputPlane.Normal = OutputNormal;
-			OutputPlane.Rho = 0.0;
-			OutputPlane.AxisU = OutputAxisU;
-			OutputPlane.AxisV = FVector::UpVector;
-			OutputPlane.ShadingNormal = OutputNormal;
-			const FVector PlaneOrigin = OutputPlane.Normal * OutputPlane.Rho;
-			OutputPlane.Corners[0] =
-				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MinU + OutputPlane.AxisV * OutputPlane.MinV;
-			OutputPlane.Corners[1] =
-				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MaxU + OutputPlane.AxisV * OutputPlane.MinV;
-			OutputPlane.Corners[2] =
-				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MaxU + OutputPlane.AxisV * OutputPlane.MaxV;
-			OutputPlane.Corners[3] =
-				PlaneOrigin + OutputPlane.AxisU * OutputPlane.MinU + OutputPlane.AxisV * OutputPlane.MaxV;
-		}
-
-		if (!UE::FoliageBaker::PlaneCover::RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
-			OutputPlaneInfos,
+		return CardGeometry::BuildDoublePlanesOutput(
+			ResolveSingleCaptureNormal(EditorSettings.SingleCaptureAxis),
 			PlaneSettings,
-			MeshData.MeshDescription,
-			MeshData.Stats,
-			OutError))
-		{
-			return false;
-		}
-		MeshData.Stats.AveragePlaneToShadingNormalDot = 1.0;
-		MeshData.Stats.AveragePlaneToShadingNormalAngleDegrees = 0.0;
-		return true;
+			MeshData,
+			MeshData.OutputMeshDescription,
+			MeshData.OutputStats,
+			OutError);
 	}
 
 	bool BuildMultiBillboardOutputMesh(
@@ -1403,112 +760,45 @@ namespace
 		{
 			return true;
 		}
-		if (MeshData.PlaneInfos.IsEmpty())
-		{
-			OutError = TEXT("MultiBillboard has no generated planes to prepare for runtime rotation.");
-			return false;
-		}
-		if (PlaneGroupIndices.Num() != MeshData.PlaneInfos.Num())
-		{
-			OutError = TEXT("MultiBillboard cluster mapping does not match generated plane count.");
-			return false;
-		}
-
-		for (int32 PlaneIndex = 0; PlaneIndex < MeshData.PlaneInfos.Num(); ++PlaneIndex)
-		{
-			UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo =
-				MeshData.PlaneInfos[PlaneIndex];
-			const FVector AxisU = PlaneInfo.AxisU.GetSafeNormal();
-			const FVector AxisV = PlaneInfo.AxisV.GetSafeNormal();
-			const FVector Normal = PlaneInfo.Normal.GetSafeNormal();
-			const int32 ClusterIndex = PlaneGroupIndices[PlaneIndex];
-			if (AxisU.IsNearlyZero()
-				|| AxisV.IsNearlyZero()
-				|| Normal.IsNearlyZero()
-				|| !CoverData.MultiBillboardClusterCenters.IsValidIndex(ClusterIndex))
-			{
-				OutError = TEXT("MultiBillboard generated a plane with an invalid local frame.");
-				return false;
-			}
-			const FVector ClusterCenter =
-				CoverData.MultiBillboardClusterCenters[ClusterIndex];
-			const FVector PlaneCenter =
-				(PlaneInfo.Corners[0]
-					+ PlaneInfo.Corners[1]
-					+ PlaneInfo.Corners[2]
-					+ PlaneInfo.Corners[3]) * 0.25;
-			for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
-			{
-				const FVector CenterRelativePosition =
-					PlaneInfo.Corners[CornerIndex] - ClusterCenter;
-				PlaneInfo.BackAtlasUVs[CornerIndex] = FVector2f(
-					static_cast<float>(FVector::DotProduct(CenterRelativePosition, AxisU)),
-					static_cast<float>(FVector::DotProduct(CenterRelativePosition, AxisV)));
-			}
-			PlaneInfo.bUseCustomAuxiliaryUV = true;
-			PlaneInfo.AuxiliaryUV = FVector2f(
-				static_cast<float>(
-					FVector::DotProduct(PlaneCenter - ClusterCenter, Normal)),
-				0.0f);
-		}
-
-		if (!UE::FoliageBaker::PlaneCover::RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
-			MeshData.PlaneInfos,
+		return CardGeometry::BuildMultiBillboardOutput(
+			PlaneGroupIndices,
+			CoverData.MultiBillboardClusterCenters,
 			PlaneSettings,
-			MeshData.MeshDescription,
-			MeshData.Stats,
-			OutError))
-		{
-			return false;
-		}
-		return true;
+			MeshData,
+			MeshData.OutputMeshDescription,
+			MeshData.OutputStats,
+			OutError);
 	}
 
-	bool BuildProxyTextureData(
-		const UStaticMesh& StaticMesh,
+	bool PrepareProxyCaptureGeometry(
 		const FFoliageBakerCardBakeRequest& EditorSettings,
-		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyPlaneCoverBuildData& CoverData,
 		FProxyMeshBuildData& MeshData,
-		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
-		FProxyTextureBuildData& OutData,
 		FString& OutError)
 	{
-		OutData.OutputSelection = BuildAtlasOutputSelection(EditorSettings);
-		if (!OutData.OutputSelection.HasAnyOutput()
-			&& !EditorSettings.bBakeUpperHemisphereL1Visibility)
-		{
-			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Opacity, Normal/TrunkLeafMask, Mix, or Upper Hemisphere L1 Visibility.");
-			return false;
-		}
-		UMaterialInstanceConstant* TemplateMaterialInstance = EditorSettings.MaterialTemplate;
-		if (!TemplateMaterialInstance)
-		{
-			OutError = TEXT("A parent Material Instance Constant must be selected in the current tool settings.");
-			return false;
-		}
-		TArray<int32> MultiBillboardPlaneGroupIndices;
+		MeshData.MultiBillboardPlaneGroupIndices.Reset();
 		if (UsesMultiBillboard(EditorSettings))
 		{
 			if (!ResolveMultiBillboardPlaneGroups(
-				CoverData,
-				MeshData,
-				MultiBillboardPlaneGroupIndices,
-				OutError))
+					CoverData,
+					MeshData,
+					MeshData.MultiBillboardPlaneGroupIndices,
+					OutError))
 			{
 				return false;
 			}
 			if (!UE::FoliageBaker::PlaneCover::ApplyGroupedPlaneProxyBoundsAndRebuildMeshDescription(
-				MeshData.PlaneInfos,
-				MultiBillboardPlaneGroupIndices,
-				CoverData.Settings,
-				MeshData.MeshDescription,
-				MeshData.Stats,
-				OutError))
+					MeshData.PlaneInfos,
+					MeshData.MultiBillboardPlaneGroupIndices,
+					CoverData.Settings,
+					MeshData.MeshDescription,
+					MeshData.Stats,
+					OutError))
 			{
 				return false;
 			}
 		}
+
 		if (UsesDoublePlanesBillboard(EditorSettings)
 			&& !UE::FoliageBaker::PlaneCover::ApplySharedPlaneProxyBoundsAndRebuildMeshDescription(
 				MeshData.PlaneInfos,
@@ -1519,7 +809,24 @@ namespace
 		{
 			return false;
 		}
+		return true;
+	}
 
+	bool BakeProxyAtlasData(
+		const UStaticMesh& StaticMesh,
+		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const FProxyPlaneCoverBuildData& CoverData,
+		FProxyMeshBuildData& MeshData,
+		FProxyAtlasBuildData& OutData,
+		FString& OutError)
+	{
+		OutData.OutputSelection = BuildAtlasOutputSelection(EditorSettings);
+		if (!OutData.OutputSelection.HasAnyOutput()
+			&& !EditorSettings.bBakeUpperHemisphereL1Visibility)
+		{
+			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Opacity, Normal/TrunkLeafMask, Mix, or Upper Hemisphere L1 Visibility.");
+			return false;
+		}
 		auto BakeFeatureAtlas = [&](const FAtlasOutputSelection& OutputSelection,
 			const bool bCaptureSourceDepth,
 			TArray<FColor>& AtlasPixels,
@@ -1585,13 +892,13 @@ namespace
 				TileCrops);
 			if (UsesDoublePlanesBillboard(EditorSettings))
 			{
-				AlphaAwareCroppedPlaneCount = MergeDoublePlaneTileCrops(TileCrops);
+				AlphaAwareCroppedPlaneCount = CardAtlas::MergeDoublePlaneTileCrops(TileCrops);
 			}
 			else if (UsesMultiBillboard(EditorSettings))
 			{
-				AlphaAwareCroppedPlaneCount = MergeGroupedTileCrops(
+				AlphaAwareCroppedPlaneCount = CardAtlas::MergeGroupedTileCrops(
 					TileCrops,
-					MultiBillboardPlaneGroupIndices);
+					MeshData.MultiBillboardPlaneGroupIndices);
 			}
 
 			if (AlphaAwareCroppedPlaneCount > 0)
@@ -1625,25 +932,23 @@ namespace
 		OutData.AtlasStats.AlphaAwareTileCropGuardPixels = CoverData.Settings.bEnableAlphaAwareTileCrop
 			? EffectiveAlphaCropGuardPixels
 			: 0;
-		if (!CropAtlasToUsedSpace(
-				MeshData.PlaneInfos,
-				MeshData.MeshDescription,
+		if (!CardAtlas::CropToUsedSpace(
+				MeshData,
 				OutData.AtlasPixels,
 				OutData.NormalAtlasPixels,
 				OutData.MixAtlasPixels,
 				OutData.SourceTriangleIdAndDepthPixels,
 				OutData.AtlasStats,
 				EditorSettings.bTrimUnusedAtlasSpace
-					? EAtlasOuterCropMode::TightBlockAligned
-					: EAtlasOuterCropMode::PowerOfTwoUsedBounds,
+					? CardAtlas::EOuterCropMode::TightBlockAligned
+					: CardAtlas::EOuterCropMode::PowerOfTwoUsedBounds,
 				OutError))
 		{
 			return false;
 		}
-		MeshData.Stats.AtlasWidth = OutData.AtlasStats.Width;
-		MeshData.Stats.AtlasHeight = OutData.AtlasStats.Height;
 		if (EditorSettings.bBakeUpperHemisphereL1Visibility)
 		{
+			TArray<FColor> FullResolutionL1VisibilityPixels;
 			if (!UE::FoliageBaker::L1Visibility::BakeUpperHemisphere(
 					StaticMesh,
 					CoverData.SourceLODBounds,
@@ -1655,77 +960,154 @@ namespace
 					OutData.AtlasStats.Height,
 					EditorSettings.UpperHemisphereL1SampleCount,
 					EditorSettings.UpperHemisphereL1ShadowMapResolution,
+					FullResolutionL1VisibilityPixels,
+					OutError))
+			{
+				return false;
+			}
+			if (!CardAtlas::ResizeTileIsolated(
+					FullResolutionL1VisibilityPixels,
+					OutData.AtlasStats,
+					MeshData.PlaneInfos,
+					EditorSettings.UpperHemisphereL1TextureResolution,
+					FColor(128, 128, 128, 255),
 					OutData.UpperHemisphereL1VisibilityPixels,
+					OutData.UpperHemisphereL1VisibilityStats,
+					OutData.UpperHemisphereL1VisibilityPlaneInfos,
 					OutError))
 			{
 				return false;
 			}
 		}
+		return true;
+	}
+
+	bool FinalizeProxyRuntimeGeometry(
+		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const FProxyPlaneCoverBuildData& CoverData,
+		FProxyMeshBuildData& MeshData,
+		FString& OutError)
+	{
+		MeshData.OutputMeshDescription = MeshData.MeshDescription;
+		MeshData.OutputStats = MeshData.Stats;
 		if (!BuildDoublePlanesOutputMesh(
-			EditorSettings,
-			CoverData.Settings,
-			MeshData,
-			OutError))
+				EditorSettings,
+				CoverData.Settings,
+				MeshData,
+				OutError))
 		{
 			return false;
 		}
-		if (!BuildMultiBillboardOutputMesh(
+		return BuildMultiBillboardOutputMesh(
 			EditorSettings,
 			CoverData,
-			MultiBillboardPlaneGroupIndices,
+			MeshData.MultiBillboardPlaneGroupIndices,
 			CoverData.Settings,
 			MeshData,
-			OutError))
+			OutError);
+	}
+
+	bool BuildProxyMaterialRecipe(
+		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const FProxyAtlasBuildData& AtlasData,
+		FProxyMaterialRecipe& OutRecipe,
+		FString& OutError)
+	{
+		OutRecipe = FProxyMaterialRecipe();
+		if (AtlasData.OutputSelection.bMaterialScalarAverages)
 		{
+			const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
+				ParameterNames = {
+					EditorSettings.LeafRoughnessParameterName,
+					EditorSettings.LeafSpecularParameterName,
+					EditorSettings.TrunkRoughnessParameterName,
+					EditorSettings.TrunkSpecularParameterName,
+				};
+			if (!UE::FoliageBaker::MaterialResolver::ResolveTrunkLeafMaterialScalarParameters(
+					AtlasData.AtlasStats.MaterialAverages,
+					ParameterNames,
+					OutRecipe.ScalarParameterValues,
+					OutError))
+			{
+				return false;
+			}
+		}
+
+		if (EditorSettings.Mode == EFoliageBakerCardMode::CrossCards)
+		{
+			OutRecipe.TwoSidedOverride = !UsesSeparateOneSidedCrossFaces(EditorSettings);
+		}
+		else if (UsesMultiBillboard(EditorSettings))
+		{
+			OutRecipe.TwoSidedOverride = true;
+		}
+		return true;
+	}
+
+	bool CreateProxyMaterialAssets(
+		const UStaticMesh& StaticMesh,
+		const FFoliageBakerCardBakeRequest& EditorSettings,
+		FFoliageBakerAssetTransaction& AssetTransaction,
+		const FProxyMeshBuildData& MeshData,
+		const FProxyAtlasBuildData& AtlasData,
+		const FProxyMaterialRecipe& MaterialRecipe,
+		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
+		FProxyMaterialAssetData& OutAssets,
+		FString& OutError)
+	{
+		UMaterialInstanceConstant* TemplateMaterialInstance = EditorSettings.MaterialTemplate;
+		if (!TemplateMaterialInstance)
+		{
+			OutError = TEXT("A parent Material Instance Constant must be selected in the current tool settings.");
 			return false;
 		}
 
-		if (OutData.OutputSelection.bBaseColorOpacity)
+		if (AtlasData.OutputSelection.bBaseColorOpacity)
 		{
-			OutData.AtlasTexture = CreateAtlasTextureAsset(
+			OutAssets.AtlasTexture = CreateAtlasTextureAsset(
 				StaticMesh,
 				AssetTransaction,
 				EditorSettings,
 				OutputFolders.TexturePackagePath,
-				OutData.AtlasPixels,
-				OutData.AtlasStats,
+				AtlasData.AtlasPixels,
+				AtlasData.AtlasStats,
 				MeshData.PlaneInfos,
 				OutError);
-			if (!OutData.AtlasTexture)
+			if (!OutAssets.AtlasTexture)
 			{
 				return false;
 			}
 		}
 
-		if (OutData.OutputSelection.bNormalMask)
+		if (AtlasData.OutputSelection.bNormalMask)
 		{
-			OutData.NormalAtlasTexture = CreateNormalAtlasTextureAsset(
+			OutAssets.NormalAtlasTexture = CreateNormalAtlasTextureAsset(
 				StaticMesh,
 				AssetTransaction,
 				EditorSettings,
 				OutputFolders.TexturePackagePath,
-				OutData.NormalAtlasPixels,
-				OutData.AtlasStats,
+				AtlasData.NormalAtlasPixels,
+				AtlasData.AtlasStats,
 				MeshData.PlaneInfos,
 				OutError);
-			if (!OutData.NormalAtlasTexture)
+			if (!OutAssets.NormalAtlasTexture)
 			{
 				return false;
 			}
 		}
 
-		if (OutData.OutputSelection.bMix)
+		if (AtlasData.OutputSelection.bMix)
 		{
-			OutData.MixAtlasTexture = CreateMixAtlasTextureAsset(
+			OutAssets.MixAtlasTexture = CreateMixAtlasTextureAsset(
 				StaticMesh,
 				AssetTransaction,
 				EditorSettings,
 				OutputFolders.TexturePackagePath,
-				OutData.MixAtlasPixels,
-				OutData.AtlasStats,
+				AtlasData.MixAtlasPixels,
+				AtlasData.AtlasStats,
 				MeshData.PlaneInfos,
 				OutError);
-			if (!OutData.MixAtlasTexture)
+			if (!OutAssets.MixAtlasTexture)
 			{
 				return false;
 			}
@@ -1740,42 +1122,25 @@ namespace
 		MaterialParams.BaseColorOpacityTextureParameterName = EditorSettings.BaseColorOpacityTextureParameterName;
 		MaterialParams.NormalDepthTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
-		if (OutData.OutputSelection.bMaterialScalarAverages)
-		{
-			const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
-				ParameterNames = {
-					EditorSettings.LeafRoughnessParameterName,
-					EditorSettings.LeafSpecularParameterName,
-					EditorSettings.TrunkRoughnessParameterName,
-					EditorSettings.TrunkSpecularParameterName,
-				};
-			if (!UE::FoliageBaker::MaterialResolver::ResolveTrunkLeafMaterialScalarParameters(
-					OutData.AtlasStats.MaterialAverages,
-					ParameterNames,
-					MaterialParams.ScalarParameterValues,
-					OutError))
-			{
-				return false;
-			}
-		}
+		MaterialParams.ScalarParameterValues = MaterialRecipe.ScalarParameterValues;
 		if (EditorSettings.bBakeUpperHemisphereL1Visibility)
 		{
-			OutData.UpperHemisphereL1VisibilityTexture =
+			OutAssets.UpperHemisphereL1VisibilityTexture =
 				CreateUpperHemisphereL1VisibilityTextureAsset(
 					StaticMesh,
 					AssetTransaction,
 					EditorSettings,
 					OutputFolders.TexturePackagePath,
-					OutData.UpperHemisphereL1VisibilityPixels,
-					OutData.AtlasStats,
-					MeshData.PlaneInfos,
+					AtlasData.UpperHemisphereL1VisibilityPixels,
+					AtlasData.UpperHemisphereL1VisibilityStats,
+					AtlasData.UpperHemisphereL1VisibilityPlaneInfos,
 					OutError);
-			if (!OutData.UpperHemisphereL1VisibilityTexture)
+			if (!OutAssets.UpperHemisphereL1VisibilityTexture)
 			{
 				return false;
 			}
 		}
-		if (OutData.UpperHemisphereL1VisibilityTexture)
+		if (OutAssets.UpperHemisphereL1VisibilityTexture)
 		{
 			FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue&
 				L1VisibilityParameter =
@@ -1783,26 +1148,19 @@ namespace
 			L1VisibilityParameter.ParameterName =
 				EditorSettings.UpperHemisphereL1VisibilityTextureParameterName;
 			L1VisibilityParameter.Texture =
-				OutData.UpperHemisphereL1VisibilityTexture;
+				OutAssets.UpperHemisphereL1VisibilityTexture;
 		}
-		if (EditorSettings.Mode == EFoliageBakerCardMode::CrossCards)
-		{
-			MaterialParams.TwoSidedOverride = !UsesSeparateOneSidedCrossFaces(EditorSettings);
-		}
-		else if (UsesMultiBillboard(EditorSettings))
-		{
-			MaterialParams.TwoSidedOverride = true;
-		}
-		OutData.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
+		MaterialParams.TwoSidedOverride = MaterialRecipe.TwoSidedOverride;
+		OutAssets.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,
 			AssetTransaction,
 			MaterialParams,
 			TemplateMaterialInstance,
-			OutData.AtlasTexture,
-			OutData.NormalAtlasTexture,
-			OutData.MixAtlasTexture,
+			OutAssets.AtlasTexture,
+			OutAssets.NormalAtlasTexture,
+			OutAssets.MixAtlasTexture,
 			OutError);
-		return OutData.Material != nullptr;
+		return OutAssets.Material != nullptr;
 	}
 
 	bool CreateProxyMeshAssetBundle(
@@ -1811,17 +1169,29 @@ namespace
 		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyMeshBuildData& MeshData,
-		const FProxyTextureBuildData& TextureData,
+		const FProxyMaterialAssetData& MaterialAssets,
 		FProxyAssetBuildResult& OutResult,
 		FString& OutError)
 	{
 		OutResult.MeshOutputMode = MeshOutputSelection.OutputMode;
-		const int32 OutputUVChannelCount = FMath::Clamp(
-			FStaticMeshConstAttributes(MeshData.MeshDescription)
+		const int32 AvailableUVChannelCount =
+			FStaticMeshConstAttributes(MeshData.OutputMeshDescription)
 				.GetVertexInstanceUVs()
-				.GetNumChannels(),
+				.GetNumChannels();
+		const int32 OutputUVChannelCount = FMath::Clamp(
+			FMath::Max(
+				GetDesiredCardUVChannelCount(EditorSettings),
+				MeshData.RetainedTrunkUVChannelCount),
 			1,
 			UE::FoliageBaker::PlaneCover::MaxSourceMeshUVChannels);
+		if (AvailableUVChannelCount < OutputUVChannelCount)
+		{
+			OutError = FString::Printf(
+				TEXT("Generated card mesh contains %d UV channels, but %d are required by its runtime payload and retained trunk."),
+				AvailableUVChannelCount,
+				OutputUVChannelCount);
+			return false;
+		}
 
 		if (MeshOutputSelection.OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 		{
@@ -1840,8 +1210,8 @@ namespace
 				StaticMesh,
 				AssetTransaction,
 				MeshParams,
-				MeshData.MeshDescription,
-				TextureData.Material,
+				MeshData.OutputMeshDescription,
+				MaterialAssets.Material,
 				OutError);
 			if (!OutResult.ProxyMesh)
 			{
@@ -1859,8 +1229,8 @@ namespace
 				StaticMesh,
 				AssetTransaction,
 				LODParams,
-				MeshData.MeshDescription,
-				TextureData.Material,
+				MeshData.OutputMeshDescription,
+				MaterialAssets.Material,
 				InstalledLODIndex,
 				OutError))
 			{
@@ -1871,12 +1241,12 @@ namespace
 			OutResult.SourceMeshLODIndex = InstalledLODIndex;
 		}
 
-		OutResult.AtlasTexture = TextureData.AtlasTexture;
-		OutResult.NormalAtlasTexture = TextureData.NormalAtlasTexture;
-		OutResult.MixAtlasTexture = TextureData.MixAtlasTexture;
+		OutResult.AtlasTexture = MaterialAssets.AtlasTexture;
+		OutResult.NormalAtlasTexture = MaterialAssets.NormalAtlasTexture;
+		OutResult.MixAtlasTexture = MaterialAssets.MixAtlasTexture;
 		OutResult.UpperHemisphereL1VisibilityTexture =
-			TextureData.UpperHemisphereL1VisibilityTexture;
-		OutResult.Material = TextureData.Material;
+			MaterialAssets.UpperHemisphereL1VisibilityTexture;
+		OutResult.Material = MaterialAssets.Material;
 		return true;
 	}
 
@@ -1885,12 +1255,13 @@ namespace
 		const FFoliageBakerCardBakeRequest& Request,
 		const FProxyPlaneCoverBuildData& CoverData,
 		const FProxyMeshBuildData& MeshData,
-		const FProxyTextureBuildData& TextureData,
+		const FProxyAtlasBuildData& AtlasData,
+		const FProxyMaterialAssetData& MaterialAssets,
 		const FProxyAssetBuildResult& AssetResult)
 	{
-		const FString AlphaPolicyDetails = TextureData.AtlasStats.MaterialAlphaPolicyDetails.IsEmpty()
+		const FString AlphaPolicyDetails = AtlasData.AtlasStats.MaterialAlphaPolicyDetails.IsEmpty()
 			? FString()
-			: FString::Printf(TEXT("\n  alpha policy:%s"), *TextureData.AtlasStats.MaterialAlphaPolicyDetails);
+			: FString::Printf(TEXT("\n  alpha policy:%s"), *AtlasData.AtlasStats.MaterialAlphaPolicyDetails);
 		const FString CrossFaceDetails = Request.Mode != EFoliageBakerCardMode::CrossCards
 			? FString()
 			: FString::Printf(
@@ -1951,9 +1322,15 @@ namespace
 			CaptureDetails,
 			*ClassificationDetails,
 			*CrossFaceDetails);
-		const FString BaseAtlasPath = TextureData.AtlasTexture ? TextureData.AtlasTexture->GetPathName() : TEXT("disabled");
-		const FString NormalAtlasPath = TextureData.NormalAtlasTexture ? TextureData.NormalAtlasTexture->GetPathName() : TEXT("disabled");
-		const FString MixAtlasPath = TextureData.MixAtlasTexture ? TextureData.MixAtlasTexture->GetPathName() : TEXT("disabled");
+		const FString BaseAtlasPath = MaterialAssets.AtlasTexture
+			? MaterialAssets.AtlasTexture->GetPathName()
+			: TEXT("disabled");
+		const FString NormalAtlasPath = MaterialAssets.NormalAtlasTexture
+			? MaterialAssets.NormalAtlasTexture->GetPathName()
+			: TEXT("disabled");
+		const FString MixAtlasPath = MaterialAssets.MixAtlasTexture
+			? MaterialAssets.MixAtlasTexture->GetPathName()
+			: TEXT("disabled");
 		const FString MeshOutputDetails = AssetResult.MeshOutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
 			? FString::Printf(TEXT("%s: %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), *AssetResult.ProxyMesh->GetPathName())
 			: FString::Printf(TEXT("%s %d on %s"), GetMeshOutputModeText(AssetResult.MeshOutputMode), AssetResult.SourceMeshLODIndex, *AssetResult.ProxyMesh->GetPathName());
@@ -1975,28 +1352,28 @@ namespace
 		const FString MaterialScalarDetails =
 			UE::FoliageBaker::MaterialResolver::BuildTrunkLeafMaterialAveragesReport(
 				!Request.bBakeMix,
-				TextureData.AtlasStats.MaterialAverages,
+				AtlasData.AtlasStats.MaterialAverages,
 				MaterialScalarParameterNames);
 
 		FString Report = FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/trunk-leaf atlas: %s, RGB=%s, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  material scalar averages: %s\n  atlas UVs: %s\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: %s"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/trunk-leaf atlas: %s, RGB=%s, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  material scalar averages: %s\n  atlas UVs: %s\n  material instance: %s (parent template: %s; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: %s"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
-			MeshData.Stats.PlaneCount,
-			MeshData.Stats.QuadCount,
-			MeshData.Stats.TriangleCount,
-			TextureData.AtlasStats.Width,
-			TextureData.AtlasStats.Height,
-			TextureData.AtlasStats.TileResolution,
-			TextureData.AtlasStats.PackedTileUtilizationPercent,
-			TextureData.AtlasStats.FrontTileCount,
-			TextureData.AtlasStats.BackTileCount,
-			TextureData.AtlasStats.PaintedPixels,
-			TextureData.AtlasStats.AlphaAwareCroppedPlanes,
-			TextureData.AtlasStats.AlphaAwareTileCropGuardPixels,
-			TextureData.AtlasStats.RasterizedTriangleReferences,
-			TextureData.AtlasStats.MaskedMaterialBakeReferences,
+			MeshData.OutputStats.PlaneCount,
+			MeshData.OutputStats.QuadCount,
+			MeshData.OutputStats.TriangleCount,
+			AtlasData.AtlasStats.Width,
+			AtlasData.AtlasStats.Height,
+			AtlasData.AtlasStats.TileResolution,
+			AtlasData.AtlasStats.PackedTileUtilizationPercent,
+			AtlasData.AtlasStats.FrontTileCount,
+			AtlasData.AtlasStats.BackTileCount,
+			AtlasData.AtlasStats.PaintedPixels,
+			AtlasData.AtlasStats.AlphaAwareCroppedPlanes,
+			AtlasData.AtlasStats.AlphaAwareTileCropGuardPixels,
+			AtlasData.AtlasStats.RasterizedTriangleReferences,
+			AtlasData.AtlasStats.MaskedMaterialBakeReferences,
 			Request.Mode == EFoliageBakerCardMode::CrossCards
 				? TEXT("dedicated fixed-angle orthographic capture, front and back per plane, all selected-LOD triangles, WPO disabled")
 				: UsesMultiBillboard(Request)
@@ -2015,21 +1392,22 @@ namespace
 			*MixAtlasPath,
 			*MaterialScalarDetails,
 			AtlasUVDetails,
-			*TextureData.Material->GetPathName(),
+			*MaterialAssets.Material->GetPathName(),
+			*Request.MaterialTemplate->GetPathName(),
 			*MaterialParameterDetails,
-			MeshData.Stats.SourceShadingNormalTriangleCount,
-			MeshData.Stats.SourceTriangleCount,
-			MeshData.Stats.AveragePlaneToShadingNormalDot,
-			MeshData.Stats.AveragePlaneToShadingNormalAngleDegrees,
+			MeshData.OutputStats.SourceShadingNormalTriangleCount,
+			MeshData.OutputStats.SourceTriangleCount,
+			MeshData.OutputStats.AveragePlaneToShadingNormalDot,
+			MeshData.OutputStats.AveragePlaneToShadingNormalAngleDegrees,
 			MeshBuildPathDetails,
 			WindingDetails);
-		if (TextureData.UpperHemisphereL1VisibilityTexture)
+		if (MaterialAssets.UpperHemisphereL1VisibilityTexture)
 		{
 			Report += FString::Printf(
-				TEXT("\n  upper-hemisphere L1 visibility atlas: %s, size=%dx%d, configured maximum dimension=%d, RGB=object/local-space signed Cxyz remapped to 0..1, A=C0, samples=%d, internal shadow resolution=%d, material parameter=%s"),
-				*TextureData.UpperHemisphereL1VisibilityTexture->GetPathName(),
-				TextureData.UpperHemisphereL1VisibilityTexture->GetSizeX(),
-				TextureData.UpperHemisphereL1VisibilityTexture->GetSizeY(),
+				TEXT("\n  upper-hemisphere L1 visibility atlas: %s, size=%dx%d, configured maximum dimension=%d, RGB=capture-frame signed Cnormal/CaxisU/CaxisV remapped to 0..1, A=C0, samples=%d, internal shadow resolution=%d, material parameter=%s"),
+				*MaterialAssets.UpperHemisphereL1VisibilityTexture->GetPathName(),
+				MaterialAssets.UpperHemisphereL1VisibilityTexture->GetSizeX(),
+				MaterialAssets.UpperHemisphereL1VisibilityTexture->GetSizeY(),
 				Request.UpperHemisphereL1TextureResolution,
 				Request.UpperHemisphereL1SampleCount,
 				Request.UpperHemisphereL1ShadowMapResolution,
@@ -2050,93 +1428,215 @@ namespace
 		return Report;
 	}
 
-	FProxyAssetBuildResult BuildCardProxyAsset(
-		UStaticMesh& StaticMesh,
-		const FFoliageBakerCardBakeRequest& EditorSettings,
-		const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
+	enum class EPipelineStageResult : uint8
 	{
-		FString Error;
-		FProxyPlaneCoverBuildData CoverData;
-		if (!BuildProxyPlaneCoverData(StaticMesh, EditorSettings, CoverData, Error))
+		Succeeded,
+		Failed,
+		Cancelled
+	};
+
+	class FCardBakePipeline final
+	{
+	public:
+		FCardBakePipeline(
+			UStaticMesh& InStaticMesh,
+			const FFoliageBakerCardBakeRequest& InSettings,
+			const FFoliageBakerMeshOutputSelector& InMeshOutputSelector)
+			: StaticMesh(InStaticMesh)
+			, Settings(InSettings)
+			, MeshOutputSelector(InMeshOutputSelector)
 		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
 
-		FProxyMeshBuildData MeshData;
-		if (!BuildProxyMeshData(CoverData, MeshData, Error))
+		FProxyAssetBuildResult Run()
 		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
-		}
+			if (!BuildSourceStage())
+			{
+				return Fail();
+			}
+			if (!BuildGeometryStage())
+			{
+				return Fail();
+			}
 
-		const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
-			MeshOutputSelector.Execute(StaticMesh, EditorSettings.SourceLODIndex);
-		if (!MeshOutputSelection.IsSet())
-		{
-			return MakeProxyBuildCancelled(StaticMesh);
-		}
-		if (MeshOutputSelection->OutputMode != EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
-			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
+			const EPipelineStageResult OutputSelectionResult = ResolveOutputStage();
+			if (OutputSelectionResult == EPipelineStageResult::Cancelled)
+			{
+				return MakeProxyBuildCancelled(StaticMesh);
+			}
+			if (OutputSelectionResult == EPipelineStageResult::Failed)
+			{
+				return Fail();
+			}
+
+			if (!PrepareCaptureGeometryStage())
+			{
+				return Fail();
+			}
+			if (!BakeAtlasStage())
+			{
+				return Fail();
+			}
+			if (!BuildMaterialRecipeStage())
+			{
+				return Fail();
+			}
+			if (!FinalizeRuntimeGeometryStage())
+			{
+				return Fail();
+			}
+			if (!WriteMaterialAssetsStage())
+			{
+				return Fail();
+			}
+			if (!WriteMeshOutputStage())
+			{
+				return Fail();
+			}
+
+			AssetTransaction.Commit();
+			Result.bSucceeded = true;
+			Result.Report = BuildProxySuccessReport(
 				StaticMesh,
-				BuildSourceLODAssetParams(EditorSettings, *MeshOutputSelection),
-				Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
+				Settings,
+				Source,
+				Geometry,
+				Atlas,
+				MaterialAssets,
+				Result);
+			UE_LOG(LogFoliageBakerCards, Display, TEXT("\n%s"), *Result.Report);
+			return Result;
 		}
 
-		FFoliageBakerGeneratedAssetOutputFolders OutputFolders;
-		if (EditorSettings.bPlaceGeneratedAssetsNearReplacedLODAssets
-			&& MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD)
+	private:
+		bool BuildSourceStage()
 		{
-			OutputFolders = FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
-				StaticMesh,
-				MeshOutputSelection->ReplaceLODIndex);
+			return BuildProxyPlaneCoverData(StaticMesh, Settings, Source, Error);
 		}
 
-		FProxyTextureBuildData TextureData;
-		FFoliageBakerAssetTransaction AssetTransaction;
-		if (!BuildProxyTextureData(
+		bool BuildGeometryStage()
+		{
+			return BuildProxyMeshData(Source, Geometry, Error);
+		}
+
+		EPipelineStageResult ResolveOutputStage()
+		{
+			MeshOutputSelection =
+				MeshOutputSelector.Execute(StaticMesh, Settings.SourceLODIndex);
+			if (!MeshOutputSelection.IsSet())
+			{
+				return EPipelineStageResult::Cancelled;
+			}
+
+			if (MeshOutputSelection->OutputMode
+					!= EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
+				&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
+					StaticMesh,
+					BuildSourceLODAssetParams(Settings, *MeshOutputSelection),
+					Error))
+			{
+				return EPipelineStageResult::Failed;
+			}
+
+			if (Settings.bPlaceGeneratedAssetsNearReplacedLODAssets
+				&& MeshOutputSelection->OutputMode
+					== EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD)
+			{
+				OutputFolders = FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
+					StaticMesh,
+					MeshOutputSelection->ReplaceLODIndex);
+			}
+			return EPipelineStageResult::Succeeded;
+		}
+
+		bool PrepareCaptureGeometryStage()
+		{
+			return PrepareProxyCaptureGeometry(Settings, Source, Geometry, Error);
+		}
+
+		bool BakeAtlasStage()
+		{
+			return BakeProxyAtlasData(
 				StaticMesh,
-				EditorSettings,
+				Settings,
+				Source,
+				Geometry,
+				Atlas,
+				Error);
+		}
+
+		bool BuildMaterialRecipeStage()
+		{
+			return BuildProxyMaterialRecipe(Settings, Atlas, MaterialRecipe, Error);
+		}
+
+		bool FinalizeRuntimeGeometryStage()
+		{
+			return FinalizeProxyRuntimeGeometry(Settings, Source, Geometry, Error);
+		}
+
+		bool WriteMaterialAssetsStage()
+		{
+			return CreateProxyMaterialAssets(
+				StaticMesh,
+				Settings,
 				AssetTransaction,
-				CoverData,
-				MeshData,
+				Geometry,
+				Atlas,
+				MaterialRecipe,
 				OutputFolders,
-				TextureData,
-				Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
+				MaterialAssets,
+				Error);
 		}
-		if (!AppendReducedMultiBillboardTrunk(
-			StaticMesh,
-			EditorSettings,
-			CoverData,
-			TextureData.Material,
-			MeshData,
-			Error))
+
+		bool WriteMeshOutputStage()
+		{
+			if (!MeshOutputSelection.IsSet())
+			{
+				Error = TEXT("The Card bake pipeline reached asset output without a mesh output selection.");
+				return false;
+			}
+			if (!AppendReducedMultiBillboardTrunk(
+					StaticMesh,
+					Settings,
+					Source,
+					MaterialAssets.Material,
+					Geometry,
+					Error))
+			{
+				return false;
+			}
+
+			return CreateProxyMeshAssetBundle(
+				StaticMesh,
+				Settings,
+				*MeshOutputSelection,
+				AssetTransaction,
+				Geometry,
+				MaterialAssets,
+				Result,
+				Error);
+		}
+
+		FProxyAssetBuildResult Fail() const
 		{
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
 
+		UStaticMesh& StaticMesh;
+		const FFoliageBakerCardBakeRequest& Settings;
+		const FFoliageBakerMeshOutputSelector& MeshOutputSelector;
+		FString Error;
+		FProxyPlaneCoverBuildData Source;
+		FProxyMeshBuildData Geometry;
+		FProxyAtlasBuildData Atlas;
+		FProxyMaterialRecipe MaterialRecipe;
+		FProxyMaterialAssetData MaterialAssets;
+		TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection;
+		FFoliageBakerGeneratedAssetOutputFolders OutputFolders;
+		FFoliageBakerAssetTransaction AssetTransaction;
 		FProxyAssetBuildResult Result;
-		if (!CreateProxyMeshAssetBundle(
-			StaticMesh,
-			EditorSettings,
-			*MeshOutputSelection,
-			AssetTransaction,
-			MeshData,
-			TextureData,
-			Result,
-			Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
-		}
-		AssetTransaction.Commit();
-
-		Result.bSucceeded = true;
-		Result.Report = BuildProxySuccessReport(StaticMesh, EditorSettings, CoverData, MeshData, TextureData, Result);
-		UE_LOG(LogFoliageBakerCards, Display, TEXT("\n%s"), *Result.Report);
-		return Result;
-	}
+	};
 
 	void AppendCardCreatedAssets(const FProxyAssetBuildResult& BuildResult, TArray<UObject*>& OutCreatedAssets)
 	{
@@ -2165,6 +1665,158 @@ namespace
 			OutCreatedAssets.Add(BuildResult.Material);
 		}
 	}
+
+	bool ValidateCardBakeRequest(
+		const FFoliageBakerCardBakeRequest& Request,
+		const FFoliageBakerMeshOutputSelector& MeshOutputSelector,
+		FString& OutFailureReport)
+	{
+		if (!Request.SourceStaticMesh)
+		{
+			OutFailureReport = TEXT("Foliage Baker failed: source Static Mesh is null.");
+			return false;
+		}
+
+		auto Fail = [&](const FString& Message)
+		{
+			OutFailureReport = FString::Printf(
+				TEXT("%s\n  failed: %s"),
+				*Request.SourceStaticMesh->GetName(),
+				*Message);
+			return false;
+		};
+		if (Request.SourceLODIndex < 0 || Request.SourceLODIndex >= MAX_STATIC_MESH_LODS)
+		{
+			return Fail(FString::Printf(
+				TEXT("source LOD index %d is outside the supported range 0-%d."),
+				Request.SourceLODIndex,
+				MAX_STATIC_MESH_LODS - 1));
+		}
+		if (!Request.MaterialTemplate)
+		{
+			return Fail(TEXT("a parent Material Instance Constant must be selected in the current tool settings."));
+		}
+		if (!Request.bBakeBaseColorOpacity
+			&& !Request.bBakeNormalDepth
+			&& !Request.bBakeMix
+			&& !Request.bBakeUpperHemisphereL1Visibility)
+		{
+			return Fail(TEXT("no texture output is enabled."));
+		}
+		if (!MeshOutputSelector.IsBound())
+		{
+			return Fail(TEXT("mesh output selector is not bound."));
+		}
+		if (Request.bBakeUpperHemisphereL1Visibility
+			&& Request.Mode != EFoliageBakerCardMode::SingleBillboard)
+		{
+			return Fail(TEXT("Upper Hemisphere L1 Visibility is currently supported only by Billboard modes."));
+		}
+
+		TSet<FName> UsedTextureParameterNames;
+		auto ValidateTextureParameterName = [&](const bool bEnabled,
+			const FName ParameterName,
+			const TCHAR* OutputLabel) -> bool
+		{
+			if (!bEnabled)
+			{
+				return true;
+			}
+			if (ParameterName.IsNone())
+			{
+				return Fail(FString::Printf(
+					TEXT("%s output is enabled, but its Material texture parameter name is None."),
+					OutputLabel));
+			}
+			if (UsedTextureParameterNames.Contains(ParameterName))
+			{
+				return Fail(FString::Printf(
+					TEXT("Material texture parameter '%s' is assigned to more than one enabled output."),
+					*ParameterName.ToString()));
+			}
+			UsedTextureParameterNames.Add(ParameterName);
+			return true;
+		};
+		if (!ValidateTextureParameterName(
+				Request.bBakeBaseColorOpacity,
+				Request.BaseColorOpacityTextureParameterName,
+				TEXT("BaseColor/Opacity"))
+			|| !ValidateTextureParameterName(
+				Request.bBakeNormalDepth,
+				Request.NormalDepthTextureParameterName,
+				TEXT("Normal/TrunkLeafMask"))
+			|| !ValidateTextureParameterName(
+				Request.bBakeMix,
+				Request.MixTextureParameterName,
+				TEXT("Mix"))
+			|| !ValidateTextureParameterName(
+				Request.bBakeUpperHemisphereL1Visibility,
+				Request.UpperHemisphereL1VisibilityTextureParameterName,
+				TEXT("Upper Hemisphere L1 Visibility")))
+		{
+			return false;
+		}
+		if (Request.TextureResolution < 256 || Request.TextureResolution > 4096)
+		{
+			return Fail(TEXT("texture resolution must be between 256 and 4096."));
+		}
+		return true;
+	}
+
+	FFoliageBakerCardBakeRequest SanitizeCardBakeRequest(
+		const FFoliageBakerCardBakeRequest& Request)
+	{
+		FFoliageBakerCardBakeRequest Result = Request;
+		Result.CrossCardPlaneCount = FMath::Clamp(Request.CrossCardPlaneCount, 2, 5);
+		Result.MultiBillboardClusterCount =
+			FMath::Clamp(Request.MultiBillboardClusterCount, 1, 128);
+		Result.MultiBillboardsPerCluster =
+			FMath::Clamp(Request.MultiBillboardsPerCluster, 2, 8);
+		Result.TrunkTrianglePercentage =
+			FMath::Clamp(Request.TrunkTrianglePercentage, 0.05f, 1.0f);
+		Result.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
+		Result.MipMaskCoverageThreshold =
+			FMath::Clamp(Request.MipMaskCoverageThreshold, 0.01f, 1.0f);
+		Result.UpperHemisphereL1TextureResolution =
+			FMath::Clamp(Request.UpperHemisphereL1TextureResolution, 64, 1024);
+		Result.UpperHemisphereL1SampleCount =
+			FMath::Clamp(Request.UpperHemisphereL1SampleCount, 4, 32);
+		Result.UpperHemisphereL1ShadowMapResolution =
+			FMath::Clamp(Request.UpperHemisphereL1ShadowMapResolution, 64, 1024);
+
+		const FString FeatureSuffix = Request.Mode == EFoliageBakerCardMode::CrossCards
+			? TEXT("_Cross")
+			: UsesMultiBillboard(Request)
+				? TEXT("_MultiBillboard")
+				: UsesDoublePlanesBillboard(Request)
+					? TEXT("_DoubleBillboard")
+					: TEXT("_Billboard");
+		Result.BaseColorOpacityTextureSuffix = FeatureSuffix + Request.BaseColorOpacityTextureSuffix;
+		Result.NormalDepthTextureSuffix = FeatureSuffix + Request.NormalDepthTextureSuffix;
+		Result.MixTextureSuffix = FeatureSuffix + Request.MixTextureSuffix;
+		Result.UpperHemisphereL1VisibilityTextureSuffix =
+			FeatureSuffix + Request.UpperHemisphereL1VisibilityTextureSuffix;
+		Result.MaterialInstanceNameSuffix = FeatureSuffix + Request.MaterialInstanceNameSuffix;
+		return Result;
+	}
+
+	FFoliageBakerCardBakeResult BuildCardBakeResult(const FProxyAssetBuildResult& BuildResult)
+	{
+		FFoliageBakerCardBakeResult Result;
+		Result.bSucceeded = BuildResult.bSucceeded;
+		Result.bCancelled = BuildResult.bCancelled;
+		Result.ProxyMesh = BuildResult.ProxyMesh;
+		Result.SourceMeshLODIndex = BuildResult.SourceMeshLODIndex;
+		Result.ColorOpacityTexture = BuildResult.AtlasTexture;
+		Result.NormalDepthTexture = BuildResult.NormalAtlasTexture;
+		Result.MixTexture = BuildResult.MixAtlasTexture;
+		Result.UpperHemisphereL1VisibilityTexture =
+			BuildResult.UpperHemisphereL1VisibilityTexture;
+		Result.MaterialInstance = BuildResult.Material;
+		Result.Report = BuildResult.Report;
+		AppendCardCreatedAssets(BuildResult, Result.CreatedAssets);
+		return Result;
+	}
 }
 
 
@@ -2172,139 +1824,22 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(
 	const FFoliageBakerCardBakeRequest& Request,
 	const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 {
-	FFoliageBakerCardBakeResult OutResult;
-	if (!Request.SourceStaticMesh)
+	FString ValidationFailureReport;
+	if (!ValidateCardBakeRequest(Request, MeshOutputSelector, ValidationFailureReport))
 	{
-		OutResult.Report = TEXT("Foliage Baker failed: source Static Mesh is null.");
-		return OutResult;
+		FFoliageBakerCardBakeResult Result;
+		Result.Report = MoveTemp(ValidationFailureReport);
+		return Result;
 	}
-	if (Request.SourceLODIndex < 0 || Request.SourceLODIndex >= MAX_STATIC_MESH_LODS)
-	{
-		OutResult.Report = FString::Printf(
-			TEXT("%s\n  failed: source LOD index %d is outside the supported range 0-%d."),
-			*Request.SourceStaticMesh->GetName(),
-			Request.SourceLODIndex,
-			MAX_STATIC_MESH_LODS - 1);
-		return OutResult;
-	}
-	if (!Request.MaterialTemplate)
-	{
-		OutResult.Report = FString::Printf(TEXT("%s\n  failed: a parent Material Instance Constant must be selected in the current tool settings."), *Request.SourceStaticMesh->GetName());
-		return OutResult;
-	}
-	if (!Request.bBakeBaseColorOpacity
-		&& !Request.bBakeNormalDepth
-		&& !Request.bBakeMix
-		&& !Request.bBakeUpperHemisphereL1Visibility)
-	{
-		OutResult.Report = FString::Printf(TEXT("%s\n  failed: no texture output is enabled."), *Request.SourceStaticMesh->GetName());
-		return OutResult;
-	}
-	if (!MeshOutputSelector.IsBound())
-	{
-		OutResult.Report = FString::Printf(
-			TEXT("%s\n  failed: mesh output selector is not bound."),
-			*Request.SourceStaticMesh->GetName());
-		return OutResult;
-	}
-	if (Request.bBakeUpperHemisphereL1Visibility
-		&& Request.Mode != EFoliageBakerCardMode::SingleBillboard)
-	{
-		OutResult.Report = FString::Printf(
-			TEXT("%s\n  failed: Upper Hemisphere L1 Visibility is currently supported only by Billboard modes."),
-			*Request.SourceStaticMesh->GetName());
-		return OutResult;
-	}
-	TSet<FName> UsedTextureParameterNames;
-	FString TextureParameterError;
-	auto ValidateTextureParameterName = [&](const bool bEnabled, const FName ParameterName, const TCHAR* OutputLabel) -> bool
-	{
-		if (!bEnabled)
-		{
-			return true;
-		}
-		if (ParameterName.IsNone())
-		{
-			TextureParameterError = FString::Printf(
-				TEXT("%s output is enabled, but its Material texture parameter name is None."),
-				OutputLabel);
-			return false;
-		}
-		if (UsedTextureParameterNames.Contains(ParameterName))
-		{
-			TextureParameterError = FString::Printf(
-				TEXT("Material texture parameter '%s' is assigned to more than one enabled output."),
-				*ParameterName.ToString());
-			return false;
-		}
-		UsedTextureParameterNames.Add(ParameterName);
-		return true;
-	};
-	if (!ValidateTextureParameterName(Request.bBakeBaseColorOpacity, Request.BaseColorOpacityTextureParameterName, TEXT("BaseColor/Opacity"))
-		|| !ValidateTextureParameterName(Request.bBakeNormalDepth, Request.NormalDepthTextureParameterName, TEXT("Normal/TrunkLeafMask"))
-		|| !ValidateTextureParameterName(Request.bBakeMix, Request.MixTextureParameterName, TEXT("Mix"))
-		|| !ValidateTextureParameterName(
-			Request.bBakeUpperHemisphereL1Visibility,
-			Request.UpperHemisphereL1VisibilityTextureParameterName,
-			TEXT("Upper Hemisphere L1 Visibility")))
-	{
-		OutResult.Report = FString::Printf(
-			TEXT("%s\n  failed: %s"),
-			*Request.SourceStaticMesh->GetName(),
-			*TextureParameterError);
-		return OutResult;
-	}
-	if (Request.TextureResolution < 256 || Request.TextureResolution > 4096)
-	{
-		OutResult.Report = FString::Printf(TEXT("%s\n  failed: texture resolution must be between 256 and 4096."), *Request.SourceStaticMesh->GetName());
-		return OutResult;
-	}
+	const FFoliageBakerCardBakeRequest SanitizedRequest = SanitizeCardBakeRequest(Request);
 
-	FFoliageBakerCardBakeRequest SanitizedRequest = Request;
-	SanitizedRequest.SourceLODIndex = Request.SourceLODIndex;
-	SanitizedRequest.CrossCardPlaneCount = FMath::Clamp(Request.CrossCardPlaneCount, 2, 5);
-	SanitizedRequest.MultiBillboardClusterCount =
-		FMath::Clamp(Request.MultiBillboardClusterCount, 1, 128);
-	SanitizedRequest.MultiBillboardsPerCluster =
-		FMath::Clamp(Request.MultiBillboardsPerCluster, 2, 8);
-	SanitizedRequest.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
-	SanitizedRequest.MipMaskCoverageThreshold =
-		FMath::Clamp(Request.MipMaskCoverageThreshold, 0.01f, 1.0f);
-	SanitizedRequest.UpperHemisphereL1TextureResolution =
-		FMath::Clamp(Request.UpperHemisphereL1TextureResolution, 64, 1024);
-	SanitizedRequest.UpperHemisphereL1SampleCount =
-		FMath::Clamp(Request.UpperHemisphereL1SampleCount, 4, 32);
-	SanitizedRequest.UpperHemisphereL1ShadowMapResolution =
-		FMath::Clamp(Request.UpperHemisphereL1ShadowMapResolution, 64, 1024);
-	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardMode::CrossCards
-		? TEXT("_Cross")
-		: UsesMultiBillboard(Request)
-			? TEXT("_MultiBillboard")
-		: UsesDoublePlanesBillboard(Request)
-			? TEXT("_DoubleBillboard")
-			: TEXT("_Billboard");
-	SanitizedRequest.BaseColorOpacityTextureSuffix = FeatureSuffix + Request.BaseColorOpacityTextureSuffix;
-	SanitizedRequest.NormalDepthTextureSuffix = FeatureSuffix + Request.NormalDepthTextureSuffix;
-	SanitizedRequest.MixTextureSuffix = FeatureSuffix + Request.MixTextureSuffix;
-	SanitizedRequest.UpperHemisphereL1VisibilityTextureSuffix =
-		FeatureSuffix + Request.UpperHemisphereL1VisibilityTextureSuffix;
-	SanitizedRequest.MaterialInstanceNameSuffix = FeatureSuffix + Request.MaterialInstanceNameSuffix;
-
-	const FProxyAssetBuildResult InternalResult = BuildCardProxyAsset(
-		*Request.SourceStaticMesh,
-		SanitizedRequest,
-		MeshOutputSelector);
-	OutResult.bSucceeded = InternalResult.bSucceeded;
-	OutResult.bCancelled = InternalResult.bCancelled;
-	OutResult.ProxyMesh = InternalResult.ProxyMesh;
-	OutResult.SourceMeshLODIndex = InternalResult.SourceMeshLODIndex;
-	OutResult.ColorOpacityTexture = InternalResult.AtlasTexture;
-	OutResult.NormalDepthTexture = InternalResult.NormalAtlasTexture;
-	OutResult.MixTexture = InternalResult.MixAtlasTexture;
-	OutResult.UpperHemisphereL1VisibilityTexture =
-		InternalResult.UpperHemisphereL1VisibilityTexture;
-	OutResult.MaterialInstance = InternalResult.Material;
-	OutResult.Report = InternalResult.Report;
-	AppendCardCreatedAssets(InternalResult, OutResult.CreatedAssets);
-	return OutResult;
+	FProxyAssetBuildResult InternalResult;
+	{
+		FCardBakePipeline Pipeline(
+			*Request.SourceStaticMesh,
+			SanitizedRequest,
+			MeshOutputSelector);
+		InternalResult = Pipeline.Run();
+	}
+	return BuildCardBakeResult(InternalResult);
 }

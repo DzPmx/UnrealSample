@@ -45,7 +45,9 @@ namespace UE::FoliageBaker::L1Visibility
 				int32 PixelIndex,
 				float Visibility);
 
-			FColor EncodePixel(int32 PixelIndex) const;
+			FColor EncodePixelInCaptureFrame(
+				int32 PixelIndex,
+				const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo) const;
 
 		private:
 			TArray<FVector> Directions;
@@ -405,7 +407,9 @@ namespace UE::FoliageBaker::L1Visibility
 				SampleBases[DirectionIndex] * FMath::Clamp(Visibility, 0.0f, 1.0f);
 		}
 
-		FColor FL1VisibilityFitter::EncodePixel(const int32 PixelIndex) const
+		FColor FL1VisibilityFitter::EncodePixelInCaptureFrame(
+			const int32 PixelIndex,
+			const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo) const
 		{
 			if (!NormalEquationRightHandSides.IsValidIndex(PixelIndex))
 			{
@@ -428,8 +432,20 @@ namespace UE::FoliageBaker::L1Visibility
 				}
 			}
 
-			return FColor(EncodeSigned(Coefficients[1]), EncodeSigned(Coefficients[2]), EncodeSigned(Coefficients[3]),
-						  EncodeUnsigned(Coefficients[0]));
+			const FVector DirectionalCoefficients(
+				Coefficients[1],
+				Coefficients[2],
+				Coefficients[3]);
+			const FVector CaptureNormal = PlaneInfo.Normal.GetSafeNormal();
+			const FVector CaptureAxisU = PlaneInfo.AxisU.GetSafeNormal();
+			const FVector CaptureAxisV = PlaneInfo.AxisV.GetSafeNormal();
+			// The runtime evaluates the texture against BillboardSunDirLocal, whose axes
+			// correspond to the capture plane's Normal, AxisU, and AxisV respectively.
+			return FColor(
+				EncodeSigned(FVector::DotProduct(DirectionalCoefficients, CaptureNormal)),
+				EncodeSigned(FVector::DotProduct(DirectionalCoefficients, CaptureAxisU)),
+				EncodeSigned(FVector::DotProduct(DirectionalCoefficients, CaptureAxisV)),
+				EncodeUnsigned(Coefficients[0]));
 		}
 
 		float SampleShadowVisibilityPcf5x5(
@@ -539,11 +555,14 @@ namespace UE::FoliageBaker::L1Visibility
 
 		TArray<FVector> ReceiverPositions;
 		ReceiverPositions.SetNumZeroed(AtlasPixelCount);
+		TArray<int32> ReceiverPlaneIndices;
+		ReceiverPlaneIndices.Init(INDEX_NONE, AtlasPixelCount);
 		TBitArray<> ReceiverCoverage;
 		ReceiverCoverage.Init(false, AtlasPixelCount);
 		int32 ReceiverCount = 0;
-		for (const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
+		for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
 		{
+			const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
 			const FIntPoint TileSize = PlaneInfo.AtlasTileSize;
 			const FVector CaptureRayDirection = -PlaneInfo.Normal;
 			for (int32 LocalY = 0; LocalY < TileSize.Y; ++LocalY)
@@ -567,8 +586,16 @@ namespace UE::FoliageBaker::L1Visibility
 						continue;
 					}
 					ReceiverPositions[AtlasPixelIndex] =
-						ReconstructSourcePosition(PlaneInfo, TileSize, LocalX, LocalY, Encoded.A, CaptureRayDirection,
-												  SourceBounds, Settings.AtlasVConvention);
+						ReconstructSourcePosition(
+							PlaneInfo,
+							TileSize,
+							LocalX,
+							LocalY,
+							Encoded.A,
+							CaptureRayDirection,
+							SourceBounds,
+							Settings.AtlasVConvention);
+					ReceiverPlaneIndices[AtlasPixelIndex] = PlaneIndex;
 					ReceiverCoverage[AtlasPixelIndex] = true;
 					++ReceiverCount;
 				}
@@ -627,7 +654,12 @@ namespace UE::FoliageBaker::L1Visibility
 		for (TConstSetBitIterator<> ReceiverIt(ReceiverCoverage); ReceiverIt; ++ReceiverIt)
 		{
 			const int32 PixelIndex = ReceiverIt.GetIndex();
-			OutPixels[PixelIndex] = Fitter.EncodePixel(PixelIndex);
+			const int32 PlaneIndex = ReceiverPlaneIndices[PixelIndex];
+			if (PlaneInfos.IsValidIndex(PlaneIndex))
+			{
+				OutPixels[PixelIndex] =
+					Fitter.EncodePixelInCaptureFrame(PixelIndex, PlaneInfos[PlaneIndex]);
+			}
 		}
 		Atlas::FillTransparentRGBInsideTiles(OutPixels, AtlasWidth, AtlasHeight, PlaneInfos, &ReceiverCoverage, true);
 		return true;
