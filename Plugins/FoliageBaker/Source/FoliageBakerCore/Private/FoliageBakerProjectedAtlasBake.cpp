@@ -1,6 +1,5 @@
 #include "FoliageBakerProjectedAtlasBake.h"
 
-#include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerProjectedMaterialBake.h"
@@ -682,53 +681,5 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				true);
 		}
 		return true;
-	}
-
-	UTexture2D* CreateTextureAsset(
-		const UStaticMesh& SourceStaticMesh,
-		FFoliageBakerAssetTransaction& AssetTransaction,
-		const FTextureAssetRequest& Request,
-		const TArray<FColor>& Pixels,
-		const FStats& Stats,
-		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		FString& OutError)
-	{
-		FFoliageBakerTextureAssetParams Params;
-		Params.OutputFolderName = Request.OutputFolderName;
-		Params.OutputPackagePathOverride = Request.OutputPackagePathOverride;
-		Params.AssetNamePrefix = Request.AssetNamePrefix;
-		Params.AssetNameSuffix = Request.AssetNameSuffix;
-		Params.Width = Stats.Width;
-		Params.Height = Stats.Height;
-		Params.CompressionSettings = Request.CompressionSettings;
-		Params.LODGroup = Request.LODGroup;
-		Params.bSRGB = Request.bSRGB;
-		Params.SemanticMaskMipCoverageThreshold =
-			Request.SemanticMaskMipCoverageThreshold;
-		Params.MipBackgroundColor = Request.MipBackgroundColor;
-		Params.bNormalizeMipNormals =
-			Request.LODGroup == TEXTUREGROUP_WorldNormalMap;
-		Params.EmptyPixelsError = Request.EmptyPixelsError;
-
-		Params.MipTileRects.Reserve(PlaneInfos.Num() * 2);
-		for (const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
-		{
-			Params.MipTileRects.Add(FIntRect(
-				PlaneInfo.AtlasPixelMin,
-				PlaneInfo.AtlasPixelMin + PlaneInfo.AtlasTileSize));
-			if (PlaneInfo.bHasBackFaceAtlas)
-			{
-				Params.MipTileRects.Add(FIntRect(
-					PlaneInfo.BackAtlasPixelMin,
-					PlaneInfo.BackAtlasPixelMin + PlaneInfo.BackAtlasTileSize));
-			}
-		}
-
-		return FFoliageBakerAssetBuilder::CreateTextureAsset(
-			SourceStaticMesh,
-			AssetTransaction,
-			Params,
-			Pixels,
-			OutError);
 	}
 }

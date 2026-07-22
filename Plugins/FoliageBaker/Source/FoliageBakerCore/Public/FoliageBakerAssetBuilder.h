@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Engine/TextureDefines.h"
 #include "FoliageBakerMaterialResolver.h"
+#include "FoliageBakerPlaneCover.h"
 #include "UObject/StrongObjectPtr.h"
 
 struct FMeshDescription;
@@ -103,6 +104,20 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 	FString EmptyPixelsError = TEXT("No texture pixels were generated.");
 };
 
+struct FOLIAGEBAKERCORE_API FFoliageBakerPlaneAtlasTextureAssetParams
+{
+	FString OutputFolderName;
+	FString OutputPackagePathOverride;
+	FString AssetNamePrefix;
+	FString AssetNameSuffix;
+	FColor MipBackgroundColor = FColor(0, 0, 0, 0);
+	TextureCompressionSettings CompressionSettings = TC_Default;
+	TextureGroup LODGroup = TEXTUREGROUP_World;
+	bool bSRGB = true;
+	float SemanticMaskMipCoverageThreshold = 0.0f;
+	FString EmptyPixelsError = TEXT("No atlas pixels were generated.");
+};
+
 struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 {
 	struct FTextureParameterValue
@@ -191,6 +206,16 @@ public:
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerTextureAssetParams& Params,
 		const TArray<FColor>& Pixels,
+		FString& OutError);
+
+	static UTexture2D* CreatePlaneAtlasTextureAsset(
+		const UStaticMesh& SourceStaticMesh,
+		FFoliageBakerAssetTransaction& AssetTransaction,
+		const FFoliageBakerPlaneAtlasTextureAssetParams& Params,
+		const TArray<FColor>& Pixels,
+		int32 AtlasWidth,
+		int32 AtlasHeight,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError);
 
 	static UMaterialInstanceConstant* CreateMaterialInstanceAsset(

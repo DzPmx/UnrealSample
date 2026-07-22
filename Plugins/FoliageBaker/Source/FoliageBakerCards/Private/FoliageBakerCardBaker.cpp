@@ -811,13 +811,13 @@ namespace
 		return true;
 	}
 
-	UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest
+	FFoliageBakerPlaneAtlasTextureAssetParams
 	MakeCardAtlasTextureAssetRequest(
 		const FFoliageBakerCardBakeRequest& EditorSettings,
 		const FString& OutputPackagePathOverride,
 		const FString& AssetNameSuffix)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request;
+		FFoliageBakerPlaneAtlasTextureAssetParams Request;
 		Request.OutputFolderName = EditorSettings.TextureOutputFolderName;
 		Request.OutputPackagePathOverride = OutputPackagePathOverride;
 		Request.AssetNamePrefix = EditorSettings.TextureNamePrefix;
@@ -836,7 +836,7 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request =
+		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
@@ -847,12 +847,13 @@ namespace
 			EditorSettings.bPreserveAlphaMaskValues
 				? EditorSettings.MipMaskCoverageThreshold
 				: 0.0f;
-		return UE::FoliageBaker::ProjectedAtlasBake::CreateTextureAsset(
+		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
 			Pixels,
-			AtlasStats,
+			AtlasStats.Width,
+			AtlasStats.Height,
 			PlaneInfos,
 			OutError);
 	}
@@ -867,7 +868,7 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request =
+		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
@@ -876,12 +877,13 @@ namespace
 		Request.LODGroup = TEXTUREGROUP_WorldNormalMap;
 		Request.bSRGB = false;
 		Request.EmptyPixelsError = TEXT("No normal atlas pixels were generated.");
-		return UE::FoliageBaker::ProjectedAtlasBake::CreateTextureAsset(
+		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
 			Pixels,
-			AtlasStats,
+			AtlasStats.Width,
+			AtlasStats.Height,
 			PlaneInfos,
 			OutError);
 	}
@@ -896,7 +898,7 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request =
+		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
@@ -905,12 +907,13 @@ namespace
 		Request.LODGroup = TEXTUREGROUP_WorldSpecular;
 		Request.bSRGB = false;
 		Request.EmptyPixelsError = TEXT("No mix atlas pixels were generated.");
-		return UE::FoliageBaker::ProjectedAtlasBake::CreateTextureAsset(
+		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
 			Pixels,
-			AtlasStats,
+			AtlasStats.Width,
+			AtlasStats.Height,
 			PlaneInfos,
 			OutError);
 	}
@@ -1004,7 +1007,7 @@ namespace
 			return nullptr;
 		}
 
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request =
+		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
@@ -1014,12 +1017,13 @@ namespace
 		Request.bSRGB = false;
 		Request.EmptyPixelsError =
 			TEXT("No upper-hemisphere L1 visibility pixels were generated.");
-		return UE::FoliageBaker::ProjectedAtlasBake::CreateTextureAsset(
+		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
 			ResizedPixels,
-			ResizedStats,
+			ResizedStats.Width,
+			ResizedStats.Height,
 			ResizedPlaneInfos,
 			OutError);
 	}

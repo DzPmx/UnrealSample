@@ -306,13 +306,13 @@ namespace
 		return true;
 	}
 
-	UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest
+	FFoliageBakerPlaneAtlasTextureAssetParams
 	MakeBillboardCloudsTextureAssetRequest(
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const FString& OutputPackagePathOverride,
 		const FString& AssetNameSuffix)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request;
+		FFoliageBakerPlaneAtlasTextureAssetParams Request;
 		Request.OutputFolderName = EditorSettings.TextureOutputFolderName;
 		Request.OutputPackagePathOverride = OutputPackagePathOverride;
 		Request.AssetNamePrefix = EditorSettings.TextureNamePrefix;
@@ -331,7 +331,7 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request =
+		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
@@ -345,12 +345,13 @@ namespace
 					0.01f,
 					1.0f)
 				: 0.0f;
-		return UE::FoliageBaker::ProjectedAtlasBake::CreateTextureAsset(
+		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
 			Pixels,
-			AtlasStats,
+			AtlasStats.Width,
+			AtlasStats.Height,
 			PlaneInfos,
 			OutError);
 	}
@@ -365,7 +366,7 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request =
+		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
@@ -374,12 +375,13 @@ namespace
 		Request.LODGroup = TEXTUREGROUP_WorldNormalMap;
 		Request.bSRGB = false;
 		Request.EmptyPixelsError = TEXT("No normal atlas pixels were generated.");
-		return UE::FoliageBaker::ProjectedAtlasBake::CreateTextureAsset(
+		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
 			Pixels,
-			AtlasStats,
+			AtlasStats.Width,
+			AtlasStats.Height,
 			PlaneInfos,
 			OutError);
 	}
@@ -394,7 +396,7 @@ namespace
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError)
 	{
-		UE::FoliageBaker::ProjectedAtlasBake::FTextureAssetRequest Request =
+		FFoliageBakerPlaneAtlasTextureAssetParams Request =
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
@@ -403,12 +405,13 @@ namespace
 		Request.LODGroup = TEXTUREGROUP_WorldSpecular;
 		Request.bSRGB = false;
 		Request.EmptyPixelsError = TEXT("No mix atlas pixels were generated.");
-		return UE::FoliageBaker::ProjectedAtlasBake::CreateTextureAsset(
+		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
 			AssetTransaction,
 			Request,
 			Pixels,
-			AtlasStats,
+			AtlasStats.Width,
+			AtlasStats.Height,
 			PlaneInfos,
 			OutError);
 	}

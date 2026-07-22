@@ -1420,6 +1420,56 @@ FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
 	return Result;
 }
 
+UTexture2D* FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
+	const UStaticMesh& SourceStaticMesh,
+	FFoliageBakerAssetTransaction& AssetTransaction,
+	const FFoliageBakerPlaneAtlasTextureAssetParams& Params,
+	const TArray<FColor>& Pixels,
+	const int32 AtlasWidth,
+	const int32 AtlasHeight,
+	const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
+	FString& OutError)
+{
+	FFoliageBakerTextureAssetParams TextureParams;
+	TextureParams.OutputFolderName = Params.OutputFolderName;
+	TextureParams.OutputPackagePathOverride = Params.OutputPackagePathOverride;
+	TextureParams.AssetNamePrefix = Params.AssetNamePrefix;
+	TextureParams.AssetNameSuffix = Params.AssetNameSuffix;
+	TextureParams.Width = AtlasWidth;
+	TextureParams.Height = AtlasHeight;
+	TextureParams.CompressionSettings = Params.CompressionSettings;
+	TextureParams.LODGroup = Params.LODGroup;
+	TextureParams.bSRGB = Params.bSRGB;
+	TextureParams.SemanticMaskMipCoverageThreshold =
+		Params.SemanticMaskMipCoverageThreshold;
+	TextureParams.MipBackgroundColor = Params.MipBackgroundColor;
+	TextureParams.bNormalizeMipNormals =
+		Params.LODGroup == TEXTUREGROUP_WorldNormalMap;
+	TextureParams.EmptyPixelsError = Params.EmptyPixelsError;
+
+	TextureParams.MipTileRects.Reserve(PlaneInfos.Num() * 2);
+	for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo :
+		PlaneInfos)
+	{
+		TextureParams.MipTileRects.Add(FIntRect(
+			PlaneInfo.AtlasPixelMin,
+			PlaneInfo.AtlasPixelMin + PlaneInfo.AtlasTileSize));
+		if (PlaneInfo.bHasBackFaceAtlas)
+		{
+			TextureParams.MipTileRects.Add(FIntRect(
+				PlaneInfo.BackAtlasPixelMin,
+				PlaneInfo.BackAtlasPixelMin + PlaneInfo.BackAtlasTileSize));
+		}
+	}
+
+	return CreateTextureAsset(
+		SourceStaticMesh,
+		AssetTransaction,
+		TextureParams,
+		Pixels,
+		OutError);
+}
+
 UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 	const UStaticMesh& SourceStaticMesh,
 	FFoliageBakerAssetTransaction& AssetTransaction,

@@ -1,13 +1,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Engine/TextureDefines.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerPlaneCover.h"
 
-class FFoliageBakerAssetTransaction;
 class UStaticMesh;
-class UTexture2D;
 
 namespace UE::FoliageBaker::ProjectedAtlasBake
 {
@@ -88,20 +85,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		FStats Stats;
 	};
 
-	struct FOLIAGEBAKERCORE_API FTextureAssetRequest
-	{
-		FString OutputFolderName;
-		FString OutputPackagePathOverride;
-		FString AssetNamePrefix;
-		FString AssetNameSuffix;
-		FColor MipBackgroundColor = FColor(0, 0, 0, 0);
-		TextureCompressionSettings CompressionSettings = TC_Default;
-		TextureGroup LODGroup = TEXTUREGROUP_World;
-		bool bSRGB = true;
-		float SemanticMaskMipCoverageThreshold = 0.0f;
-		FString EmptyPixelsError = TEXT("No atlas pixels were generated.");
-	};
-
 	/**
 	 * Bakes all plane sides through one shared masked-material depth competition.
 	 * Feature modules only select the normal representation and crack policy.
@@ -110,15 +93,5 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		const FInputs& Inputs,
 		const FPolicy& Policy,
 		FResult& OutResult,
-		FString& OutError);
-
-	/** Creates a texture whose mip levels keep every packed atlas tile isolated. */
-	FOLIAGEBAKERCORE_API UTexture2D* CreateTextureAsset(
-		const UStaticMesh& SourceStaticMesh,
-		FFoliageBakerAssetTransaction& AssetTransaction,
-		const FTextureAssetRequest& Request,
-		const TArray<FColor>& Pixels,
-		const FStats& Stats,
-		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError);
 }
