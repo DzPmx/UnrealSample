@@ -10,17 +10,6 @@
 
 namespace
 {
-	constexpr int32 MinCardPlaneCount = 2;
-	constexpr int32 MaxCardPlaneCount = 5;
-	constexpr int32 MinMultiBillboardClusterCount = 1;
-	constexpr int32 MaxMultiBillboardClusterCount = 128;
-	constexpr int32 MinMultiBillboardsPerCluster = 2;
-	constexpr int32 MaxMultiBillboardsPerCluster = 8;
-	constexpr int32 MinTextureResolution = 256;
-	constexpr int32 MaxTextureResolution = 4096;
-	constexpr int32 MinAlphaCropGuardPixels = 2;
-	constexpr int32 MaxAlphaCropGuardPixels = 16;
-
 	bool IsSingleBillboardMode(const EFoliageBakerCardMode Mode)
 	{
 		return Mode == EFoliageBakerCardMode::SingleBillboard;
@@ -29,47 +18,6 @@ namespace
 	bool IsMultiBillboardMode(const EFoliageBakerCardMode Mode)
 	{
 		return Mode == EFoliageBakerCardMode::MultiBillboard;
-	}
-
-	EFoliageBakerCardBakeMode ToCoreMode(const EFoliageBakerCardMode Mode)
-	{
-		switch (Mode)
-		{
-		case EFoliageBakerCardMode::CrossCards:
-			return EFoliageBakerCardBakeMode::CrossCards;
-		case EFoliageBakerCardMode::MultiBillboard:
-			return EFoliageBakerCardBakeMode::MultiBillboard;
-		case EFoliageBakerCardMode::SingleBillboard:
-		default:
-			return EFoliageBakerCardBakeMode::SingleBillboard;
-		}
-	}
-
-	EFoliageBakerCaptureAxis ToCoreAxis(const EFoliageBakerSingleCaptureAxis Axis)
-	{
-		switch (Axis)
-		{
-		case EFoliageBakerSingleCaptureAxis::NegativeX: return EFoliageBakerCaptureAxis::NegativeX;
-		case EFoliageBakerSingleCaptureAxis::PositiveY: return EFoliageBakerCaptureAxis::PositiveY;
-		case EFoliageBakerSingleCaptureAxis::NegativeY: return EFoliageBakerCaptureAxis::NegativeY;
-		case EFoliageBakerSingleCaptureAxis::PositiveX:
-		default: return EFoliageBakerCaptureAxis::PositiveX;
-		}
-	}
-
-	EFoliageBakerBillboardPlaneMode ToCoreBillboardPlaneMode(
-		const EFoliageBakerBillboardMode Mode)
-	{
-		return Mode == EFoliageBakerBillboardMode::DoublePlanes
-			? EFoliageBakerBillboardPlaneMode::DoublePlanes
-			: EFoliageBakerBillboardPlaneMode::SinglePlane;
-	}
-
-	EFoliageBakerCrossCardGeometryMode ToCoreGeometryMode(const EFoliageBakerCrossCardFaceMode FaceMode)
-	{
-		return FaceMode == EFoliageBakerCrossCardFaceMode::SeparateOneSidedFaces
-			? EFoliageBakerCrossCardGeometryMode::SeparateOneSidedFaces
-			: EFoliageBakerCrossCardGeometryMode::TwoSidedTwoUVs;
 	}
 
 	TSoftObjectPtr<UMaterialInstanceConstant> GetConfiguredMaterialTemplate(
@@ -96,43 +44,25 @@ namespace
 		Request.SourceStaticMesh = &StaticMesh;
 		Request.MaterialTemplate = &MaterialTemplate;
 		Request.SourceLODIndex = Settings.SourceLODIndex;
-		Request.Mode = ToCoreMode(Settings.Mode);
-		Request.BillboardPlaneMode = ToCoreBillboardPlaneMode(Settings.BillboardMode);
-		Request.SingleCaptureAxis = ToCoreAxis(Settings.SingleCaptureAxis);
-		Request.CrossCardPlaneCount = FMath::Clamp(
-			Settings.CrossCardPlaneCount,
-			MinCardPlaneCount,
-			MaxCardPlaneCount);
-		Request.CrossCardGeometryMode = ToCoreGeometryMode(Settings.CrossCardFaceMode);
+		Request.Mode = Settings.Mode;
+		Request.BillboardPlaneMode = Settings.BillboardMode;
+		Request.SingleCaptureAxis = Settings.SingleCaptureAxis;
+		Request.CrossCardPlaneCount = Settings.CrossCardPlaneCount;
+		Request.CrossCardGeometryMode = Settings.CrossCardFaceMode;
 		Request.TrunkMaterialKeywords = Settings.TrunkMaterialKeywords;
 		Request.LeafMaterialKeywords = Settings.LeafMaterialKeywords;
-		Request.MultiBillboardClusterCount = FMath::Clamp(
-			Settings.MultiBillboardClusterCount,
-			MinMultiBillboardClusterCount,
-			MaxMultiBillboardClusterCount);
-		Request.MultiBillboardsPerCluster = FMath::Clamp(
-			Settings.MultiBillboardsPerCluster,
-			MinMultiBillboardsPerCluster,
-			MaxMultiBillboardsPerCluster);
+		Request.MultiBillboardClusterCount = Settings.MultiBillboardClusterCount;
+		Request.MultiBillboardsPerCluster = Settings.MultiBillboardsPerCluster;
 		Request.bIncludeReducedTrunk = Settings.bIncludeReducedTrunk;
-		Request.TrunkTrianglePercentage = FMath::Clamp(
-			Settings.TrunkTrianglePercentage,
-			0.05f,
-			1.0f);
-		Request.TextureResolution = FMath::Clamp(
-			IsSingleBillboardMode(Settings.Mode)
-				? Settings.SingleTextureResolution
-				: IsMultiBillboardMode(Settings.Mode)
-					? Settings.MultiBillboardTextureResolution
-					: Settings.CrossTextureResolution,
-			MinTextureResolution,
-			MaxTextureResolution);
-		Request.AlphaCropGuardPixels = FMath::Clamp(
-			Settings.AlphaCropGuardPixels,
-			MinAlphaCropGuardPixels,
-			MaxAlphaCropGuardPixels);
+		Request.TrunkTrianglePercentage = Settings.TrunkTrianglePercentage;
+		Request.TextureResolution = IsSingleBillboardMode(Settings.Mode)
+			? Settings.SingleTextureResolution
+			: IsMultiBillboardMode(Settings.Mode)
+				? Settings.MultiBillboardTextureResolution
+				: Settings.CrossTextureResolution;
+		Request.AlphaCropGuardPixels = Settings.AlphaCropGuardPixels;
 		Request.bPreserveAlphaMaskValues = Settings.bPreserveAlphaMaskValues;
-		Request.MipMaskCoverageThreshold = FMath::Clamp(Settings.MipMaskCoverageThreshold, 0.01f, 1.0f);
+		Request.MipMaskCoverageThreshold = Settings.MipMaskCoverageThreshold;
 		Request.bTrimUnusedAtlasSpace = Settings.bTrimUnusedAtlasSpace;
 		Request.bBakeBaseColorOpacity = Settings.bBakeBaseColorOpacity;
 		Request.bBakeNormalDepth = Settings.bBakeNormalDepth;
@@ -140,18 +70,12 @@ namespace
 		Request.bBakeUpperHemisphereL1Visibility =
 			IsSingleBillboardMode(Settings.Mode)
 			&& Settings.bBakeUpperHemisphereL1Visibility;
-		Request.UpperHemisphereL1TextureResolution = FMath::Clamp(
-			Settings.UpperHemisphereL1TextureResolution,
-			64,
-			1024);
-		Request.UpperHemisphereL1SampleCount = FMath::Clamp(
-			Settings.UpperHemisphereL1SampleCount,
-			4,
-			32);
-		Request.UpperHemisphereL1ShadowMapResolution = FMath::Clamp(
-			Settings.UpperHemisphereL1ShadowMapResolution,
-			64,
-			1024);
+		Request.UpperHemisphereL1TextureResolution =
+			Settings.UpperHemisphereL1TextureResolution;
+		Request.UpperHemisphereL1SampleCount =
+			Settings.UpperHemisphereL1SampleCount;
+		Request.UpperHemisphereL1ShadowMapResolution =
+			Settings.UpperHemisphereL1ShadowMapResolution;
 		Request.BaseColorOpacityTextureParameterName = Settings.BaseColorOpacityTextureParameterName;
 		Request.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;

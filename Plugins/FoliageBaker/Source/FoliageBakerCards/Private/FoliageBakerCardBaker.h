@@ -1,37 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerCardsSettings.h"
 
 class UMaterialInstanceConstant;
 class UStaticMesh;
 class UTexture2D;
-
-enum class EFoliageBakerCardBakeMode : uint8
-{
-	SingleBillboard,
-	CrossCards,
-	MultiBillboard
-};
-
-enum class EFoliageBakerCaptureAxis : uint8
-{
-	PositiveX,
-	NegativeX,
-	PositiveY,
-	NegativeY
-};
-
-enum class EFoliageBakerBillboardPlaneMode : uint8
-{
-	SinglePlane,
-	DoublePlanes
-};
-
-enum class EFoliageBakerCrossCardGeometryMode : uint8
-{
-	TwoSidedTwoUVs,
-	SeparateOneSidedFaces
-};
 
 struct FFoliageBakerCardBakeRequest
 {
@@ -39,11 +13,11 @@ struct FFoliageBakerCardBakeRequest
 	UMaterialInstanceConstant* MaterialTemplate = nullptr;
 	int32 SourceLODIndex = 0;
 
-	EFoliageBakerCardBakeMode Mode = EFoliageBakerCardBakeMode::SingleBillboard;
-	EFoliageBakerBillboardPlaneMode BillboardPlaneMode = EFoliageBakerBillboardPlaneMode::SinglePlane;
-	EFoliageBakerCaptureAxis SingleCaptureAxis = EFoliageBakerCaptureAxis::PositiveX;
+	EFoliageBakerCardMode Mode = EFoliageBakerCardMode::SingleBillboard;
+	EFoliageBakerBillboardMode BillboardPlaneMode = EFoliageBakerBillboardMode::SinglePlane;
+	EFoliageBakerSingleCaptureAxis SingleCaptureAxis = EFoliageBakerSingleCaptureAxis::PositiveX;
 	int32 CrossCardPlaneCount = 2;
-	EFoliageBakerCrossCardGeometryMode CrossCardGeometryMode = EFoliageBakerCrossCardGeometryMode::TwoSidedTwoUVs;
+	EFoliageBakerCrossCardFaceMode CrossCardGeometryMode = EFoliageBakerCrossCardFaceMode::TwoSidedTwoUVs;
 	TArray<FString> TrunkMaterialKeywords = { TEXT("Trunk") };
 	TArray<FString> LeafMaterialKeywords = { TEXT("Leaf") };
 	int32 MultiBillboardClusterCount = 16;

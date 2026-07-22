@@ -31,19 +31,19 @@ namespace
 {
 	bool UsesDoublePlanesBillboard(const FFoliageBakerCardBakeRequest& Request)
 	{
-		return Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
-			&& Request.BillboardPlaneMode == EFoliageBakerBillboardPlaneMode::DoublePlanes;
+		return Request.Mode == EFoliageBakerCardMode::SingleBillboard
+			&& Request.BillboardPlaneMode == EFoliageBakerBillboardMode::DoublePlanes;
 	}
 
 	bool UsesSeparateOneSidedCrossFaces(const FFoliageBakerCardBakeRequest& Request)
 	{
-		return Request.Mode == EFoliageBakerCardBakeMode::CrossCards
-			&& Request.CrossCardGeometryMode == EFoliageBakerCrossCardGeometryMode::SeparateOneSidedFaces;
+		return Request.Mode == EFoliageBakerCardMode::CrossCards
+			&& Request.CrossCardGeometryMode == EFoliageBakerCrossCardFaceMode::SeparateOneSidedFaces;
 	}
 
 	bool UsesMultiBillboard(const FFoliageBakerCardBakeRequest& Request)
 	{
-		return Request.Mode == EFoliageBakerCardBakeMode::MultiBillboard;
+		return Request.Mode == EFoliageBakerCardMode::MultiBillboard;
 	}
 
 	int32 GetDesiredCardUVChannelCount(const FFoliageBakerCardBakeRequest& Request)
@@ -65,7 +65,7 @@ namespace
 			? ClampedTextureResolution
 			: static_cast<int32>(
 				1u << FMath::FloorLog2(static_cast<uint32>(ClampedTextureResolution)));
-		Settings.DoubleSidedBakeMode = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+		Settings.DoubleSidedBakeMode = Request.Mode == EFoliageBakerCardMode::CrossCards
 			? UE::FoliageBaker::PlaneCover::EDoubleSidedBakeMode::AllPlanes
 			: UE::FoliageBaker::PlaneCover::EDoubleSidedBakeMode::Off;
 		Settings.bEmitBackFaceGeometry = UsesSeparateOneSidedCrossFaces(Request);
@@ -1151,14 +1151,14 @@ namespace
 		return Selection;
 	}
 
-	FVector ResolveSingleCaptureNormal(const EFoliageBakerCaptureAxis Axis)
+	FVector ResolveSingleCaptureNormal(const EFoliageBakerSingleCaptureAxis Axis)
 	{
 		switch (Axis)
 		{
-		case EFoliageBakerCaptureAxis::NegativeX: return FVector(-1.0, 0.0, 0.0);
-		case EFoliageBakerCaptureAxis::PositiveY: return FVector(0.0, 1.0, 0.0);
-		case EFoliageBakerCaptureAxis::NegativeY: return FVector(0.0, -1.0, 0.0);
-		case EFoliageBakerCaptureAxis::PositiveX:
+		case EFoliageBakerSingleCaptureAxis::NegativeX: return FVector(-1.0, 0.0, 0.0);
+		case EFoliageBakerSingleCaptureAxis::PositiveY: return FVector(0.0, 1.0, 0.0);
+		case EFoliageBakerSingleCaptureAxis::NegativeY: return FVector(0.0, -1.0, 0.0);
+		case EFoliageBakerSingleCaptureAxis::PositiveX:
 		default: return FVector(1.0, 0.0, 0.0);
 		}
 	}
@@ -1178,7 +1178,7 @@ namespace
 		Params.RequestedInsertAfterLODIndex = OutputSelection.InsertAfterLODIndex;
 		Params.SourceLODIndex = Request.SourceLODIndex;
 		Params.DesiredUVChannelCount = GetDesiredCardUVChannelCount(Request);
-		Params.RebuildLODMetadataKey = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+		Params.RebuildLODMetadataKey = Request.Mode == EFoliageBakerCardMode::CrossCards
 			? FName(TEXT("FoliageBaker.CrossCardsLOD"))
 			: UsesMultiBillboard(Request)
 				? FName(TEXT("FoliageBaker.MultiBillboardLOD"))
@@ -1338,12 +1338,12 @@ namespace
 			return true;
 		}
 
-		const int32 PlaneCount = EditorSettings.Mode == EFoliageBakerCardBakeMode::SingleBillboard
+		const int32 PlaneCount = EditorSettings.Mode == EFoliageBakerCardMode::SingleBillboard
 			? (UsesDoublePlanesBillboard(EditorSettings) ? 2 : 1)
 			: FMath::Clamp(EditorSettings.CrossCardPlaneCount, 2, 5);
 		for (int32 PlaneIndex = 0; PlaneIndex < PlaneCount; ++PlaneIndex)
 		{
-			const FVector Normal = EditorSettings.Mode == EFoliageBakerCardBakeMode::SingleBillboard
+			const FVector Normal = EditorSettings.Mode == EFoliageBakerCardMode::SingleBillboard
 				? PlaneIndex == 0
 					? PrimaryCaptureNormal
 					: RotateHorizontalNormal90Degrees(PrimaryCaptureNormal)
@@ -2111,7 +2111,7 @@ namespace
 			L1VisibilityParameter.Texture =
 				OutData.UpperHemisphereL1VisibilityTexture;
 		}
-		if (EditorSettings.Mode == EFoliageBakerCardBakeMode::CrossCards)
+		if (EditorSettings.Mode == EFoliageBakerCardMode::CrossCards)
 		{
 			MaterialParams.TwoSidedOverride = !UsesSeparateOneSidedCrossFaces(EditorSettings);
 		}
@@ -2152,7 +2152,7 @@ namespace
 		if (MeshOutputSelection.OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 		{
 			FFoliageBakerStaticMeshAssetParams MeshParams;
-			MeshParams.AssetNameSuffix = EditorSettings.Mode == EFoliageBakerCardBakeMode::CrossCards
+			MeshParams.AssetNameSuffix = EditorSettings.Mode == EFoliageBakerCardMode::CrossCards
 				? TEXT("_CrossCards")
 				: UsesMultiBillboard(EditorSettings)
 					? TEXT("_MultiBillboard")
@@ -2217,7 +2217,7 @@ namespace
 		const FString AlphaPolicyDetails = TextureData.AtlasStats.MaterialAlphaPolicyDetails.IsEmpty()
 			? FString()
 			: FString::Printf(TEXT("\n  alpha policy:%s"), *TextureData.AtlasStats.MaterialAlphaPolicyDetails);
-		const FString CrossFaceDetails = Request.Mode != EFoliageBakerCardBakeMode::CrossCards
+		const FString CrossFaceDetails = Request.Mode != EFoliageBakerCardMode::CrossCards
 			? FString()
 			: FString::Printf(
 				TEXT("\n  cross face mode: %s"),
@@ -2228,7 +2228,7 @@ namespace
 			? TEXT("UV0 stores each plane's baked tile; UV1.xy stores its local capture direction; UV2.x stores plane selector 0 or 1")
 			: UsesMultiBillboard(Request)
 				? TEXT("UV0 stores each depth layer's baked tile; UV1.xy stores the vertex U/V offset from the shared cluster center and UV2.x stores the signed layer-depth offset in centimeters")
-				: Request.Mode == EFoliageBakerCardBakeMode::SingleBillboard
+				: Request.Mode == EFoliageBakerCardMode::SingleBillboard
 					? TEXT("UV0 stores the single baked tile")
 					: UsesSeparateOneSidedCrossFaces(Request)
 						? TEXT("each physical face stores its own front/back tile in UV0; generated mesh keeps one UV channel")
@@ -2240,14 +2240,14 @@ namespace
 				: UsesSeparateOneSidedCrossFaces(Request)
 					? TEXT("opposed UE front-face orders with opposed source-facing normals")
 					: TEXT("reversed UE front-face order with source-facing normals");
-		const TCHAR* FeatureName = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+		const TCHAR* FeatureName = Request.Mode == EFoliageBakerCardMode::CrossCards
 			? TEXT("Cross Cards")
 			: UsesMultiBillboard(Request)
 				? TEXT("MultiBillboard")
 				: UsesDoublePlanesBillboard(Request)
 					? TEXT("Double Planes Billboard")
 					: TEXT("Single Plane Billboard");
-		const TCHAR* CaptureDetails = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+		const TCHAR* CaptureDetails = Request.Mode == EFoliageBakerCardMode::CrossCards
 			? TEXT("equally spaced over 180 degrees, front and back baked")
 			: UsesMultiBillboard(Request)
 				? TEXT("connected leaf components clustered in source-local 3D space, then split into parallel fixed-axis depth layers inside every cluster")
@@ -2323,7 +2323,7 @@ namespace
 			TextureData.AtlasStats.AlphaAwareTileCropGuardPixels,
 			TextureData.AtlasStats.RasterizedTriangleReferences,
 			TextureData.AtlasStats.MaskedMaterialBakeReferences,
-			Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+			Request.Mode == EFoliageBakerCardMode::CrossCards
 				? TEXT("dedicated fixed-angle orthographic capture, front and back per plane, all selected-LOD triangles, WPO disabled")
 				: UsesMultiBillboard(Request)
 					? TEXT("dedicated fixed-axis orthographic capture per clustered leaf group, matched leaf triangles only, WPO disabled")
@@ -2524,7 +2524,7 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 		return OutResult;
 	}
 	if (Request.bBakeUpperHemisphereL1Visibility
-		&& Request.Mode != EFoliageBakerCardBakeMode::SingleBillboard)
+		&& Request.Mode != EFoliageBakerCardMode::SingleBillboard)
 	{
 		OutResult.Report = FString::Printf(
 			TEXT("%s\n  failed: Upper Hemisphere L1 Visibility is currently supported only by Billboard modes."),
@@ -2592,7 +2592,7 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(const FFoliageBakerCard
 		FMath::Clamp(Request.UpperHemisphereL1SampleCount, 4, 32);
 	SanitizedRequest.UpperHemisphereL1ShadowMapResolution =
 		FMath::Clamp(Request.UpperHemisphereL1ShadowMapResolution, 64, 1024);
-	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardBakeMode::CrossCards
+	const FString FeatureSuffix = Request.Mode == EFoliageBakerCardMode::CrossCards
 		? TEXT("_Cross")
 		: UsesMultiBillboard(Request)
 			? TEXT("_MultiBillboard")
