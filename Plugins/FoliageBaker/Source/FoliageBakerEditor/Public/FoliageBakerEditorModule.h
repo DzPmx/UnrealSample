@@ -27,5 +27,6 @@ private:
 	void HandleFeatureChanged(int32 NewFeatureIndex);
 
 	int32 ActiveFeatureIndex = 0;
+	TArray<FName> RegisteredPreferenceClassNames;
 	TSharedPtr<SWidgetSwitcher> FeatureSwitcher;
 };

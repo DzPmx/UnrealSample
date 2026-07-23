@@ -14,6 +14,7 @@
 #include "PropertyEditorModule.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
+#include "UObject/UObjectGlobals.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SSegmentedControl.h"
@@ -240,14 +241,17 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 	ISettingsModule& SettingsModule = FModuleManager::LoadModuleChecked<ISettingsModule>(TEXT("Settings"));
 	FPropertyEditorModule& PropertyEditorModule =
 		FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
+	RegisteredPreferenceClassNames.Reset();
 	for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
 		GetEditorPreferenceDescriptors())
 	{
 		UObject* SettingsObject = Descriptor.GetSettingsObject();
+		const FName SettingsClassName = SettingsObject->GetClass()->GetFName();
 		PropertyEditorModule.RegisterCustomClassLayout(
-			SettingsObject->GetClass()->GetFName(),
+			SettingsClassName,
 			FOnGetDetailCustomizationInstance::CreateStatic(
 				&FFoliageBakerEditorPreferenceCustomization::MakeInstance));
+		RegisteredPreferenceClassNames.Add(SettingsClassName);
 		SettingsModule.RegisterSettings(
 			EditorSettingsContainerName,
 			PluginsSettingsCategoryName,
@@ -261,6 +265,12 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 
 void FFoliageBakerEditorModule::UnregisterEditorPreferences()
 {
+	if (!UObjectInitialized())
+	{
+		RegisteredPreferenceClassNames.Reset();
+		return;
+	}
+
 	if (ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>(TEXT("Settings")))
 	{
 		for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
@@ -275,14 +285,13 @@ void FFoliageBakerEditorModule::UnregisterEditorPreferences()
 	if (FPropertyEditorModule* PropertyEditorModule =
 		FModuleManager::GetModulePtr<FPropertyEditorModule>(TEXT("PropertyEditor")))
 	{
-		for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
-			GetEditorPreferenceDescriptors())
+		for (const FName& SettingsClassName : RegisteredPreferenceClassNames)
 		{
-			PropertyEditorModule->UnregisterCustomClassLayout(
-				Descriptor.GetSettingsObject()->GetClass()->GetFName());
+			PropertyEditorModule->UnregisterCustomClassLayout(SettingsClassName);
 		}
 		PropertyEditorModule->NotifyCustomizationModuleChanged();
 	}
+	RegisteredPreferenceClassNames.Reset();
 }
 
 void FFoliageBakerEditorModule::RegisterMenus()
