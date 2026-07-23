@@ -9,11 +9,6 @@
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerBillboardCloudsModule"
 
-void FFoliageBakerBillboardCloudsModule::StartupModule()
-{
-	EnsureToolSettings();
-}
-
 void FFoliageBakerBillboardCloudsModule::ShutdownModule()
 {
 	FeatureController.Reset();
@@ -25,6 +20,7 @@ void FFoliageBakerBillboardCloudsModule::EnsureToolSettings()
 	if (!ToolSettings.IsValid())
 	{
 		FFoliageBakerFeatureTool::EnsureTransientSettings(ToolSettings);
+		ToolSettings->SourceStaticMeshes.Reset();
 	}
 }
 

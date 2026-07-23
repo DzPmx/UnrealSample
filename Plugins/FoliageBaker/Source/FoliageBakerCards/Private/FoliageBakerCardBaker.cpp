@@ -234,6 +234,10 @@ namespace
 		Request.MipBackgroundColor = FColor(128, 128, 255, 0);
 		Request.LODGroup = TEXTUREGROUP_WorldNormalMap;
 		Request.bSRGB = false;
+		Request.SemanticMaskMipCoverageThreshold =
+			EditorSettings.bPreserveAlphaMaskValues
+				? EditorSettings.MipMaskCoverageThreshold
+				: 0.0f;
 		Request.EmptyPixelsError = TEXT("No normal atlas pixels were generated.");
 		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,

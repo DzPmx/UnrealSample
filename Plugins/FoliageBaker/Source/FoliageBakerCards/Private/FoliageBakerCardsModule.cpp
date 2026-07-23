@@ -145,6 +145,7 @@ void FFoliageBakerCardsModule::EnsureToolSettings(const EFoliageBakerCardMode Mo
 					*Settings,
 					FName(TEXT("FoliageBakerCrossCardsSettings")));
 		}
+		(*Settings)->SourceStaticMeshes.Reset();
 	}
 	(*Settings)->Mode = Mode;
 }

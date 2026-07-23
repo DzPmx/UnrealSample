@@ -22,6 +22,7 @@ void FFoliageBakerImpostorModule::EnsureToolSettings()
 		FFoliageBakerFeatureTool::EnsureTransientSettings(
 			ToolSettings,
 			FName(TEXT("FoliageBakerImpostorSettings")));
+		ToolSettings->SourceStaticMeshes.Reset();
 	}
 }
 

@@ -40,7 +40,7 @@ class FOLIAGEBAKERBILLBOARDCLOUDS_API UFoliageBakerBillboardCloudsSettings : pub
 
 public:
 
-	UPROPERTY(EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets processed from the selected Source LOD when Bake is clicked. Add assets here directly or use Add Content Browser Selection in the BillboardClouds panel."))
+	UPROPERTY(Transient, EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets processed from the selected Source LOD when Bake is clicked. Add assets here directly or use Add Content Browser Selection in the BillboardClouds panel."))
 	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
 
 	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for geometry extraction, plane-cover bounds, material baking, and shared depth encoding. Every queued mesh must contain this LOD."))

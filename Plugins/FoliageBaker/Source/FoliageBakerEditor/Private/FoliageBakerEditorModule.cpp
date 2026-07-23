@@ -6,9 +6,12 @@
 #include "FoliageBakerCardsSettings.h"
 #include "FoliageBakerImpostorModule.h"
 #include "FoliageBakerImpostorSettings.h"
+#include "DetailLayoutBuilder.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
+#include "IDetailCustomization.h"
 #include "ISettingsModule.h"
+#include "PropertyEditorModule.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -136,6 +139,21 @@ namespace
 		return GetMutableDefault<SettingsType>();
 	}
 
+	class FFoliageBakerEditorPreferenceCustomization final : public IDetailCustomization
+	{
+	public:
+		static TSharedRef<IDetailCustomization> MakeInstance()
+		{
+			return MakeShared<FFoliageBakerEditorPreferenceCustomization>();
+		}
+
+		virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override
+		{
+			DetailBuilder.HideProperty(
+				GET_MEMBER_NAME_CHECKED(UFoliageBakerCardsSettings, SourceStaticMeshes));
+		}
+	};
+
 	const TArray<FFoliageBakerEditorPreferenceDescriptor>& GetEditorPreferenceDescriptors()
 	{
 		static const TArray<FFoliageBakerEditorPreferenceDescriptor> Descriptors =
@@ -220,17 +238,25 @@ void FFoliageBakerEditorModule::ShutdownModule()
 void FFoliageBakerEditorModule::RegisterEditorPreferences()
 {
 	ISettingsModule& SettingsModule = FModuleManager::LoadModuleChecked<ISettingsModule>(TEXT("Settings"));
+	FPropertyEditorModule& PropertyEditorModule =
+		FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
 	for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
 		GetEditorPreferenceDescriptors())
 	{
+		UObject* SettingsObject = Descriptor.GetSettingsObject();
+		PropertyEditorModule.RegisterCustomClassLayout(
+			SettingsObject->GetClass()->GetFName(),
+			FOnGetDetailCustomizationInstance::CreateStatic(
+				&FFoliageBakerEditorPreferenceCustomization::MakeInstance));
 		SettingsModule.RegisterSettings(
 			EditorSettingsContainerName,
 			PluginsSettingsCategoryName,
 			Descriptor.SectionName,
 			Descriptor.DisplayName,
 			Descriptor.Description,
-			TWeakObjectPtr<UObject>(Descriptor.GetSettingsObject()));
+			TWeakObjectPtr<UObject>(SettingsObject));
 	}
+	PropertyEditorModule.NotifyCustomizationModuleChanged();
 }
 
 void FFoliageBakerEditorModule::UnregisterEditorPreferences()
@@ -245,6 +271,17 @@ void FFoliageBakerEditorModule::UnregisterEditorPreferences()
 				PluginsSettingsCategoryName,
 				Descriptor.SectionName);
 		}
+	}
+	if (FPropertyEditorModule* PropertyEditorModule =
+		FModuleManager::GetModulePtr<FPropertyEditorModule>(TEXT("PropertyEditor")))
+	{
+		for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
+			GetEditorPreferenceDescriptors())
+		{
+			PropertyEditorModule->UnregisterCustomClassLayout(
+				Descriptor.GetSettingsObject()->GetClass()->GetFName());
+		}
+		PropertyEditorModule->NotifyCustomizationModuleChanged();
 	}
 }
 

@@ -21,6 +21,7 @@ public class FoliageBakerEditor : ModuleRules
 				"SlateCore",
 				"ToolMenus",
 				"Settings",
+				"PropertyEditor",
 				"FoliageBakerCards",
 				"FoliageBakerImpostor",
 				"FoliageBakerBillboardClouds",

@@ -22,7 +22,7 @@ class FOLIAGEBAKERIMPOSTOR_API UFoliageBakerImpostorSettings final : public UObj
 
 public:
 
-	UPROPERTY(EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets baked from the selected Source LOD. Add assets directly or use Add Content Browser Selection."))
+	UPROPERTY(Transient, EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets baked from the selected Source LOD. Add assets directly or use Add Content Browser Selection."))
 	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
 
 	UPROPERTY(config, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for geometry extraction, material baking, shared bounds, and depth encoding."))

@@ -607,9 +607,9 @@ namespace
 		int32 LODIndex = INDEX_NONE;
 	};
 
-	TArray<FGeneratedLODMetadataValue> FindGeneratedLODMetadataToShift(
+	TArray<FGeneratedLODMetadataValue> FindGeneratedLODMetadataAtOrAfter(
 		const UStaticMesh& StaticMesh,
-		const int32 InsertLODIndex)
+		const int32 MinimumLODIndex)
 	{
 		TArray<FGeneratedLODMetadataValue> Result;
 		const TMap<FName, FString>* ObjectMetadata = FMetaData::GetMapForObject(&StaticMesh);
@@ -625,7 +625,7 @@ namespace
 			if (KeyString.StartsWith(TEXT("FoliageBaker."), ESearchCase::CaseSensitive)
 				&& KeyString.EndsWith(TEXT("LOD"), ESearchCase::CaseSensitive)
 				&& LexTryParseString(ExistingLODIndex, *Entry.Value)
-				&& ExistingLODIndex >= InsertLODIndex
+				&& ExistingLODIndex >= MinimumLODIndex
 				&& StaticMesh.IsSourceModelValid(ExistingLODIndex))
 			{
 				Result.Add({ Entry.Key, ExistingLODIndex });
@@ -1858,19 +1858,33 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		OutLODIndex = INDEX_NONE;
 		return false;
 	}
+	// Generated nonzero LODs must not redefine the source asset's bounds.
+	TOptional<FBoxSphereBounds> PreservedBounds;
+	if (OutLODIndex != 0)
+	{
+		PreservedBounds = SourceStaticMesh.GetExtendedBounds();
+	}
 	const bool bInsertingLOD =
 		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD;
-	const TArray<FGeneratedLODMetadataValue> GeneratedLODMetadataToShift = bInsertingLOD
-		? FindGeneratedLODMetadataToShift(SourceStaticMesh, OutLODIndex)
+	const bool bReplacingLOD =
+		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD;
+	const bool bTrackGeneratedLOD =
+		OutLODIndex > 0
+		&& !Params.RebuildLODMetadataKey.IsNone();
+	const TArray<FGeneratedLODMetadataValue> GeneratedLODMetadataToUpdate =
+		bInsertingLOD || bReplacingLOD
+		? FindGeneratedLODMetadataAtOrAfter(SourceStaticMesh, OutLODIndex)
 		: TArray<FGeneratedLODMetadataValue>();
-	if ((Params.OutputMode == EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD || bInsertingLOD)
-		&& !Params.RebuildLODMetadataKey.IsNone())
+	if (bTrackGeneratedLOD)
 	{
 		AssetTransaction.SnapshotMetadata(&SourceStaticMesh, Params.RebuildLODMetadataKey);
 	}
-	for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToShift)
+	for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToUpdate)
 	{
-		AssetTransaction.SnapshotMetadata(&SourceStaticMesh, MetadataValue.Key);
+		if (bInsertingLOD || MetadataValue.LODIndex == OutLODIndex)
+		{
+			AssetTransaction.SnapshotMetadata(&SourceStaticMesh, MetadataValue.Key);
+		}
 	}
 
 	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor
@@ -1981,12 +1995,16 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	}
 	SourceStaticMesh.SetImportVersion(EImportStaticMeshVersion::LastVersion);
 	SourceStaticMesh.PostEditChange();
+	if (PreservedBounds.IsSet())
+	{
+		SourceStaticMesh.SetExtendedBounds(PreservedBounds.GetValue());
+	}
 	SourceStaticMesh.MarkPackageDirty();
 
 	if (bInsertingLOD)
 	{
 		FMetaData& Metadata = SourceStaticMesh.GetPackage()->GetMetaData();
-		for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToShift)
+		for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToUpdate)
 		{
 			Metadata.SetValue(
 				&SourceStaticMesh,
@@ -1994,8 +2012,19 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 				*LexToString(MetadataValue.LODIndex + 1));
 		}
 	}
-	if ((Params.OutputMode == EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD || bInsertingLOD)
-		&& !Params.RebuildLODMetadataKey.IsNone())
+	else if (bReplacingLOD)
+	{
+		// Clear previous feature ownership before assigning the replacement.
+		FMetaData& Metadata = SourceStaticMesh.GetPackage()->GetMetaData();
+		for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToUpdate)
+		{
+			if (MetadataValue.LODIndex == OutLODIndex)
+			{
+				Metadata.RemoveValue(&SourceStaticMesh, MetadataValue.Key);
+			}
+		}
+	}
+	if (bTrackGeneratedLOD)
 	{
 		SourceStaticMesh.GetPackage()->GetMetaData().SetValue(
 			&SourceStaticMesh,
