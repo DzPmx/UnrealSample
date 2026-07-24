@@ -162,9 +162,9 @@ namespace
 							.WidthOverride(90.0f)
 							[
 								SNew(SNumericEntryBox<int32>)
-								.MinValue(0)
+								.MinValue(FMath::Clamp(SourceLODIndex + 1, 0, FMath::Max(GetLastLODIndex(), 0)))
 								.MaxValue(FMath::Max(GetLastLODIndex(), 0))
-								.MinSliderValue(0)
+								.MinSliderValue(FMath::Clamp(SourceLODIndex + 1, 0, FMath::Max(GetLastLODIndex(), 0)))
 								.MaxSliderValue(FMath::Max(GetLastLODIndex(), 0))
 								.Value(this, &SFoliageBakerMeshOutputDialog::GetReplaceLODIndex)
 								.OnValueChanged(this, &SFoliageBakerMeshOutputDialog::SetReplaceLODIndex)
@@ -224,7 +224,7 @@ namespace
 		{
 			return SourceStaticMesh
 				&& SourceStaticMesh->IsSourceModelValid(LODIndex)
-				&& LODIndex != SourceLODIndex;
+				&& LODIndex > SourceLODIndex;
 		}
 
 		bool CanReplaceSelectedLOD() const

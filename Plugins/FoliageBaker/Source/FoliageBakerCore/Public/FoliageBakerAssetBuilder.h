@@ -72,6 +72,13 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerGeneratedAssetOutputFolders
 	FString MaterialPackagePath;
 };
 
+enum class EFoliageBakerTextureMipMode : uint8
+{
+	Default,
+	NormalizeXYZNormal,
+	ImpostorOctaNormalMaskDepth
+};
+
 struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 {
 	FString OutputFolderName;
@@ -87,7 +94,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 	// Mip-0 atlas regions that must be filtered independently before being assembled into each lower mip.
 	TArray<FIntRect> MipTileRects;
 	FColor MipBackgroundColor = FColor(0, 0, 0, 0);
-	bool bNormalizeMipNormals = false;
+	EFoliageBakerTextureMipMode MipMode = EFoliageBakerTextureMipMode::Default;
 	FString EmptyPixelsError = TEXT("No texture pixels were generated.");
 };
 
@@ -113,6 +120,18 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 		UTexture2D* Texture = nullptr;
 	};
 
+	struct FVectorParameterValue
+	{
+		FName ParameterName = NAME_None;
+		FLinearColor Value = FLinearColor::Black;
+	};
+
+	struct FStaticSwitchParameterValue
+	{
+		FName ParameterName = NAME_None;
+		bool bValue = false;
+	};
+
 	FString OutputFolderName;
 	FString OutputPackagePathOverride;
 	FString AssetNamePrefix;
@@ -123,6 +142,10 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	FName MixTextureParameterName = NAME_None;
 	TArray<FTextureParameterValue> AdditionalTextureParameterValues;
 	TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue> ScalarParameterValues;
+	TArray<FVectorParameterValue> VectorParameterValues;
+	TArray<FStaticSwitchParameterValue> StaticSwitchParameterValues;
+	TArray<FName> OwnedTextureParameterNames;
+	TArray<FName> OwnedScalarParameterNames;
 	TOptional<bool> TwoSidedOverride;
 	FString MissingTemplateError = TEXT("A parent Material Instance Constant must be provided.");
 };

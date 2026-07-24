@@ -11,7 +11,6 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Materials/Material.h"
-#include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "MaterialBakingStructures.h"
@@ -1050,6 +1049,7 @@ namespace
 		const TextureGroup LODGroup,
 		const bool bSRGB,
 		const FColor MipBackgroundColor,
+		const EFoliageBakerTextureMipMode MipMode,
 		FString& OutError)
 	{
 		FFoliageBakerTextureAssetParams Params;
@@ -1063,7 +1063,7 @@ namespace
 		Params.LODGroup = LODGroup;
 		Params.bSRGB = bSRGB;
 		Params.MipBackgroundColor = MipBackgroundColor;
-		Params.bNormalizeMipNormals = false;
+		Params.MipMode = MipMode;
 		const int32 TileResolution = FMath::Max(1, Stats.TileResolution);
 		for (int32 TileY = 0; TileY < Stats.AtlasHeight; TileY += TileResolution)
 		{
@@ -1253,6 +1253,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			TEXTUREGROUP_World,
 			true,
 			FColor(0, 0, 0, 0),
+			EFoliageBakerTextureMipMode::Default,
 			Error);
 		if (!Result.BaseColorSdfTexture)
 		{
@@ -1278,6 +1279,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 				FVector::UpVector,
 				0,
 				UnitFloatToByte(0.5f)),
+			EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth,
 			Error);
 		if (!Result.NormalDepthTexture)
 		{
@@ -1300,6 +1302,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			TEXTUREGROUP_WorldSpecular,
 			false,
 			FColor(255, 128, 0, 0),
+			EFoliageBakerTextureMipMode::Default,
 			Error);
 		if (!Result.MixTexture)
 		{
@@ -1317,6 +1320,12 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	MaterialParams.BaseColorOpacityTextureParameterName = Settings.BaseColorSdfTextureParameterName;
 	MaterialParams.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
 	MaterialParams.MixTextureParameterName = Settings.MixTextureParameterName;
+	MaterialParams.OwnedScalarParameterNames = {
+		Settings.LeafRoughnessParameterName,
+		Settings.LeafSpecularParameterName,
+		Settings.TrunkRoughnessParameterName,
+		Settings.TrunkSpecularParameterName
+	};
 	if (!Settings.bBakeMix)
 	{
 		const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
@@ -1339,6 +1348,28 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			return Result;
 		}
 	}
+	const float FrameGridSize = static_cast<float>(
+		FMath::Clamp(Settings.FrameGridSize, 3, 8));
+	MaterialParams.ScalarParameterValues.Add({
+		Settings.FramesParameterName,
+		FrameGridSize
+	});
+	MaterialParams.ScalarParameterValues.Add({
+		Settings.DefaultMeshSizeParameterName,
+		static_cast<float>(BakeData.SharedCaptureHalfExtent * 2.0)
+	});
+	MaterialParams.VectorParameterValues.Add({
+		Settings.PivotOffsetParameterName,
+		FLinearColor(
+			static_cast<float>(BakeData.SourceBounds.Origin.X),
+			static_cast<float>(BakeData.SourceBounds.Origin.Y),
+			static_cast<float>(BakeData.SourceBounds.Origin.Z),
+			1.0f)
+	});
+	MaterialParams.StaticSwitchParameterValues.Add({
+		Settings.UpperHemisphereStaticSwitchParameterName,
+		Settings.Coverage == EFoliageBakerImpostorCoverage::UpperHemisphere
+	});
 	Result.MaterialInstance = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 		SourceStaticMesh,
 		Transaction,
@@ -1353,34 +1384,6 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), *Error);
 		return Result;
 	}
-
-	Result.MaterialInstance->PreEditChange(nullptr);
-	const float FrameGridSize = static_cast<float>(FMath::Clamp(Settings.FrameGridSize, 3, 8));
-	Result.MaterialInstance->SetScalarParameterValueEditorOnly(
-		Settings.FramesParameterName,
-		FrameGridSize);
-	Result.MaterialInstance->SetScalarParameterValueEditorOnly(
-		Settings.DefaultMeshSizeParameterName,
-		static_cast<float>(BakeData.SharedCaptureHalfExtent * 2.0));
-	Result.MaterialInstance->SetVectorParameterValueEditorOnly(
-		Settings.PivotOffsetParameterName,
-		FLinearColor(
-			static_cast<float>(BakeData.SourceBounds.Origin.X),
-			static_cast<float>(BakeData.SourceBounds.Origin.Y),
-			static_cast<float>(BakeData.SourceBounds.Origin.Z),
-			1.0f));
-	const auto SetStaticSwitch = [&](const FName ParameterName, const bool bValue)
-	{
-		Result.MaterialInstance->SetStaticSwitchParameterValueEditorOnly(
-			FMaterialParameterInfo(ParameterName),
-			bValue);
-	};
-	SetStaticSwitch(
-		Settings.UpperHemisphereStaticSwitchParameterName,
-		Settings.Coverage == EFoliageBakerImpostorCoverage::UpperHemisphere);
-	Result.MaterialInstance->PostEditChange();
-	Result.MaterialInstance->UpdateStaticPermutation();
-	Result.MaterialInstance->MarkPackageDirty();
 
 	if (MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 	{

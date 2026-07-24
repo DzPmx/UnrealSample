@@ -28,6 +28,221 @@
 namespace
 {
 	constexpr EObjectFlags ManagedAssetFlags = RF_Public | RF_Standalone | RF_Transactional | RF_Transient;
+	const FName OwnedTextureParametersMetadataKey(TEXT("FoliageBaker.OwnedTextureParameters"));
+	const FName OwnedScalarParametersMetadataKey(TEXT("FoliageBaker.OwnedScalarParameters"));
+	const FName OwnedVectorParametersMetadataKey(TEXT("FoliageBaker.OwnedVectorParameters"));
+	const FName OwnedStaticSwitchParametersMetadataKey(TEXT("FoliageBaker.OwnedStaticSwitchParameters"));
+
+	struct FOwnedMaterialParameterNames
+	{
+		TSet<FName> Texture;
+		TSet<FName> Scalar;
+		TSet<FName> Vector;
+		TSet<FName> StaticSwitch;
+
+		void Append(const FOwnedMaterialParameterNames& Other)
+		{
+			Texture.Append(Other.Texture);
+			Scalar.Append(Other.Scalar);
+			Vector.Append(Other.Vector);
+			StaticSwitch.Append(Other.StaticSwitch);
+		}
+	};
+
+	void AddOwnedParameterName(TSet<FName>& Names, const FName Name)
+	{
+		if (!Name.IsNone())
+		{
+			Names.Add(Name);
+		}
+	}
+
+	void AddOwnedParameterNames(TSet<FName>& Names, const TArray<FName>& AdditionalNames)
+	{
+		for (const FName Name : AdditionalNames)
+		{
+			AddOwnedParameterName(Names, Name);
+		}
+	}
+
+	void ParseOwnedParameterNames(const FString& SerializedNames, TSet<FName>& OutNames)
+	{
+		TArray<FString> Names;
+		SerializedNames.ParseIntoArrayLines(Names, true);
+		for (const FString& Name : Names)
+		{
+			AddOwnedParameterName(OutNames, FName(*Name));
+		}
+	}
+
+	FString SerializeOwnedParameterNames(const TSet<FName>& Names)
+	{
+		TArray<FString> SortedNames;
+		SortedNames.Reserve(Names.Num());
+		for (const FName Name : Names)
+		{
+			SortedNames.Add(Name.ToString());
+		}
+		SortedNames.Sort();
+		return FString::Join(SortedNames, TEXT("\n"));
+	}
+
+	FOwnedMaterialParameterNames ReadOwnedMaterialParameterNames(
+		const UMaterialInstanceConstant& MaterialInstance)
+	{
+		FOwnedMaterialParameterNames Result;
+		FMetaData& MetaData = MaterialInstance.GetPackage()->GetMetaData();
+		auto ReadNames = [&MaterialInstance, &MetaData](
+			const FName Key,
+			TSet<FName>& OutNames)
+		{
+			if (MetaData.HasValue(&MaterialInstance, Key))
+			{
+				ParseOwnedParameterNames(
+					MetaData.GetValue(&MaterialInstance, Key),
+					OutNames);
+			}
+		};
+		ReadNames(OwnedTextureParametersMetadataKey, Result.Texture);
+		ReadNames(OwnedScalarParametersMetadataKey, Result.Scalar);
+		ReadNames(OwnedVectorParametersMetadataKey, Result.Vector);
+		ReadNames(OwnedStaticSwitchParametersMetadataKey, Result.StaticSwitch);
+		return Result;
+	}
+
+	FOwnedMaterialParameterNames BuildOwnedMaterialParameterNames(
+		const FFoliageBakerMaterialInstanceAssetParams& Params)
+	{
+		FOwnedMaterialParameterNames Result;
+		AddOwnedParameterName(Result.Texture, Params.BaseColorOpacityTextureParameterName);
+		AddOwnedParameterName(Result.Texture, Params.NormalDepthTextureParameterName);
+		AddOwnedParameterName(Result.Texture, Params.MixTextureParameterName);
+		for (const FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue& Parameter :
+			Params.AdditionalTextureParameterValues)
+		{
+			AddOwnedParameterName(Result.Texture, Parameter.ParameterName);
+		}
+		for (const UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue& Parameter :
+			Params.ScalarParameterValues)
+		{
+			AddOwnedParameterName(Result.Scalar, Parameter.ParameterName);
+		}
+		for (const FFoliageBakerMaterialInstanceAssetParams::FVectorParameterValue& Parameter :
+			Params.VectorParameterValues)
+		{
+			AddOwnedParameterName(Result.Vector, Parameter.ParameterName);
+		}
+		for (const FFoliageBakerMaterialInstanceAssetParams::FStaticSwitchParameterValue& Parameter :
+			Params.StaticSwitchParameterValues)
+		{
+			AddOwnedParameterName(Result.StaticSwitch, Parameter.ParameterName);
+		}
+		AddOwnedParameterNames(Result.Texture, Params.OwnedTextureParameterNames);
+		AddOwnedParameterNames(Result.Scalar, Params.OwnedScalarParameterNames);
+		return Result;
+	}
+
+	bool IsOwnedGlobalParameter(
+		const FMaterialParameterInfo& ParameterInfo,
+		const TSet<FName>& OwnedNames)
+	{
+		return ParameterInfo.Association
+				== EMaterialParameterAssociation::GlobalParameter
+			&& ParameterInfo.Index == INDEX_NONE
+			&& OwnedNames.Contains(ParameterInfo.Name);
+	}
+
+	void RemoveOwnedMaterialParameterOverrides(
+		UMaterialInstanceConstant& MaterialInstance,
+		const FOwnedMaterialParameterNames& OwnedNames)
+	{
+		MaterialInstance.TextureParameterValues.RemoveAll(
+			[&OwnedNames](const FTextureParameterValue& Parameter)
+			{
+				return IsOwnedGlobalParameter(
+					Parameter.ParameterInfo,
+					OwnedNames.Texture);
+			});
+		MaterialInstance.ScalarParameterValues.RemoveAll(
+			[&OwnedNames](const FScalarParameterValue& Parameter)
+			{
+				return IsOwnedGlobalParameter(
+					Parameter.ParameterInfo,
+					OwnedNames.Scalar);
+			});
+		MaterialInstance.VectorParameterValues.RemoveAll(
+			[&OwnedNames](const FVectorParameterValue& Parameter)
+			{
+				return IsOwnedGlobalParameter(
+					Parameter.ParameterInfo,
+					OwnedNames.Vector);
+			});
+	}
+
+	void ReplaceOwnedStaticSwitchParameterOverrides(
+		UMaterialInstanceConstant& MaterialInstance,
+		const TSet<FName>& OwnedNames,
+		const TArray<FFoliageBakerMaterialInstanceAssetParams::FStaticSwitchParameterValue>&
+			CurrentValues)
+	{
+		if (OwnedNames.IsEmpty() && CurrentValues.IsEmpty())
+		{
+			return;
+		}
+
+		FMaterialInstanceParameterUpdateContext UpdateContext(&MaterialInstance);
+		TArray<FStaticSwitchParameter>& StaticSwitchParameters =
+			UpdateContext.GetStaticParameters().StaticSwitchParameters;
+		StaticSwitchParameters.RemoveAll(
+			[&OwnedNames](const FStaticSwitchParameter& Parameter)
+			{
+				return IsOwnedGlobalParameter(
+					Parameter.ParameterInfo,
+					OwnedNames);
+			});
+		for (const FFoliageBakerMaterialInstanceAssetParams::FStaticSwitchParameterValue&
+			CurrentValue : CurrentValues)
+		{
+			if (!CurrentValue.ParameterName.IsNone())
+			{
+				StaticSwitchParameters.Emplace(
+					FMaterialParameterInfo(CurrentValue.ParameterName),
+					CurrentValue.bValue,
+					true,
+					FGuid());
+			}
+		}
+	}
+
+	void WriteOwnedMaterialParameterNames(
+		UMaterialInstanceConstant& MaterialInstance,
+		FFoliageBakerAssetTransaction& AssetTransaction,
+		const FOwnedMaterialParameterNames& OwnedNames)
+	{
+		FMetaData& MetaData = MaterialInstance.GetPackage()->GetMetaData();
+		auto WriteNames = [
+			&MaterialInstance,
+			&AssetTransaction,
+			&MetaData](
+			const FName Key,
+			const TSet<FName>& Names)
+		{
+			AssetTransaction.SnapshotMetadata(&MaterialInstance, Key);
+			const FString SerializedNames = SerializeOwnedParameterNames(Names);
+			if (SerializedNames.IsEmpty())
+			{
+				MetaData.RemoveValue(&MaterialInstance, Key);
+			}
+			else
+			{
+				MetaData.SetValue(&MaterialInstance, Key, *SerializedNames);
+			}
+		};
+		WriteNames(OwnedTextureParametersMetadataKey, OwnedNames.Texture);
+		WriteNames(OwnedScalarParametersMetadataKey, OwnedNames.Scalar);
+		WriteNames(OwnedVectorParametersMetadataKey, OwnedNames.Vector);
+		WriteNames(OwnedStaticSwitchParametersMetadataKey, OwnedNames.StaticSwitch);
+	}
 
 	FString NormalizeRelativeOutputFolder(FString OutputFolder)
 	{
@@ -234,41 +449,6 @@ namespace
 		{
 			FAssetCompilingManager::Get().FinishCompilationForObjects(ValidAssets);
 		}
-	}
-
-	void ResetMaterialInstanceOverridesToDefaults(UMaterialInstanceConstant& MaterialInstance)
-	{
-		const UMaterialInstanceConstant* Defaults = GetDefault<UMaterialInstanceConstant>();
-		MaterialInstance.PhysMaterial = Defaults->PhysMaterial;
-		MaterialInstance.PhysMaterialMask = Defaults->PhysMaterialMask;
-		for (int32 MaterialIndex = 0; MaterialIndex < EPhysicalMaterialMaskColor::MAX; ++MaterialIndex)
-		{
-			MaterialInstance.PhysicalMaterialMap[MaterialIndex] = Defaults->PhysicalMaterialMap[MaterialIndex];
-		}
-
-		MaterialInstance.NaniteOverrideMaterial = Defaults->NaniteOverrideMaterial;
-		MaterialInstance.SubsurfaceProfile = Defaults->SubsurfaceProfile;
-		MaterialInstance.SubsurfaceProfiles = Defaults->SubsurfaceProfiles;
-		MaterialInstance.SpecularProfiles = Defaults->SpecularProfiles;
-		MaterialInstance.SpecularProfileOverride = Defaults->SpecularProfileOverride;
-		MaterialInstance.NeuralProfile = Defaults->NeuralProfile;
-		MaterialInstance.bOverrideSubsurfaceProfile = Defaults->bOverrideSubsurfaceProfile;
-		MaterialInstance.bOverrideSpecularProfile = Defaults->bOverrideSpecularProfile;
-
-		MaterialInstance.bOverrideBlendableLocation = Defaults->bOverrideBlendableLocation;
-		MaterialInstance.bOverrideBlendablePriority = Defaults->bOverrideBlendablePriority;
-		MaterialInstance.BlendableLocationOverride = Defaults->BlendableLocationOverride;
-		MaterialInstance.BlendablePriorityOverride = Defaults->BlendablePriorityOverride;
-		MaterialInstance.UserSceneTextureOverrides = Defaults->UserSceneTextureOverrides;
-
-		MaterialInstance.SetOverrideCastShadowAsMasked(Defaults->GetOverrideCastShadowAsMasked());
-		MaterialInstance.SetCastShadowAsMasked(Defaults->GetCastShadowAsMasked());
-		MaterialInstance.SetOverrideEmissiveBoost(Defaults->GetOverrideEmissiveBoost());
-		MaterialInstance.SetEmissiveBoost(Defaults->GetEmissiveBoost());
-		MaterialInstance.SetOverrideDiffuseBoost(Defaults->GetOverrideDiffuseBoost());
-		MaterialInstance.SetDiffuseBoost(Defaults->GetDiffuseBoost());
-		MaterialInstance.SetOverrideExportResolutionScale(Defaults->GetOverrideExportResolutionScale());
-		MaterialInstance.SetExportResolutionScale(Defaults->GetExportResolutionScale());
 	}
 
 	UMaterialInterface* ResolveProxyMaterial(UMaterialInterface* ProxyMaterial)
@@ -655,6 +835,135 @@ namespace
 		}
 	}
 
+	FVector DecodeOctahedralNormal(const FColor& Pixel)
+	{
+		FVector Normal(
+			static_cast<double>(Pixel.R) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(Pixel.G) / 255.0 * 2.0 - 1.0,
+			0.0);
+		Normal.Z = 1.0 - FMath::Abs(Normal.X) - FMath::Abs(Normal.Y);
+		if (Normal.Z < 0.0)
+		{
+			const double OldX = Normal.X;
+			Normal.X = (1.0 - FMath::Abs(Normal.Y))
+				* (OldX >= 0.0 ? 1.0 : -1.0);
+			Normal.Y = (1.0 - FMath::Abs(OldX))
+				* (Normal.Y >= 0.0 ? 1.0 : -1.0);
+		}
+		return Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+	}
+
+	FIntPoint EncodeOctahedralNormalRG(const FVector& InNormal)
+	{
+		const FVector Normal =
+			InNormal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+		const double L1Norm = FMath::Abs(Normal.X)
+			+ FMath::Abs(Normal.Y)
+			+ FMath::Abs(Normal.Z);
+		const FVector Projected =
+			Normal / FMath::Max(L1Norm, UE_DOUBLE_SMALL_NUMBER);
+		FVector2D Octahedral(Projected.X, Projected.Y);
+		if (Projected.Z < 0.0)
+		{
+			const double OldX = Octahedral.X;
+			Octahedral.X = (1.0 - FMath::Abs(Octahedral.Y))
+				* (OldX >= 0.0 ? 1.0 : -1.0);
+			Octahedral.Y = (1.0 - FMath::Abs(OldX))
+				* (Octahedral.Y >= 0.0 ? 1.0 : -1.0);
+		}
+		return FIntPoint(
+			FMath::Clamp(
+				FMath::RoundToInt((Octahedral.X * 0.5 + 0.5) * 255.0),
+				0,
+				255),
+			FMath::Clamp(
+				FMath::RoundToInt((Octahedral.Y * 0.5 + 0.5) * 255.0),
+				0,
+				255));
+	}
+
+	void GenerateImpostorNormalMaskDepthMip(
+		const FColor* SourcePixels,
+		const int32 SourceWidth,
+		const int32 SourceHeight,
+		FColor* DestinationPixels,
+		const int32 DestinationWidth,
+		const int32 DestinationHeight)
+	{
+		if (!SourcePixels
+			|| !DestinationPixels
+			|| SourceWidth <= 0
+			|| SourceHeight <= 0
+			|| DestinationWidth <= 0
+			|| DestinationHeight <= 0)
+		{
+			return;
+		}
+
+		constexpr uint8 TrunkMaskThreshold = 64;
+		constexpr uint8 LeafMaskThreshold = 192;
+		for (int32 DestinationY = 0; DestinationY < DestinationHeight; ++DestinationY)
+		{
+			const int32 SourceMinY = FMath::Clamp(
+				DestinationY * SourceHeight / DestinationHeight,
+				0,
+				SourceHeight - 1);
+			const int32 SourceMaxY = FMath::Clamp(
+				FMath::DivideAndRoundUp(
+					(DestinationY + 1) * SourceHeight,
+					DestinationHeight),
+				SourceMinY + 1,
+				SourceHeight);
+			for (int32 DestinationX = 0; DestinationX < DestinationWidth; ++DestinationX)
+			{
+				const int32 SourceMinX = FMath::Clamp(
+					DestinationX * SourceWidth / DestinationWidth,
+					0,
+					SourceWidth - 1);
+				const int32 SourceMaxX = FMath::Clamp(
+					FMath::DivideAndRoundUp(
+						(DestinationX + 1) * SourceWidth,
+						DestinationWidth),
+					SourceMinX + 1,
+					SourceWidth);
+
+				FVector NormalSum = FVector::ZeroVector;
+				int32 TrunkSampleCount = 0;
+				int32 LeafSampleCount = 0;
+				for (int32 SourceY = SourceMinY; SourceY < SourceMaxY; ++SourceY)
+				{
+					for (int32 SourceX = SourceMinX; SourceX < SourceMaxX; ++SourceX)
+					{
+						const FColor& SourcePixel =
+							SourcePixels[SourceY * SourceWidth + SourceX];
+						NormalSum += DecodeOctahedralNormal(SourcePixel);
+						if (SourcePixel.B >= LeafMaskThreshold)
+						{
+							++LeafSampleCount;
+						}
+						else if (SourcePixel.B >= TrunkMaskThreshold)
+						{
+							++TrunkSampleCount;
+						}
+					}
+				}
+
+				FColor& DestinationPixel =
+					DestinationPixels[DestinationY * DestinationWidth + DestinationX];
+				const FIntPoint EncodedNormal =
+					EncodeOctahedralNormalRG(NormalSum);
+				DestinationPixel.R = static_cast<uint8>(EncodedNormal.X);
+				DestinationPixel.G = static_cast<uint8>(EncodedNormal.Y);
+				DestinationPixel.B =
+					LeafSampleCount + TrunkSampleCount == 0
+						? 0
+						: LeafSampleCount >= TrunkSampleCount
+							? 255
+							: 128;
+			}
+		}
+	}
+
 	void GenerateSemanticMaskMipAlpha(
 		const uint8* SourceAlphaValues,
 		const int32 SourceWidth,
@@ -908,9 +1217,20 @@ namespace
 				FImageCore::ResizeImage(CurrentTile, NextTile, FImageCore::EResizeImageFilter::Box);
 				FColor* NextTilePixels = reinterpret_cast<FColor*>(NextTile.RawData.GetData());
 				const int32 NextTilePixelCount = MipTileRect.Width() * MipTileRect.Height();
-				if (Params.bNormalizeMipNormals)
+				if (Params.MipMode == EFoliageBakerTextureMipMode::NormalizeXYZNormal)
 				{
 					NormalizeEncodedNormalPixels(NextTilePixels, NextTilePixelCount);
+				}
+				else if (Params.MipMode
+					== EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth)
+				{
+					GenerateImpostorNormalMaskDepthMip(
+						reinterpret_cast<const FColor*>(CurrentTile.RawData.GetData()),
+						static_cast<int32>(CurrentTile.SizeX),
+						static_cast<int32>(CurrentTile.SizeY),
+						NextTilePixels,
+						static_cast<int32>(NextTile.SizeX),
+						static_cast<int32>(NextTile.SizeY));
 				}
 				if (SemanticMaskMipCoverageThreshold > 0.0f)
 				{
@@ -973,9 +1293,20 @@ namespace
 				FImageCore::ResizeImage(CurrentAtlas, NextAtlas, FImageCore::EResizeImageFilter::Box);
 				FColor* NextAtlasPixels = reinterpret_cast<FColor*>(NextAtlas.RawData.GetData());
 				const int32 NextAtlasPixelCount = MipWidth * MipHeight;
-				if (Params.bNormalizeMipNormals)
+				if (Params.MipMode == EFoliageBakerTextureMipMode::NormalizeXYZNormal)
 				{
 					NormalizeEncodedNormalPixels(NextAtlasPixels, NextAtlasPixelCount);
+				}
+				else if (Params.MipMode
+					== EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth)
+				{
+					GenerateImpostorNormalMaskDepthMip(
+						reinterpret_cast<const FColor*>(CurrentAtlas.RawData.GetData()),
+						static_cast<int32>(CurrentAtlas.SizeX),
+						static_cast<int32>(CurrentAtlas.SizeY),
+						NextAtlasPixels,
+						static_cast<int32>(NextAtlas.SizeX),
+						static_cast<int32>(NextAtlas.SizeY));
 				}
 				if (SemanticMaskMipCoverageThreshold > 0.0f)
 				{
@@ -1024,6 +1355,14 @@ namespace
 					*SourceStaticMesh.GetName());
 				return false;
 			}
+			if (Params.RequestedReplaceLODIndex <= Params.SourceLODIndex)
+			{
+				OutError = FString::Printf(
+					TEXT("Cannot replace LOD %d because the generated proxy must be written after the selected source LOD %d."),
+					Params.RequestedReplaceLODIndex,
+					Params.SourceLODIndex);
+				return false;
+			}
 			OutLODIndex = Params.RequestedReplaceLODIndex;
 		}
 		else if (Params.OutputMode == EFoliageBakerMeshAssetOutputMode::AddToSourceMeshLOD)
@@ -1035,7 +1374,7 @@ namespace
 					Params.RebuildLODMetadataKey);
 				int32 ExistingLODIndex = INDEX_NONE;
 				if (LexTryParseString(ExistingLODIndex, *ExistingLODValue)
-					&& ExistingLODIndex > 0
+					&& ExistingLODIndex > Params.SourceLODIndex
 					&& SourceStaticMesh.IsSourceModelValid(ExistingLODIndex))
 				{
 					OutLODIndex = ExistingLODIndex;
@@ -1091,11 +1430,12 @@ namespace
 		}
 
 		if (Params.OutputMode != EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD
-			&& OutLODIndex == Params.SourceLODIndex)
+			&& OutLODIndex <= Params.SourceLODIndex)
 		{
 			OutError = FString::Printf(
-				TEXT("Output LOD %d would overwrite the selected source LOD on %s. Choose a different output LOD so rebaking continues to use the original source geometry."),
+				TEXT("Output LOD %d must be after the selected source LOD %d on %s."),
 				OutLODIndex,
+				Params.SourceLODIndex,
 				*SourceStaticMesh.GetName());
 			return false;
 		}
@@ -1443,8 +1783,10 @@ UTexture2D* FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 	TextureParams.SemanticMaskMipCoverageThreshold =
 		Params.SemanticMaskMipCoverageThreshold;
 	TextureParams.MipBackgroundColor = Params.MipBackgroundColor;
-	TextureParams.bNormalizeMipNormals =
-		Params.LODGroup == TEXTUREGROUP_WorldNormalMap;
+	TextureParams.MipMode =
+		Params.LODGroup == TEXTUREGROUP_WorldNormalMap
+			? EFoliageBakerTextureMipMode::NormalizeXYZNormal
+			: EFoliageBakerTextureMipMode::Default;
 	TextureParams.EmptyPixelsError = Params.EmptyPixelsError;
 
 	TextureParams.MipTileRects.Reserve(PlaneInfos.Num() * 2);
@@ -1627,7 +1969,6 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 	}
 	Package->FullyLoad();
 
-	const bool bReplacingExistingMaterialInstance = MaterialInstance != nullptr;
 	if (!MaterialInstance)
 	{
 		MaterialInstance = NewObject<UMaterialInstanceConstant>(
@@ -1651,19 +1992,24 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 	}
 	MaterialInstance->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
 	MaterialInstance->ClearFlags(RF_Transient);
+	const FOwnedMaterialParameterNames CurrentOwnedParameterNames =
+		BuildOwnedMaterialParameterNames(Params);
+	FOwnedMaterialParameterNames ParameterNamesToReplace =
+		ReadOwnedMaterialParameterNames(*MaterialInstance);
+	// Current names clean legacy assets; metadata also finds parameters renamed since the previous bake.
+	ParameterNamesToReplace.Append(CurrentOwnedParameterNames);
 	MaterialInstance->PreEditChange(nullptr);
 	MaterialInstance->SetParentEditorOnly(TemplateMaterialInstance, false);
-	if (bReplacingExistingMaterialInstance)
-	{
-		FMaterialInstanceParameterUpdateContext ResetContext(
-			MaterialInstance,
-			EMaterialInstanceClearParameterFlag::All);
-		ResetContext.SetBasePropertyOverrides(FMaterialInstanceBasePropertyOverrides());
-		ResetMaterialInstanceOverridesToDefaults(*MaterialInstance);
-	}
+	RemoveOwnedMaterialParameterOverrides(
+		*MaterialInstance,
+		ParameterNamesToReplace);
+	ReplaceOwnedStaticSwitchParameterOverrides(
+		*MaterialInstance,
+		ParameterNamesToReplace.StaticSwitch,
+		Params.StaticSwitchParameterValues);
 	if (Params.TwoSidedOverride.IsSet())
 	{
-		FMaterialInstanceBasePropertyOverrides Overrides;
+		FMaterialInstanceBasePropertyOverrides Overrides = MaterialInstance->BasePropertyOverrides;
 		Overrides.bOverride_TwoSided = true;
 		Overrides.TwoSided = Params.TwoSidedOverride.GetValue();
 		FMaterialInstanceParameterUpdateContext OverrideContext(MaterialInstance);
@@ -1704,6 +2050,20 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 			FMaterialParameterInfo(ScalarParameter.ParameterName),
 			ScalarParameter.Value);
 	}
+	for (const FFoliageBakerMaterialInstanceAssetParams::FVectorParameterValue& VectorParameter
+		: Params.VectorParameterValues)
+	{
+		if (!VectorParameter.ParameterName.IsNone())
+		{
+			MaterialInstance->SetVectorParameterValueEditorOnly(
+				FMaterialParameterInfo(VectorParameter.ParameterName),
+				VectorParameter.Value);
+		}
+	}
+	WriteOwnedMaterialParameterNames(
+		*MaterialInstance,
+		AssetTransaction,
+		CurrentOwnedParameterNames);
 	MaterialInstance->PostEditChange();
 	MaterialInstance->MarkPackageDirty();
 	return MaterialInstance;

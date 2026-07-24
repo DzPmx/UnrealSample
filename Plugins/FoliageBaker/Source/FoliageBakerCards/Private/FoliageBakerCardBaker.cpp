@@ -1126,6 +1126,15 @@ namespace
 		MaterialParams.BaseColorOpacityTextureParameterName = EditorSettings.BaseColorOpacityTextureParameterName;
 		MaterialParams.NormalDepthTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
+		MaterialParams.OwnedTextureParameterNames = {
+			EditorSettings.UpperHemisphereL1VisibilityTextureParameterName
+		};
+		MaterialParams.OwnedScalarParameterNames = {
+			EditorSettings.LeafRoughnessParameterName,
+			EditorSettings.LeafSpecularParameterName,
+			EditorSettings.TrunkRoughnessParameterName,
+			EditorSettings.TrunkSpecularParameterName
+		};
 		MaterialParams.ScalarParameterValues = MaterialRecipe.ScalarParameterValues;
 		if (EditorSettings.bBakeUpperHemisphereL1Visibility)
 		{

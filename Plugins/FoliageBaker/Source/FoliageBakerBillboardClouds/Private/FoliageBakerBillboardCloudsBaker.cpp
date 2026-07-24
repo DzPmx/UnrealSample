@@ -786,6 +786,12 @@ namespace
 		MaterialParams.BaseColorOpacityTextureParameterName = EditorSettings.BaseColorOpacityTextureParameterName;
 		MaterialParams.NormalDepthTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
+		MaterialParams.OwnedScalarParameterNames = {
+			EditorSettings.LeafRoughnessParameterName,
+			EditorSettings.LeafSpecularParameterName,
+			EditorSettings.TrunkRoughnessParameterName,
+			EditorSettings.TrunkSpecularParameterName
+		};
 		if (OutData.OutputSelection.bMaterialScalarAverages)
 		{
 			const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
