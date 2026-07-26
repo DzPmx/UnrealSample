@@ -1,0 +1,29 @@
+{
+	"FileVersion": 3,
+	"Version": 9,
+	"VersionName": "0.9.0",
+	"FriendlyName": "Texture Baker",
+	"Description": "Editor tools for CPU or GPU Compute baking of mesh-derived data into textures. SH Thickness supports grouped StaticMesh and SkeletalMesh inputs with one output texture per source.",
+	"Category": "Rendering",
+	"CreatedBy": "Codex",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"EnabledByDefault": true,
+	"Modules": [
+		{
+			"Name": "TextureBakerEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostConfigInit"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "GeometryProcessing",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
+}

@@ -1,0 +1,291 @@
+#include "/Engine/Private/Common.ush"
+
+uint SampleCount;
+uint DirectionCount;
+uint DispatchGroupsX;
+uint CoefficientSpace;
+float ThicknessScaleCm;
+float NormalOffsetCm;
+float NearClipCm;
+float FarClipCm;
+
+StructuredBuffer<float4> Samples;
+StructuredBuffer<float4> TrianglePositions;
+StructuredBuffer<float4> TriangleTangents;
+StructuredBuffer<float4> TriangleNormals;
+StructuredBuffer<float4> BVHNodes;
+StructuredBuffer<uint> BVHTriangleIndices;
+StructuredBuffer<float4> Directions;
+RWStructuredBuffer<float4> OutputCoefficients;
+
+#define BVH_STACK_SIZE 32
+#define RAY_DISTANCE_RELATIVE_TOLERANCE 1.0e-6f
+
+groupshared float4 GroupCoefficients[THREADGROUP_SIZE];
+
+bool IntersectsBounds(
+	float3 Origin,
+	float3 InverseDirection,
+	float3 BoundsMin,
+	float3 BoundsMax,
+	float MaximumDistance)
+{
+	const float3 Distance0 = (BoundsMin - Origin) * InverseDirection;
+	const float3 Distance1 = (BoundsMax - Origin) * InverseDirection;
+	const float3 NearDistances = min(Distance0, Distance1);
+	const float3 FarDistances = max(Distance0, Distance1);
+	const float NearDistance = max(
+		max(NearDistances.x, NearDistances.y),
+		max(NearDistances.z, 0.0f));
+	const float FarDistance = min(
+		min(FarDistances.x, FarDistances.y),
+		FarDistances.z);
+	return NearDistance <= FarDistance
+		&& NearDistance <= MaximumDistance;
+}
+
+bool IntersectsTriangle(
+	float3 Origin,
+	float3 Direction,
+	uint TriangleIndex,
+	out float HitDistance)
+{
+	const uint PositionIndex = TriangleIndex * 3;
+	const float3 A = TrianglePositions[PositionIndex + 0].xyz;
+	const float3 Edge1 = TrianglePositions[PositionIndex + 1].xyz;
+	const float3 Edge2 = TrianglePositions[PositionIndex + 2].xyz;
+	const float3 P = cross(Direction, Edge2);
+	const float Determinant = dot(Edge1, P);
+	if (abs(Determinant) <= 1.0e-8f)
+	{
+		HitDistance = 0.0f;
+		return false;
+	}
+
+	const float InverseDeterminant = rcp(Determinant);
+	const float3 T = Origin - A;
+	const float U = dot(T, P) * InverseDeterminant;
+	if (U < 0.0f || U > 1.0f)
+	{
+		HitDistance = 0.0f;
+		return false;
+	}
+
+	const float3 Q = cross(T, Edge1);
+	const float V = dot(Direction, Q) * InverseDeterminant;
+	if (V < 0.0f || U + V > 1.0f)
+	{
+		HitDistance = 0.0f;
+		return false;
+	}
+
+	HitDistance = dot(Edge2, Q) * InverseDeterminant;
+	return true;
+}
+
+float FindFarthestHitDistance(
+	float3 Origin,
+	float3 Direction,
+	float NearDistance,
+	float MaximumDistance)
+{
+	const float3 SafeDirection = float3(
+		abs(Direction.x) > 1.0e-20f
+			? Direction.x
+			: (Direction.x < 0.0f ? -1.0e-20f : 1.0e-20f),
+		abs(Direction.y) > 1.0e-20f
+			? Direction.y
+			: (Direction.y < 0.0f ? -1.0e-20f : 1.0e-20f),
+		abs(Direction.z) > 1.0e-20f
+			? Direction.z
+			: (Direction.z < 0.0f ? -1.0e-20f : 1.0e-20f));
+	const float3 InverseDirection = rcp(SafeDirection);
+	uint NodeStack[BVH_STACK_SIZE];
+	uint StackSize = 1;
+	NodeStack[0] = 0;
+	float FarthestDistance = 0.0f;
+
+	while (StackSize > 0)
+	{
+		const uint NodeIndex = NodeStack[--StackSize];
+		const float4 NodeMinData = BVHNodes[NodeIndex * 2 + 0];
+		const float4 NodeMaxData = BVHNodes[NodeIndex * 2 + 1];
+		if (!IntersectsBounds(
+			Origin,
+			InverseDirection,
+			NodeMinData.xyz,
+			NodeMaxData.xyz,
+			MaximumDistance))
+		{
+			continue;
+		}
+
+		const uint LeftFirst = asuint(NodeMinData.w);
+		const uint TriangleCount = asuint(NodeMaxData.w);
+		if (TriangleCount > 0)
+		{
+			for (uint TriangleOffset = 0;
+				TriangleOffset < TriangleCount;
+				++TriangleOffset)
+			{
+				const uint TriangleIndex =
+					BVHTriangleIndices[LeftFirst + TriangleOffset];
+				float HitDistance;
+				if (IntersectsTriangle(
+						Origin,
+						Direction,
+						TriangleIndex,
+						HitDistance)
+					&& HitDistance >= NearDistance
+					&& HitDistance <= MaximumDistance)
+				{
+					FarthestDistance =
+						max(FarthestDistance, HitDistance);
+				}
+			}
+		}
+		else
+		{
+			if (StackSize + 2 <= BVH_STACK_SIZE)
+			{
+				NodeStack[StackSize++] = LeftFirst;
+				NodeStack[StackSize++] = LeftFirst + 1;
+			}
+		}
+	}
+
+	return FarthestDistance;
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(
+	uint3 GroupID : SV_GroupID,
+	uint GroupThreadIndex : SV_GroupIndex)
+{
+	const uint SampleIndex =
+		GroupID.x + GroupID.y * DispatchGroupsX;
+	if (SampleIndex >= SampleCount)
+	{
+		return;
+	}
+
+	const float4 Sample = Samples[SampleIndex];
+	const uint TriangleIndex = asuint(Sample.w);
+	const uint VertexIndex = TriangleIndex * 3;
+	const float3 BarycentricCoordinates = Sample.xyz;
+
+	const float3 SurfacePoint =
+		TrianglePositions[VertexIndex + 0].xyz
+		+ TrianglePositions[VertexIndex + 1].xyz
+			* BarycentricCoordinates.y
+		+ TrianglePositions[VertexIndex + 2].xyz
+			* BarycentricCoordinates.z;
+	const float4 Tangent0 = TriangleTangents[VertexIndex + 0];
+	const float4 Tangent1 = TriangleTangents[VertexIndex + 1];
+	const float4 Tangent2 = TriangleTangents[VertexIndex + 2];
+	const float4 InterpolatedTangent =
+		Tangent0 * BarycentricCoordinates.x
+		+ Tangent1 * BarycentricCoordinates.y
+		+ Tangent2 * BarycentricCoordinates.z;
+	const float3 Normal =
+		TriangleNormals[VertexIndex + 0].xyz
+			* BarycentricCoordinates.x
+		+ TriangleNormals[VertexIndex + 1].xyz
+			* BarycentricCoordinates.y
+		+ TriangleNormals[VertexIndex + 2].xyz
+			* BarycentricCoordinates.z;
+	const float3 Bitangent =
+		cross(Normal, InterpolatedTangent.xyz)
+		* InterpolatedTangent.w;
+
+	float4 Coefficients = 0.0f;
+	const float NormalLengthSquared = dot(Normal, Normal);
+	const float FrameDeterminant =
+		dot(InterpolatedTangent.xyz, cross(Bitangent, Normal));
+	if (NormalLengthSquared <= 1.0e-20f
+		|| (CoefficientSpace == 0
+			&& (abs(InterpolatedTangent.w) <= 1.0e-8f
+				|| abs(FrameDeterminant) <= 1.0e-8f)))
+	{
+		if (GroupThreadIndex == 0)
+		{
+			OutputCoefficients[SampleIndex] =
+				asfloat(0x7FC00000u).xxxx;
+		}
+		return;
+	}
+
+	const float3 Origin =
+		SurfacePoint
+		- Normal * rsqrt(NormalLengthSquared) * NormalOffsetCm;
+	const float ProjectionWeight = rcp((float)DirectionCount);
+
+	for (uint DirectionIndex = GroupThreadIndex;
+		DirectionIndex < DirectionCount;
+		DirectionIndex += THREADGROUP_SIZE)
+	{
+		const float3 CoefficientDirection =
+			Directions[DirectionIndex].xyz;
+		float3 ObjectDirection = CoefficientDirection;
+		if (CoefficientSpace == 0)
+		{
+			ObjectDirection =
+				InterpolatedTangent.xyz * CoefficientDirection.x
+				+ Bitangent * CoefficientDirection.y
+				+ Normal * CoefficientDirection.z;
+		}
+		const float DirectionLengthSquared =
+			dot(ObjectDirection, ObjectDirection);
+		if (DirectionLengthSquared <= 1.0e-20f)
+		{
+			Coefficients = asfloat(0x7FC00000u).xxxx;
+			break;
+		}
+		ObjectDirection *= rsqrt(DirectionLengthSquared);
+
+		const float MajorAxis = max(
+			abs(ObjectDirection.x),
+			max(abs(ObjectDirection.y), abs(ObjectDirection.z)));
+		const float NearDistance = NearClipCm / MajorAxis;
+		const float MaximumDistance = min(
+			ThicknessScaleCm
+				* (1.0f + RAY_DISTANCE_RELATIVE_TOLERANCE),
+			FarClipCm / MajorAxis);
+		if (MaximumDistance < NearDistance)
+		{
+			continue;
+		}
+
+		const float NormalizedThickness =
+			FindFarthestHitDistance(
+				Origin,
+				ObjectDirection,
+				NearDistance,
+				MaximumDistance)
+			/ ThicknessScaleCm;
+		Coefficients += float4(
+				3.0f * CoefficientDirection,
+				1.0f)
+			* (NormalizedThickness * ProjectionWeight);
+	}
+
+	GroupCoefficients[GroupThreadIndex] = Coefficients;
+	GroupMemoryBarrierWithGroupSync();
+
+	for (uint Offset = THREADGROUP_SIZE / 2;
+		Offset > 0;
+		Offset >>= 1)
+	{
+		if (GroupThreadIndex < Offset)
+		{
+			GroupCoefficients[GroupThreadIndex] +=
+				GroupCoefficients[GroupThreadIndex + Offset];
+		}
+		GroupMemoryBarrierWithGroupSync();
+	}
+
+	if (GroupThreadIndex == 0)
+	{
+		OutputCoefficients[SampleIndex] = GroupCoefficients[0];
+	}
+}
