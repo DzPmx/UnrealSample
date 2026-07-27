@@ -12,6 +12,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/Notifications/NotificationManager.h"
+#include "IStaticMeshEditor.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/MessageDialog.h"
@@ -24,6 +25,7 @@
 #include "ShaderCore.h"
 #include "StaticMeshOperations.h"
 #include "Styling/AppStyle.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "ThumbnailRendering/ThumbnailManager.h"
 #include "ToolMenus.h"
 #include "UObject/Package.h"
@@ -57,6 +59,32 @@ struct FSourceMeshSelection
 {
 	TStrongObjectPtr<UObject> Mesh;
 };
+
+void RefreshOpenStaticMeshEditor(UStaticMesh* StaticMesh)
+{
+	if (StaticMesh == nullptr || GEditor == nullptr)
+	{
+		return;
+	}
+
+	UAssetEditorSubsystem* AssetEditorSubsystem =
+		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+	if (AssetEditorSubsystem == nullptr)
+	{
+		return;
+	}
+
+	IAssetEditorInstance* AssetEditor =
+		AssetEditorSubsystem->FindEditorForAsset(
+			StaticMesh,
+			false);
+	if (AssetEditor != nullptr
+		&& AssetEditor->GetEditorName()
+			== FName(TEXT("StaticMeshEditor")))
+	{
+		static_cast<IStaticMeshEditor*>(AssetEditor)->RefreshTool();
+	}
+}
 
 TSharedRef<SWidget> MakeIntegerSettingRow(
 	const FText& Label,
@@ -1701,6 +1729,7 @@ private:
 			if (Job.Preparation.Settings.bRegenerateBakeUV)
 			{
 				AssetsToSync.Add(Pending.SourceMesh);
+				RefreshOpenStaticMeshEditor(Pending.StaticMesh);
 			}
 			AssetsToSync.Add(Pending.Texture);
 		}

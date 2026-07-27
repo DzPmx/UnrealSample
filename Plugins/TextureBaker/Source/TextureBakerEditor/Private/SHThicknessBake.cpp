@@ -192,7 +192,7 @@ struct FGPUTileSample
 	int32 UVChart = INDEX_NONE;
 };
 
-TArray<FVector4f> BuildDirectionSet(const int32 DirectionCount)
+TArray<FVector4f> BuildGPUDirectionSet(const int32 DirectionCount)
 {
 	const int32 HalfCount = DirectionCount / 2;
 	TArray<FVector4f> Result;
@@ -479,7 +479,7 @@ bool BuildGPUBakeData(
 		OutData.BVHTriangleIndices.Add(
 			static_cast<uint32>(TriangleID));
 	}
-	OutData.Directions = BuildDirectionSet(DirectionCount);
+	OutData.Directions = BuildGPUDirectionSet(DirectionCount);
 	return true;
 }
 

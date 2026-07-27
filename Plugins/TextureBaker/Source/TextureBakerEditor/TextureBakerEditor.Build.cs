@@ -19,6 +19,7 @@ public class TextureBakerEditor : ModuleRules
 			new[]
 			{
 				"UnrealEd",
+				"StaticMeshEditor",
 				"Slate",
 				"SlateCore",
 				"ToolMenus",
