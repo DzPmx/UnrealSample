@@ -834,10 +834,21 @@ namespace UE::FoliageBaker::BillboardClouds
 			break;
 		}
 
+		const FString ResolutionSummary =
+			ProxySettings.TextureResolutionMode
+				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
+			? FString::Printf(
+				TEXT("auto %.4f cm/texel, %d-%d atlas"),
+				ProxySettings.TargetWorldTexelSizeCm,
+				ProxySettings.MinimumTextureAtlasResolution,
+				ProxySettings.TextureAtlasResolution)
+			: FString::Printf(
+				TEXT("manual %dx%d atlas"),
+				ProxySettings.TextureAtlasResolution,
+				ProxySettings.TextureAtlasResolution);
 		const FString TextureSummary = FString::Printf(
-			TEXT("on, fixed %dx%d atlas, auto-scaled packed object-space tiles, automatic per-tile edge fill, cluster projection, crack reduction=%s, double-sided bake=%s"),
-			ProxySettings.TextureAtlasResolution,
-			ProxySettings.TextureAtlasResolution,
+			TEXT("on, %s, packed object-space tiles, automatic per-tile edge fill, cluster projection, crack reduction=%s, double-sided bake=%s"),
+			*ResolutionSummary,
 			*KMeansCrackReductionSummary,
 			DoubleSidedBakeSummary);
 

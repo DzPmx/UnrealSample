@@ -11,6 +11,7 @@ public class FoliageBakerCards : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
+				"FoliageBakerCore",
 			}
 		);
 
@@ -18,7 +19,6 @@ public class FoliageBakerCards : ModuleRules
 			new string[]
 			{
 				"Engine",
-				"FoliageBakerCore",
 				"FoliageBakerEditorCommon",
 				"MaterialBaking",
 				"MeshDescription",

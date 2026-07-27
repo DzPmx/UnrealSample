@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerTextureResolution.h"
 
 class UStaticMesh;
 struct FMeshDescription;
@@ -81,6 +82,10 @@ namespace UE::FoliageBaker::PlaneCover
 		double ErrorTolerance = 1.0;
 		EPlaneProxyCrackReductionMode CrackReductionMode = EPlaneProxyCrackReductionMode::Off;
 		double CrackReductionProjectionScale = 1.0;
+		EFoliageBakerTextureResolutionMode TextureResolutionMode =
+			EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
+		double TargetWorldTexelSizeCm = 5.0;
+		int32 MinimumTextureAtlasResolution = 64;
 		int32 TextureAtlasResolution = 4096;
 		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;
 		bool bEmitBackFaceGeometry = false;
@@ -108,6 +113,8 @@ namespace UE::FoliageBaker::PlaneCover
 		int32 AtlasHeight = 0;
 		int32 AtlasTileResolution = 0;
 		int32 AtlasTilePaddingPixels = 0;
+		double MinimumWorldTexelSizeCm = 0.0;
+		double MaximumWorldTexelSizeCm = 0.0;
 		int32 SourceTriangleCount = 0;
 		int32 SourceShadingNormalTriangleCount = 0;
 		double AveragePlaneToShadingNormalDot = 1.0;

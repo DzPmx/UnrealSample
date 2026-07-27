@@ -26,7 +26,11 @@ struct FFoliageBakerCardBakeRequest
 	bool bIncludeReducedTrunk = true;
 	float TrunkTrianglePercentage = 0.5f;
 
-	int32 TextureResolution = 1024;
+	EFoliageBakerTextureResolutionMode TextureResolutionMode =
+		EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
+	double TargetWorldTexelSizeCm = 5.0;
+	int32 MinimumTextureAtlasResolution = 64;
+	int32 TextureResolution = 4096;
 	int32 AlphaCropGuardPixels = 2;
 	bool bPreserveAlphaMaskValues = true;
 	float MipMaskCoverageThreshold = 0.35f;

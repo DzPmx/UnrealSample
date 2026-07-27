@@ -11,6 +11,7 @@ public class FoliageBakerImpostor : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
+				"FoliageBakerCore",
 			}
 		);
 
@@ -18,7 +19,6 @@ public class FoliageBakerImpostor : ModuleRules
 			new string[]
 			{
 				"Engine",
-				"FoliageBakerCore",
 				"FoliageBakerEditorCommon",
 				"MeshDescription",
 				"StaticMeshDescription",

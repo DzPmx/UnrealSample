@@ -34,7 +34,18 @@ namespace
 			break;
 		}
 		Settings.CrackReductionProjectionScale = FMath::Clamp(EditorSettings.KMeansCrackReductionProjectionScale, 0.0, 1.0);
-		Settings.TextureAtlasResolution = FMath::Clamp(EditorSettings.TextureAtlasResolution, 256, 4096);
+		Settings.TextureResolutionMode = EditorSettings.TextureResolutionMode;
+		Settings.TargetWorldTexelSizeCm =
+			FMath::Max(EditorSettings.TargetWorldTexelSizeCm, 0.01);
+		Settings.MinimumTextureAtlasResolution =
+			FMath::Clamp(
+				EditorSettings.MinimumTextureAtlasResolution,
+				UE::FoliageBaker::TextureResolution::MinimumSupportedAtlasResolution,
+				UE::FoliageBaker::TextureResolution::MaximumSupportedAtlasResolution);
+		Settings.TextureAtlasResolution = FMath::Clamp(
+			EditorSettings.TextureAtlasResolution,
+			UE::FoliageBaker::TextureResolution::MinimumSupportedAtlasResolution,
+			UE::FoliageBaker::TextureResolution::MaximumSupportedAtlasResolution);
 		Settings.AtlasVConvention = UE::FoliageBaker::PlaneCover::EAtlasVConvention::GeometryMinVToTextureMinV;
 		switch (EditorSettings.DoubleSidedBakeMode)
 		{
@@ -256,6 +267,22 @@ namespace
 
 	using FAtlasBakeStats = UE::FoliageBaker::ProjectedAtlasBake::FStats;
 
+	UE::FoliageBaker::ProjectedAtlasBake::FPolicy BuildBillboardAtlasPolicy(
+		const FAtlasOutputSelection& OutputSelection)
+	{
+		UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy;
+		Policy.OutputSelection = OutputSelection;
+		Policy.NormalAlphaMode =
+			UE::FoliageBaker::ProjectedAtlasBake::ENormalAlphaMode::SourceDepth;
+		Policy.InvalidMaterialPolicy =
+			UE::FoliageBaker::ProjectedAtlasBake::EInvalidMaterialPolicy::UseDefaultMaterial;
+		Policy.bIncludeCrackReductionForTrunkCards = false;
+		Policy.DiagnosticName = TEXT("BillboardClouds atlas");
+		Policy.MaterialAlphaPolicyDetails =
+			TEXT(" source masked-shader coverage controls one shared per-tile RDG depth competition; the winning fragment supplies BaseColor, object normal, source triangle ID, packed Mix, and shared-range depth; no CPU material-property fallback");
+		return Policy;
+	}
+
 	bool BakeBillboardAtlasGPU(
 		const UStaticMesh& SourceStaticMesh,
 		const FBoxSphereBounds& SourceLODBounds,
@@ -277,16 +304,8 @@ namespace
 			PlaneInfos,
 			ProxyStats,
 			Settings);
-		UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy;
-		Policy.OutputSelection = OutputSelection;
-		Policy.NormalAlphaMode =
-			UE::FoliageBaker::ProjectedAtlasBake::ENormalAlphaMode::SourceDepth;
-		Policy.InvalidMaterialPolicy =
-			UE::FoliageBaker::ProjectedAtlasBake::EInvalidMaterialPolicy::UseDefaultMaterial;
-		Policy.bIncludeCrackReductionForTrunkCards = false;
-		Policy.DiagnosticName = TEXT("BillboardClouds atlas");
-		Policy.MaterialAlphaPolicyDetails =
-			TEXT(" source masked-shader coverage controls one shared per-tile RDG depth competition; the winning fragment supplies BaseColor, object normal, source triangle ID, packed Mix, and shared-range depth; no CPU material-property fallback");
+		const UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy =
+			BuildBillboardAtlasPolicy(OutputSelection);
 
 		UE::FoliageBaker::ProjectedAtlasBake::FResult Result;
 		if (!UE::FoliageBaker::ProjectedAtlasBake::Bake(
@@ -550,6 +569,15 @@ namespace
 		FProxyPlaneCoverBuildData& OutData,
 		FString& OutError)
 	{
+		if (EditorSettings.TextureResolutionMode
+				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
+			&& (!FMath::IsFinite(EditorSettings.TargetWorldTexelSizeCm)
+				|| EditorSettings.TargetWorldTexelSizeCm <= 0.0))
+		{
+			OutError = TEXT("Target World Texel Size must be greater than zero.");
+			return false;
+		}
+
 		if (!FFoliageBakerSourceMeshReader::Read(
 				StaticMesh,
 				EditorSettings.SourceLODIndex,
@@ -659,36 +687,78 @@ namespace
 			FAtlasOutputSelection CropOutputSelection;
 			CropOutputSelection.bBaseColorOpacity = true;
 
-			TArray<FColor> CropAtlasPixels;
-			TArray<FColor> CropNormalPixels;
-			TArray<FColor> CropMixPixels;
-			FAtlasBakeStats CropStats;
-			if (!BakeBillboardAtlasGPU(
-				StaticMesh,
-				CoverData.SourceLODBounds,
-				CoverData.Triangles,
-				MeshData.PlaneInfos,
-				MeshData.Stats,
-				CoverData.Settings,
-				CropOutputSelection,
-				CropAtlasPixels,
-				CropNormalPixels,
-				CropMixPixels,
-				CropStats,
-				OutError))
-			{
-				return false;
-			}
-
 			TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop> TileCrops;
-			AlphaAwareCroppedPlaneCount = UE::FoliageBaker::Atlas::BuildAlphaAwareTileCrops(
-				CropAtlasPixels,
-				CropStats.Width,
-				CropStats.Height,
-				MeshData.PlaneInfos,
-				CoverData.Settings.AlphaAwareTileCropGuardPixels,
-				1,
-				TileCrops);
+			if (CoverData.Settings.TextureResolutionMode
+				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize)
+			{
+				const UE::FoliageBaker::ProjectedAtlasBake::FInputs CropInputs(
+					StaticMesh,
+					CoverData.SourceLODBounds,
+					CoverData.Triangles,
+					MeshData.PlaneInfos,
+					MeshData.Stats,
+					CoverData.Settings);
+				const UE::FoliageBaker::ProjectedAtlasBake::FPolicy CropPolicy =
+					BuildBillboardAtlasPolicy(CropOutputSelection);
+				UE::FoliageBaker::ProjectedAtlasBake::FTargetDensityAlphaCropStats
+					TargetDensityCropStats;
+				if (!UE::FoliageBaker::ProjectedAtlasBake::BuildTargetDensityAlphaAwareTileCrops(
+						CropInputs,
+						CropPolicy,
+						CoverData.Settings.AlphaAwareTileCropGuardPixels,
+						1,
+						TileCrops,
+						TargetDensityCropStats,
+						OutError))
+				{
+					return false;
+				}
+				AlphaAwareCroppedPlaneCount =
+					TargetDensityCropStats.CroppedPlaneCount;
+				if (TargetDensityCropStats.ResolutionLimitedPrepassPlaneCount > 0)
+				{
+					UE_LOG(
+						LogFoliageBakerBillboardClouds,
+						Warning,
+						TEXT("%s target-density alpha crop prepass limited %d plane(s) to %d pixels."),
+						*StaticMesh.GetName(),
+						TargetDensityCropStats.ResolutionLimitedPrepassPlaneCount,
+						UE::FoliageBaker::TextureResolution::
+							MaximumSupportedAtlasResolution);
+				}
+			}
+			else
+			{
+				TArray<FColor> CropAtlasPixels;
+				TArray<FColor> CropNormalPixels;
+				TArray<FColor> CropMixPixels;
+				FAtlasBakeStats CropStats;
+				if (!BakeBillboardAtlasGPU(
+						StaticMesh,
+						CoverData.SourceLODBounds,
+						CoverData.Triangles,
+						MeshData.PlaneInfos,
+						MeshData.Stats,
+						CoverData.Settings,
+						CropOutputSelection,
+						CropAtlasPixels,
+						CropNormalPixels,
+						CropMixPixels,
+						CropStats,
+						OutError))
+				{
+					return false;
+				}
+				AlphaAwareCroppedPlaneCount =
+					UE::FoliageBaker::Atlas::BuildAlphaAwareTileCrops(
+						CropAtlasPixels,
+						CropStats.Width,
+						CropStats.Height,
+						MeshData.PlaneInfos,
+						CoverData.Settings.AlphaAwareTileCropGuardPixels,
+						1,
+						TileCrops);
+			}
 
 			if (AlphaAwareCroppedPlaneCount > 0)
 			{
@@ -922,9 +992,31 @@ namespace
 				!EditorSettings.bBakeMixAtlas,
 				TextureData.AtlasStats.MaterialAverages,
 				MaterialScalarParameterNames);
+		const FString ResolutionDetails =
+			EditorSettings.TextureResolutionMode
+				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
+			? FString::Printf(
+				TEXT("auto world texel size, target=%.4f cm/texel, actual range=%.4f-%.4f cm/texel%s"),
+				EditorSettings.TargetWorldTexelSizeCm,
+				MeshData.Stats.MinimumWorldTexelSizeCm,
+				MeshData.Stats.MaximumWorldTexelSizeCm,
+				MeshData.Stats.MaximumWorldTexelSizeCm
+						> EditorSettings.TargetWorldTexelSizeCm * 1.001
+					? TEXT(", target exceeded by atlas limit or trunk scale")
+					: TEXT(""))
+			: FString::Printf(
+				TEXT("manual atlas resolution, actual range=%.4f-%.4f cm/texel"),
+				MeshData.Stats.MinimumWorldTexelSizeCm,
+				MeshData.Stats.MaximumWorldTexelSizeCm);
+		const TCHAR* AlphaCropDetails = !EditorSettings.bEnableAlphaAwareTileCrop
+			? TEXT("disabled")
+			: EditorSettings.TextureResolutionMode
+					== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
+				? TEXT("target-density per-plane prepass before packing; front/back bounds are conservatively merged when present")
+				: TEXT("packed-atlas prepass before repacking; front/back bounds are conservatively merged when present");
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-aware cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); WPO disabled during material baking\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: ColorOpacity.A and UV2, trunk alpha=0.5 (128), leaf alpha=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); WPO disabled during material baking\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: ColorOpacity.A and UV2, trunk alpha=0.5 (128), leaf alpha=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
@@ -944,6 +1036,8 @@ namespace
 			TextureData.AtlasStats.CrackReductionTriangleReferences,
 			TextureData.AtlasStats.MaskedMaterialBakeReferences,
 			GetTextureShootingMode(),
+			*ResolutionDetails,
+			AlphaCropDetails,
 			*BaseAtlasPath,
 			*NormalAtlasPath,
 			*MixAtlasPath,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerTextureResolution.h"
 #include "UObject/Object.h"
 
 #include "FoliageBakerCardsSettings.generated.h"
@@ -87,16 +88,26 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk", meta = (ClampMin = "0.05", ClampMax = "1.0", UIMin = "0.05", UIMax = "1.0", DisplayName = "Trunk Triangle Percentage", EditCondition = "Mode == EFoliageBakerCardMode::MultiBillboard && bIncludeReducedTrunk", EditConditionHides, ToolTip = "Fraction of non-leaf source triangles retained by the trunk simplifier. 0.5 targets roughly half of the original trunk and branch triangles."))
 	float TrunkTrianglePercentage = 0.5f;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", DisplayName = "Texture Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Maximum atlas resolution used by Single Plane or Double Planes Billboard."))
-	int32 SingleTextureResolution = 1024;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (DisplayName = "Resolution Mode", ToolTip = "Auto chooses the smallest power-of-two atlas that reaches the requested world-space texel size. Manual preserves the configured atlas resolution behavior."))
+	EFoliageBakerTextureResolutionMode TextureResolutionMode =
+		EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", EditCondition = "Mode == EFoliageBakerCardMode::CrossCards", EditConditionHides))
-	int32 CrossTextureResolution = 2048;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "0.01", UIMin = "0.1", UIMax = "10.0", Suffix = "cm/texel", DisplayName = "Target World Texel Size", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Requested source-local centimeters covered by one atlas texel. Smaller values produce higher texture detail and may require a larger atlas."))
+	double TargetWorldTexelSizeCm = 5.0;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", DisplayName = "Texture Resolution", EditCondition = "Mode == EFoliageBakerCardMode::MultiBillboard", EditConditionHides, ToolTip = "Maximum resolution of the atlas containing all local leaf-cluster Billboard tiles."))
-	int32 MultiBillboardTextureResolution = 2048;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Minimum Atlas Resolution", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Smallest power-of-two square packing canvas Auto mode may select before optional outer atlas cropping. Non-power-of-two values are rounded up."))
+	int32 MinimumTextureAtlasResolution = 64;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Per-View Alpha Crop Guard", ToolTip = "Extra pixels retained around the automatically detected visible-alpha bounds. Per-view alpha cropping is always enabled for Billboard, Cross Cards, and MultiBillboard."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Maximum permitted atlas resolution. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
+	int32 SingleTextureResolution = 4096;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", EditCondition = "Mode == EFoliageBakerCardMode::CrossCards", EditConditionHides, ToolTip = "Maximum permitted atlas resolution. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
+	int32 CrossTextureResolution = 4096;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", EditCondition = "Mode == EFoliageBakerCardMode::MultiBillboard", EditConditionHides, ToolTip = "Maximum permitted atlas resolution containing all local leaf-cluster Billboard tiles. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
+	int32 MultiBillboardTextureResolution = 4096;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Alpha Crop Guard", ToolTip = "Extra prepass pixels retained around the detected visible-alpha bounds. Auto measures every plane independently at Target World Texel Size before packing; Manual measures the packed prepass atlas. Front/back and grouped-view bounds are conservatively merged when present. Alpha cropping is always enabled for Billboard, Cross Cards, and MultiBillboard."))
 	int32 AlphaCropGuardPixels = 2;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate semantic mask mips independently inside every Billboard, Cross Cards, or MultiBillboard atlas tile. Alpha remains exactly background 0, trunk 0.5, or leaf 1 instead of being averaged to gray values."))

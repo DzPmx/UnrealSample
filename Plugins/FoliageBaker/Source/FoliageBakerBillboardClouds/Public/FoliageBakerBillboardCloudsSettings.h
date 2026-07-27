@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerTextureResolution.h"
 #include "UObject/Object.h"
 
 #include "FoliageBakerBillboardCloudsSettings.generated.h"
@@ -76,13 +77,23 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (ToolTip = "Material instance or parent material name keywords used to classify ColorOpacity alpha as trunk (0.5). When Trunk Cards is enabled, the same matches are routed into fixed vertical trunk cross-card planes. Empty means every visible pixel is classified as leaf (1)."))
 	TArray<FString> TrunkCardMaterialKeywords = { TEXT("Trunk") };
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", ToolTip = "Generated square atlas resolution. Billboard tile sizes are automatically scaled and packed to maximize use of this texture."))
-	int32 TextureAtlasResolution = 2048;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (DisplayName = "Resolution Mode", ToolTip = "Auto chooses the smallest power-of-two atlas that reaches the requested world-space texel size. Manual preserves the configured atlas resolution behavior."))
+	EFoliageBakerTextureResolutionMode TextureResolutionMode =
+		EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Run a pre-bake alpha pass and crop each billboard tile rectangle to the alpha-painted outer bounds before final packing. This improves per-tile usage by removing transparent outer borders; it does not fill interior alpha holes."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "0.01", UIMin = "0.1", UIMax = "10.0", Suffix = "cm/texel", DisplayName = "Target World Texel Size", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Requested source-local centimeters covered by one atlas texel. Smaller values produce higher texture detail and may require a larger atlas. Trunk Card Atlas Scale intentionally modifies this density for trunk cards."))
+	double TargetWorldTexelSizeCm = 5.0;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Minimum Atlas Resolution", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Smallest power-of-two square atlas Auto mode may select. Non-power-of-two values are rounded up."))
+	int32 MinimumTextureAtlasResolution = 64;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum permitted square atlas resolution. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
+	int32 TextureAtlasResolution = 4096;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (DisplayName = "Enable Alpha Crop", ToolTip = "Crop each billboard tile to its alpha-painted outer bounds before final packing. Auto measures every plane independently at Target World Texel Size; Manual measures the packed prepass atlas. Front/back bounds are conservatively merged when present. This removes transparent outer borders but does not fill interior alpha holes."))
 	bool bEnableAlphaAwareTileCrop = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra source-tile pixels kept around the alpha-painted bounds when alpha-aware tile crop is enabled."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Alpha Crop Guard", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra prepass pixels retained around the detected alpha-painted bounds. Their world-space size follows the active Auto target-density or Manual packed-atlas prepass."))
 	int32 AlphaAwareTileCropGuardPixels = 2;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate semantic mask mips independently inside every BillboardClouds atlas tile. Alpha remains exactly background 0, trunk 0.5, or leaf 1 instead of being averaged to gray values."))

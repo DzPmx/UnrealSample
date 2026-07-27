@@ -85,6 +85,12 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		FStats Stats;
 	};
 
+	struct FOLIAGEBAKERCORE_API FTargetDensityAlphaCropStats
+	{
+		int32 CroppedPlaneCount = 0;
+		int32 ResolutionLimitedPrepassPlaneCount = 0;
+	};
+
 	/**
 	 * Bakes all plane sides through one shared masked-material depth competition.
 	 * Feature modules only select the normal representation and crack policy.
@@ -93,5 +99,20 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		const FInputs& Inputs,
 		const FPolicy& Policy,
 		FResult& OutResult,
+		FString& OutError);
+
+	/**
+	 * Detects alpha bounds one plane at a time at the configured target world
+	 * texel size, independent of whether all target-sized tiles fit one atlas.
+	 * Front and back coverage share the same prepass tile so the crop is
+	 * conservative for both sides.
+	 */
+	FOLIAGEBAKERCORE_API bool BuildTargetDensityAlphaAwareTileCrops(
+		const FInputs& Inputs,
+		const FPolicy& Policy,
+		int32 GuardPixels,
+		uint8 AlphaThreshold,
+		TArray<PlaneCover::FPlaneProxyTileCrop>& OutTileCrops,
+		FTargetDensityAlphaCropStats& OutStats,
 		FString& OutError);
 }

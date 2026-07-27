@@ -160,11 +160,10 @@ namespace
 		return Direction.GetSafeNormal();
 	}
 
-	double ComputeSharedCaptureHalfExtent(
+	double ComputeUnpaddedSharedCaptureHalfExtent(
 		const TArray<FVector>& SourceVertices,
 		const FBoxSphereBounds& SourceBounds,
-		const TArray<FImpostorCaptureView>& Views,
-		const int32 TileResolution)
+		const TArray<FImpostorCaptureView>& Views)
 	{
 		double UnpaddedHalfExtent = 0.0;
 		for (const FVector& Vertex : SourceVertices)
@@ -184,6 +183,14 @@ namespace
 			}
 		}
 
+		return FMath::Max(UnpaddedHalfExtent, UE_DOUBLE_SMALL_NUMBER);
+	}
+
+	double ComputeSharedCaptureHalfExtent(
+		const double UnpaddedHalfExtent,
+		const FBoxSphereBounds& SourceBounds,
+		const int32 TileResolution)
+	{
 		const int32 UsableTileResolution = FMath::Max(
 			TileResolution - ImpostorProjectionGuardPixels * 2,
 			1);
@@ -207,12 +214,6 @@ namespace
 		double& OutSharedCaptureHalfExtent)
 	{
 		const int32 GridSize = FMath::Clamp(Settings.FrameGridSize, 3, 8);
-		const int32 MaxAtlasResolution = FMath::Clamp(Settings.TextureResolution, 256, 4096);
-		const int32 TileResolution = FMath::Max(4, (MaxAtlasResolution / GridSize) & ~3);
-
-		OutStats.TileResolution = TileResolution;
-		OutStats.AtlasWidth = TileResolution * GridSize;
-		OutStats.AtlasHeight = TileResolution * GridSize;
 		OutStats.ViewCount = GridSize * GridSize;
 		OutViews.Reset(OutStats.ViewCount);
 		OutTileInfos.Reset(OutStats.ViewCount);
@@ -233,27 +234,79 @@ namespace
 				const FRotationMatrix CaptureRotation(View.CaptureRayDirection.Rotation());
 				View.AxisU = CaptureRotation.GetScaledAxis(EAxis::Y);
 				View.AxisV = CaptureRotation.GetScaledAxis(EAxis::Z);
-				View.TilePixelMin = FIntPoint(GridX * TileResolution, GridY * TileResolution);
-				View.TileSize = FIntPoint(TileResolution, TileResolution);
-
-				UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& TileInfo = OutTileInfos.AddDefaulted_GetRef();
-				TileInfo.AtlasPixelMin = View.TilePixelMin;
-				TileInfo.AtlasTileSize = View.TileSize;
-				TileInfo.AtlasTileResolution = TileResolution;
 			}
 		}
 
-		OutSharedCaptureHalfExtent = ComputeSharedCaptureHalfExtent(
+		const double UnpaddedHalfExtent = ComputeUnpaddedSharedCaptureHalfExtent(
 			SourceVertices,
 			SourceBounds,
-			OutViews,
-			TileResolution);
+			OutViews);
+		int32 AtlasResolution = FMath::Clamp(
+			Settings.TextureResolution,
+			UE::FoliageBaker::TextureResolution::MinimumSupportedAtlasResolution,
+			UE::FoliageBaker::TextureResolution::MaximumSupportedAtlasResolution);
+		double MatchedTargetTexelSizeCm = 0.0;
+		if (Settings.TextureResolutionMode
+			== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize)
+		{
+			const int32 MaximumAtlasResolution =
+				UE::FoliageBaker::TextureResolution::FloorToSupportedPowerOfTwo(
+					Settings.TextureResolution);
+			const int32 MinimumAtlasResolution =
+				UE::FoliageBaker::TextureResolution::ResolveMinimumAtlasResolution(
+					Settings.MinimumTextureAtlasResolution,
+					MaximumAtlasResolution);
+			const double TargetTexelSizeCm =
+				FMath::Max(Settings.TargetWorldTexelSizeCm, 0.01);
+			AtlasResolution = MaximumAtlasResolution;
+			for (int32 CandidateAtlasResolution = MinimumAtlasResolution;
+				CandidateAtlasResolution <= MaximumAtlasResolution;
+				CandidateAtlasResolution *= 2)
+			{
+				const int32 CandidateTileResolution = FMath::Max(
+					4,
+					(CandidateAtlasResolution / GridSize) & ~3);
+				const double CandidateHalfExtent =
+					ComputeSharedCaptureHalfExtent(
+						UnpaddedHalfExtent,
+						SourceBounds,
+						CandidateTileResolution);
+				const double TargetHalfExtent =
+					0.5 * TargetTexelSizeCm
+					* static_cast<double>(CandidateTileResolution);
+				if (TargetHalfExtent >= CandidateHalfExtent)
+				{
+					AtlasResolution = CandidateAtlasResolution;
+					MatchedTargetTexelSizeCm = TargetTexelSizeCm;
+					break;
+				}
+			}
+		}
+
+		const int32 TileResolution =
+			FMath::Max(4, (AtlasResolution / GridSize) & ~3);
+		OutStats.TileResolution = TileResolution;
+		OutStats.AtlasWidth = TileResolution * GridSize;
+		OutStats.AtlasHeight = TileResolution * GridSize;
+		// A matched Auto tile keeps its requested world scale instead of
+		// tightening smaller assets inside the selected resolution budget.
+		OutSharedCaptureHalfExtent = MatchedTargetTexelSizeCm > 0.0
+			? 0.5 * MatchedTargetTexelSizeCm * static_cast<double>(TileResolution)
+			: ComputeSharedCaptureHalfExtent(
+				UnpaddedHalfExtent,
+				SourceBounds,
+				TileResolution);
 		for (int32 ViewIndex = 0; ViewIndex < OutViews.Num(); ++ViewIndex)
 		{
 			FImpostorCaptureView& View = OutViews[ViewIndex];
+			View.TilePixelMin = FIntPoint(
+				View.GridIndex.X * TileResolution,
+				View.GridIndex.Y * TileResolution);
+			View.TileSize = FIntPoint(TileResolution, TileResolution);
 			View.ProjectionHalfExtentU = OutSharedCaptureHalfExtent;
 			View.ProjectionHalfExtentV = OutSharedCaptureHalfExtent;
-			UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& TileInfo = OutTileInfos[ViewIndex];
+			UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& TileInfo =
+				OutTileInfos.AddDefaulted_GetRef();
 			TileInfo.SourcePlaneIndex = ViewIndex;
 			TileInfo.Normal = View.ViewDirection;
 			TileInfo.Rho = FVector::DotProduct(View.ViewDirection, SourceBounds.Origin);
@@ -265,6 +318,9 @@ namespace
 			TileInfo.MaxU = CenterU + OutSharedCaptureHalfExtent;
 			TileInfo.MinV = CenterV - OutSharedCaptureHalfExtent;
 			TileInfo.MaxV = CenterV + OutSharedCaptureHalfExtent;
+			TileInfo.AtlasPixelMin = View.TilePixelMin;
+			TileInfo.AtlasTileSize = View.TileSize;
+			TileInfo.AtlasTileResolution = TileResolution;
 		}
 	}
 
@@ -1145,6 +1201,16 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		Result.Report = FString::Printf(TEXT("%s\n  failed: no Impostor texture output is enabled."), *SourceStaticMesh.GetName());
 		return Result;
 	}
+	if (Settings.TextureResolutionMode
+			== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
+		&& (!FMath::IsFinite(Settings.TargetWorldTexelSizeCm)
+			|| Settings.TargetWorldTexelSizeCm <= 0.0))
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: Target World Texel Size must be greater than zero."),
+			*SourceStaticMesh.GetName());
+		return Result;
+	}
 	if (!ValidateParameterNames(Settings, Error))
 	{
 		if (Error.IsEmpty())
@@ -1463,6 +1529,22 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		: 0.0;
 	const double TexelAreaDensityGain = FMath::Square(
 		static_cast<double>(BakeData.SourceBounds.SphereRadius) / BakeData.SharedCaptureHalfExtent);
+	const double ActualWorldTexelSizeCm =
+		2.0 * BakeData.SharedCaptureHalfExtent
+		/ static_cast<double>(BakeData.Stats.TileResolution);
+	const FString ResolutionDetails =
+		Settings.TextureResolutionMode
+			== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
+		? FString::Printf(
+			TEXT("auto world texel size, target=%.4f cm/texel, actual=%.4f cm/texel%s"),
+			Settings.TargetWorldTexelSizeCm,
+			ActualWorldTexelSizeCm,
+			ActualWorldTexelSizeCm > Settings.TargetWorldTexelSizeCm * 1.001
+				? TEXT(", maximum atlas reached")
+				: TEXT(""))
+		: FString::Printf(
+			TEXT("manual atlas resolution, actual=%.4f cm/texel"),
+			ActualWorldTexelSizeCm);
 	const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
 		MaterialScalarParameterNames = {
 			Settings.LeafRoughnessParameterName,
@@ -1476,7 +1558,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			BakeData.Stats.MaterialAverages,
 			MaterialScalarParameterNames);
 	Result.Report = FString::Printf(
-		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask octahedral object/local Normal RG + trunk 0.5/leaf 1 Mask B + Depth A (near 1, far 0, empty 0.5)%s\n  material scalar averages: %s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal, material properties and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
+		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  resolution: %s\n  projection: shared tight square with up to %d px guard\n  channels: ColorOpacity RGB + SDF A, NormalMask octahedral object/local Normal RG + trunk 0.5/leaf 1 Mask B + Depth A (near 1, far 0, empty 0.5)%s\n  material scalar averages: %s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal, material properties and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  projected texel area-density gain versus SphereRadius: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  WPO/displacement: disabled by the Core masked material proxy\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
 		*SourceStaticMesh.GetName(),
 		Settings.SourceLODIndex,
 		Settings.Coverage == EFoliageBakerImpostorCoverage::FullSphere ? TEXT("full sphere") : TEXT("upper hemisphere"),
@@ -1486,6 +1568,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		BakeData.Stats.AtlasWidth,
 		BakeData.Stats.AtlasHeight,
 		BakeData.Stats.TileResolution,
+		*ResolutionDetails,
 		ImpostorProjectionGuardPixels,
 		Settings.bBakeMix ? TEXT(", Mix RGBA enabled") : TEXT(""),
 		*MaterialScalarDetails,

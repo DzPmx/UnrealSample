@@ -11,6 +11,7 @@ public class FoliageBakerBillboardClouds : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
+				"FoliageBakerCore",
 			}
 		);
 
@@ -18,7 +19,6 @@ public class FoliageBakerBillboardClouds : ModuleRules
 			new string[]
 			{
 				"Engine",
-				"FoliageBakerCore",
 				"FoliageBakerEditorCommon",
 				"MeshDescription",
 				"StaticMeshDescription",

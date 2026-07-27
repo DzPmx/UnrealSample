@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerTextureResolution.h"
 #include "UObject/Object.h"
 
 #include "FoliageBakerImpostorSettings.generated.h"
@@ -37,8 +38,18 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Classification", meta = (DisplayName = "Trunk Material Keywords", ToolTip = "Material or parent material names containing any keyword are classified as trunk. All other materials are classified as leaf."))
 	TArray<FString> TrunkMaterialKeywords = { TEXT("Trunk") };
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "256", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum dimension of the generated square atlas. Square tiles are arranged in the configured octahedral frame grid."))
-	int32 TextureResolution = 2048;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (DisplayName = "Resolution Mode", ToolTip = "Auto chooses the smallest power-of-two resolution budget that reaches the requested world-space texel size for every view tile. Manual preserves the configured atlas resolution behavior."))
+	EFoliageBakerTextureResolutionMode TextureResolutionMode =
+		EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "0.01", UIMin = "0.1", UIMax = "10.0", Suffix = "cm/texel", DisplayName = "Target World Texel Size", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Requested source-local centimeters covered by one texel inside each Impostor view tile. Smaller values produce higher texture detail and may require a larger atlas. Auto may retain empty per-view margin to keep this world-space scale exact."))
+	double TargetWorldTexelSizeCm = 5.0;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Minimum Atlas Resolution", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Smallest power-of-two resolution budget Auto mode may select. The actual atlas is aligned to the Frame Grid and does not exceed this budget. Non-power-of-two values are rounded up."))
+	int32 MinimumTextureAtlasResolution = 64;
+
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum permitted atlas resolution. Manual mode uses this resolution budget directly; Auto mode stops increasing resolution at this limit. Square tiles are arranged in the configured octahedral frame grid."))
+	int32 TextureResolution = 4096;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Opacity SDF Range", Suffix = "px", ToolTip = "Pixel distance from the 0.5 contour to fully inside or outside in BaseColor Alpha. It does not add padding or change the fixed view grid."))
 	int32 OpacitySdfRangePixels = 16;

@@ -682,4 +682,139 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		}
 		return true;
 	}
+
+	bool BuildTargetDensityAlphaAwareTileCrops(
+		const FInputs& Inputs,
+		const FPolicy& Policy,
+		const int32 GuardPixels,
+		const uint8 AlphaThreshold,
+		TArray<PlaneCover::FPlaneProxyTileCrop>& OutTileCrops,
+		FTargetDensityAlphaCropStats& OutStats,
+		FString& OutError)
+	{
+		OutTileCrops.Reset();
+		OutTileCrops.SetNum(Inputs.PlaneInfos.Num());
+		OutStats = FTargetDensityAlphaCropStats();
+		OutError.Reset();
+
+		if (Inputs.Settings.TextureResolutionMode
+			!= EFoliageBakerTextureResolutionMode::AutoWorldTexelSize)
+		{
+			OutError = TEXT("Target-density alpha crop requires Auto World Texel Size mode.");
+			return false;
+		}
+		if (!FMath::IsFinite(Inputs.Settings.TargetWorldTexelSizeCm)
+			|| Inputs.Settings.TargetWorldTexelSizeCm <= 0.0)
+		{
+			OutError = TEXT("Target-density alpha crop requires a positive world texel size.");
+			return false;
+		}
+
+		FPolicy CropPolicy = Policy;
+		CropPolicy.OutputSelection = MaterialResolver::FMaterialOutputSelection();
+		CropPolicy.OutputSelection.bBaseColorOpacity = true;
+		CropPolicy.OutputSelection.bNormalMask = false;
+		CropPolicy.OutputSelection.bMix = false;
+		CropPolicy.OutputSelection.bMaterialScalarAverages = false;
+		CropPolicy.bCaptureSourceTriangleIdAndDepth = false;
+		CropPolicy.DiagnosticName =
+			GetDiagnosticName(Policy) + TEXT(" target-density alpha crop prepass");
+
+		const double TargetPixelsPerCentimeter =
+			1.0 / Inputs.Settings.TargetWorldTexelSizeCm;
+		const int32 MaximumPrepassDimension =
+			TextureResolution::MaximumSupportedAtlasResolution;
+		for (int32 PlaneIndex = 0;
+			PlaneIndex < Inputs.PlaneInfos.Num();
+			++PlaneIndex)
+		{
+			PlaneCover::FPlaneProxyPlaneInfo PrepassPlane =
+				Inputs.PlaneInfos[PlaneIndex];
+			const double DensityScale = PrepassPlane.bIsTrunkCard
+				? FMath::Clamp(Inputs.Settings.TrunkCardAtlasScale, 0.5, 2.0)
+				: 1.0;
+			const double DesiredWidth =
+				FMath::Max(PrepassPlane.MaxU - PrepassPlane.MinU, 1.0)
+				* DensityScale
+				* TargetPixelsPerCentimeter;
+			const double DesiredHeight =
+				FMath::Max(PrepassPlane.MaxV - PrepassPlane.MinV, 1.0)
+				* DensityScale
+				* TargetPixelsPerCentimeter;
+			const double DesiredMaximumDimension =
+				FMath::Max(DesiredWidth, DesiredHeight);
+			const double PrepassScale = DesiredMaximumDimension
+					> static_cast<double>(MaximumPrepassDimension)
+				? static_cast<double>(MaximumPrepassDimension)
+					/ DesiredMaximumDimension
+				: 1.0;
+			if (PrepassScale < 1.0)
+			{
+				++OutStats.ResolutionLimitedPrepassPlaneCount;
+			}
+
+			const FIntPoint PrepassTileSize(
+				FMath::Clamp(
+					FMath::CeilToInt(DesiredWidth * PrepassScale),
+					1,
+					MaximumPrepassDimension),
+				FMath::Clamp(
+					FMath::CeilToInt(DesiredHeight * PrepassScale),
+					1,
+					MaximumPrepassDimension));
+			PrepassPlane.AtlasPixelMin = FIntPoint::ZeroValue;
+			PrepassPlane.AtlasTileSize = PrepassTileSize;
+			PrepassPlane.BackAtlasPixelMin = FIntPoint::ZeroValue;
+			PrepassPlane.BackAtlasTileSize = PrepassPlane.bHasBackFaceAtlas
+				? PrepassTileSize
+				: FIntPoint::ZeroValue;
+			PrepassPlane.AtlasTileResolution =
+				FMath::Min(PrepassTileSize.X, PrepassTileSize.Y);
+			PrepassPlane.AtlasTilePaddingPixels = 0;
+
+			TArray<PlaneCover::FPlaneProxyPlaneInfo> PrepassPlaneInfos;
+			PrepassPlaneInfos.Add(MoveTemp(PrepassPlane));
+			PlaneCover::FPlaneProxyMeshStats PrepassProxyStats;
+			PrepassProxyStats.AtlasWidth = PrepassTileSize.X;
+			PrepassProxyStats.AtlasHeight = PrepassTileSize.Y;
+			PrepassProxyStats.AtlasTileResolution =
+				FMath::Min(PrepassTileSize.X, PrepassTileSize.Y);
+			const FInputs PrepassInputs(
+				Inputs.SourceStaticMesh,
+				Inputs.SourceLODBounds,
+				Inputs.Triangles,
+				PrepassPlaneInfos,
+				PrepassProxyStats,
+				Inputs.Settings);
+
+			FResult PrepassResult;
+			if (!Bake(PrepassInputs, CropPolicy, PrepassResult, OutError))
+			{
+				OutError = FString::Printf(
+					TEXT("Target-density alpha crop prepass failed for plane %d: %s"),
+					PlaneIndex,
+					*OutError);
+				return false;
+			}
+
+			TArray<PlaneCover::FPlaneProxyTileCrop> PrepassCrops;
+			const int32 PrepassCroppedPlaneCount =
+				Atlas::BuildAlphaAwareTileCrops(
+					PrepassResult.BaseColorOpacityPixels,
+					PrepassResult.Stats.Width,
+					PrepassResult.Stats.Height,
+					PrepassPlaneInfos,
+					GuardPixels,
+					AlphaThreshold,
+					PrepassCrops);
+			if (PrepassCroppedPlaneCount > 0
+				&& PrepassCrops.Num() == 1
+				&& PrepassCrops[0].bEnabled)
+			{
+				OutTileCrops[PlaneIndex] = PrepassCrops[0];
+				++OutStats.CroppedPlaneCount;
+			}
+		}
+		return true;
+	}
 }

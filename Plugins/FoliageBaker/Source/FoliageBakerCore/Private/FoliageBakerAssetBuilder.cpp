@@ -552,6 +552,147 @@ namespace
 		return StaticMaterials.Add(FStaticMaterial(Material, MaterialSlotName, MaterialSlotName));
 	}
 
+	void AddMaterialIndexIfValid(
+		const UStaticMesh& StaticMesh,
+		const int32 MaterialIndex,
+		TSet<int32>& OutMaterialIndices)
+	{
+		if (StaticMesh.GetStaticMaterials().IsValidIndex(MaterialIndex))
+		{
+			OutMaterialIndices.Add(MaterialIndex);
+		}
+	}
+
+	void AddMeshDescriptionMaterialIndices(
+		const UStaticMesh& StaticMesh,
+		const int32 LODIndex,
+		TSet<int32>& OutMaterialIndices)
+	{
+		const FMeshDescription* MeshDescription = StaticMesh.GetMeshDescription(LODIndex);
+		if (!MeshDescription
+			|| !MeshDescription->PolygonGroupAttributes().HasAttribute(
+				MeshAttribute::PolygonGroup::ImportedMaterialSlotName))
+		{
+			return;
+		}
+
+		const TPolygonGroupAttributesConstRef<FName> MaterialSlotNames =
+			FStaticMeshConstAttributes(*MeshDescription).GetPolygonGroupMaterialSlotNames();
+		for (const FPolygonGroupID PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+		{
+			const FName MaterialSlotName = MaterialSlotNames[PolygonGroupID];
+			int32 MaterialIndex = StaticMesh.GetMaterialIndex(MaterialSlotName);
+			if (MaterialIndex == INDEX_NONE)
+			{
+				MaterialIndex = StaticMesh.GetMaterialIndexFromImportedMaterialSlotName(
+					MaterialSlotName);
+			}
+			AddMaterialIndexIfValid(StaticMesh, MaterialIndex, OutMaterialIndices);
+		}
+	}
+
+	void AddLODMaterialIndices(
+		const UStaticMesh& StaticMesh,
+		const int32 LODIndex,
+		TSet<int32>& OutMaterialIndices)
+	{
+		if (const FStaticMeshRenderData* RenderData = StaticMesh.GetRenderData();
+			RenderData && RenderData->LODResources.IsValidIndex(LODIndex))
+		{
+			for (const FStaticMeshSection& Section : RenderData->LODResources[LODIndex].Sections)
+			{
+				AddMaterialIndexIfValid(StaticMesh, Section.MaterialIndex, OutMaterialIndices);
+			}
+		}
+
+		auto AddSectionInfoMapIndices = [&](const FMeshSectionInfoMap& SectionInfoMap)
+		{
+			for (const TPair<uint32, FMeshSectionInfo>& Entry : SectionInfoMap.Map)
+			{
+				if (static_cast<int32>(Entry.Key >> 16) == LODIndex)
+				{
+					AddMaterialIndexIfValid(
+						StaticMesh,
+						Entry.Value.MaterialIndex,
+						OutMaterialIndices);
+				}
+			}
+		};
+		AddSectionInfoMapIndices(StaticMesh.GetSectionInfoMap());
+		AddSectionInfoMapIndices(StaticMesh.GetOriginalSectionInfoMap());
+		AddMeshDescriptionMaterialIndices(StaticMesh, LODIndex, OutMaterialIndices);
+	}
+
+	void AddCurrentMaterialReferences(
+		const UStaticMesh& StaticMesh,
+		TSet<int32>& OutMaterialIndices)
+	{
+		auto AddSectionInfoMapIndices = [&](const FMeshSectionInfoMap& SectionInfoMap)
+		{
+			for (const TPair<uint32, FMeshSectionInfo>& Entry : SectionInfoMap.Map)
+			{
+				AddMaterialIndexIfValid(
+					StaticMesh,
+					Entry.Value.MaterialIndex,
+					OutMaterialIndices);
+			}
+		};
+		AddSectionInfoMapIndices(StaticMesh.GetSectionInfoMap());
+		AddSectionInfoMapIndices(StaticMesh.GetOriginalSectionInfoMap());
+
+		for (int32 LODIndex = 0; LODIndex < StaticMesh.GetNumSourceModels(); ++LODIndex)
+		{
+			AddMeshDescriptionMaterialIndices(
+				StaticMesh,
+				LODIndex,
+				OutMaterialIndices);
+		}
+	}
+
+	void RemapSectionInfoAfterMaterialSlotRemoval(
+		FMeshSectionInfoMap& SectionInfoMap,
+		const int32 RemovedMaterialIndex)
+	{
+		for (TPair<uint32, FMeshSectionInfo>& Entry : SectionInfoMap.Map)
+		{
+			if (Entry.Value.MaterialIndex > RemovedMaterialIndex)
+			{
+				--Entry.Value.MaterialIndex;
+			}
+		}
+	}
+
+	void RemoveReplacedLODExclusiveMaterialSlots(
+		UStaticMesh& StaticMesh,
+		const TSet<int32>& ReplacedLODMaterialIndices,
+		const TSet<int32>& OtherLODMaterialIndices)
+	{
+		TSet<int32> ReferencedMaterialIndices = OtherLODMaterialIndices;
+		AddCurrentMaterialReferences(StaticMesh, ReferencedMaterialIndices);
+
+		TArray<int32> MaterialIndicesToRemove;
+		for (const int32 MaterialIndex : ReplacedLODMaterialIndices)
+		{
+			if (StaticMesh.GetStaticMaterials().IsValidIndex(MaterialIndex)
+				&& !ReferencedMaterialIndices.Contains(MaterialIndex))
+			{
+				MaterialIndicesToRemove.Add(MaterialIndex);
+			}
+		}
+		MaterialIndicesToRemove.Sort(TGreater<int32>());
+
+		for (const int32 MaterialIndex : MaterialIndicesToRemove)
+		{
+			StaticMesh.GetStaticMaterials().RemoveAt(MaterialIndex);
+			RemapSectionInfoAfterMaterialSlotRemoval(
+				StaticMesh.GetSectionInfoMap(),
+				MaterialIndex);
+			RemapSectionInfoAfterMaterialSlotRemoval(
+				StaticMesh.GetOriginalSectionInfoMap(),
+				MaterialIndex);
+		}
+	}
+
 	void ConfigureProxySourceModel(
 		UStaticMesh& StaticMesh,
 		const int32 LODIndex,
@@ -649,19 +790,21 @@ namespace
 		}
 	}
 
+	void RemoveSectionInfoForLOD(FMeshSectionInfoMap& SectionInfoMap, const int32 LODIndex)
+	{
+		for (auto It = SectionInfoMap.Map.CreateIterator(); It; ++It)
+		{
+			if (static_cast<int32>(It.Key() >> 16) == LODIndex)
+			{
+				It.RemoveCurrent();
+			}
+		}
+	}
+
 	void ClearSectionInfoForLOD(UStaticMesh& StaticMesh, const int32 LODIndex)
 	{
-		int32 SectionCount = StaticMesh.GetSectionInfoMap().GetSectionNumber(LODIndex);
-		for (int32 SectionIndex = 0; SectionIndex < SectionCount; ++SectionIndex)
-		{
-			StaticMesh.GetSectionInfoMap().Remove(LODIndex, SectionIndex);
-		}
-
-		SectionCount = StaticMesh.GetOriginalSectionInfoMap().GetSectionNumber(LODIndex);
-		for (int32 SectionIndex = 0; SectionIndex < SectionCount; ++SectionIndex)
-		{
-			StaticMesh.GetOriginalSectionInfoMap().Remove(LODIndex, SectionIndex);
-		}
+		RemoveSectionInfoForLOD(StaticMesh.GetSectionInfoMap(), LODIndex);
+		RemoveSectionInfoForLOD(StaticMesh.GetOriginalSectionInfoMap(), LODIndex);
 	}
 
 	void ConfigureSectionMaterialsFromMeshDescription(
@@ -690,15 +833,6 @@ namespace
 			const int32 SectionIndex = PolygonGroupID.GetValue();
 			StaticMesh.GetSectionInfoMap().Set(LODIndex, SectionIndex, SectionInfo);
 			StaticMesh.GetOriginalSectionInfoMap().Set(LODIndex, SectionIndex, SectionInfo);
-		}
-	}
-
-	void RemoveSectionInfoForLOD(FMeshSectionInfoMap& SectionInfoMap, const int32 LODIndex)
-	{
-		const int32 SectionCount = SectionInfoMap.GetSectionNumber(LODIndex);
-		for (int32 SectionIndex = 0; SectionIndex < SectionCount; ++SectionIndex)
-		{
-			SectionInfoMap.Remove(LODIndex, SectionIndex);
 		}
 	}
 
@@ -2228,6 +2362,22 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::InsertIntoSourceMeshLOD;
 	const bool bReplacingLOD =
 		Params.OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD;
+	TSet<int32> ReplacedLODMaterialIndices;
+	TSet<int32> OtherLODMaterialIndices;
+	if (bReplacingLOD)
+	{
+		for (int32 LODIndex = 0;
+			LODIndex < SourceStaticMesh.GetNumSourceModels();
+			++LODIndex)
+		{
+			AddLODMaterialIndices(
+				SourceStaticMesh,
+				LODIndex,
+				LODIndex == OutLODIndex
+					? ReplacedLODMaterialIndices
+					: OtherLODMaterialIndices);
+		}
+	}
 	const bool bTrackGeneratedLOD =
 		OutLODIndex > 0
 		&& !Params.RebuildLODMetadataKey.IsNone();
@@ -2352,6 +2502,14 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 			OutLODIndex,
 			*InstalledMeshDescription,
 			MaterialIndex);
+	}
+	if (bReplacingLOD)
+	{
+		// Remove only slots owned exclusively by the old target LOD.
+		RemoveReplacedLODExclusiveMaterialSlots(
+			SourceStaticMesh,
+			ReplacedLODMaterialIndices,
+			OtherLODMaterialIndices);
 	}
 	SourceStaticMesh.SetImportVersion(EImportStaticMeshVersion::LastVersion);
 	SourceStaticMesh.PostEditChange();

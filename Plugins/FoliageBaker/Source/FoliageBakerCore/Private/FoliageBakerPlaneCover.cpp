@@ -550,6 +550,135 @@ namespace UE::FoliageBaker::PlaneCover
 			return true;
 		}
 
+		template <typename BuildPackRectsType>
+		bool ResolveAtlasPacking(
+			const FPlaneProxySettings& Settings,
+			const double MaxPlaneDimension,
+			BuildPackRectsType&& BuildPackRects,
+			int32& OutAtlasResolution,
+			TArray<FAtlasPackRect>& OutPackRects,
+			TArray<FIntPoint>& OutInteriorMins)
+		{
+			const bool bUseWorldTexelSize =
+				Settings.TextureResolutionMode
+				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
+			const int32 MaximumAtlasResolution = bUseWorldTexelSize
+				? TextureResolution::FloorToSupportedPowerOfTwo(
+					Settings.TextureAtlasResolution)
+				: FMath::Clamp(
+					Settings.TextureAtlasResolution,
+					TextureResolution::MinimumSupportedAtlasResolution,
+					TextureResolution::MaximumSupportedAtlasResolution);
+
+			TArray<FAtlasPackRect> CandidatePackRects;
+			TArray<FIntPoint> CandidateInteriorMins;
+			if (bUseWorldTexelSize)
+			{
+				const int32 MinimumAtlasResolution =
+					TextureResolution::ResolveMinimumAtlasResolution(
+						Settings.MinimumTextureAtlasResolution,
+						MaximumAtlasResolution);
+				const double TargetPixelsPerCentimeter =
+					1.0 / FMath::Max(Settings.TargetWorldTexelSizeCm, 0.01);
+				// Keep target-sized tiles unchanged and leave unused power-of-two
+				// atlas space empty so different assets retain the same density.
+				if (MaxPlaneDimension * TargetPixelsPerCentimeter
+					<= static_cast<double>(MaximumAtlasResolution))
+				{
+					BuildPackRects(TargetPixelsPerCentimeter, CandidatePackRects);
+					for (int32 AtlasResolution = MinimumAtlasResolution;
+						AtlasResolution <= MaximumAtlasResolution;
+						AtlasResolution *= 2)
+					{
+						if (TryPackAtlasRects(
+							CandidatePackRects,
+							AtlasResolution,
+							CandidateInteriorMins))
+						{
+							OutAtlasResolution = AtlasResolution;
+							OutPackRects = MoveTemp(CandidatePackRects);
+							OutInteriorMins = MoveTemp(CandidateInteriorMins);
+							return true;
+						}
+					}
+				}
+			}
+
+			double LowScale = 0.0;
+			double HighScale =
+				static_cast<double>(MaximumAtlasResolution) / MaxPlaneDimension;
+			bool bFoundPack = false;
+			for (int32 Iteration = 0; Iteration < 28; ++Iteration)
+			{
+				const double MidScale = 0.5 * (LowScale + HighScale);
+				BuildPackRects(MidScale, CandidatePackRects);
+				if (TryPackAtlasRects(
+					CandidatePackRects,
+					MaximumAtlasResolution,
+					CandidateInteriorMins))
+				{
+					LowScale = MidScale;
+					OutPackRects = CandidatePackRects;
+					OutInteriorMins = CandidateInteriorMins;
+					bFoundPack = true;
+				}
+				else
+				{
+					HighScale = MidScale;
+				}
+			}
+
+			if (!bFoundPack)
+			{
+				BuildPackRects(0.0, CandidatePackRects);
+				if (!TryPackAtlasRects(
+					CandidatePackRects,
+					MaximumAtlasResolution,
+					CandidateInteriorMins))
+				{
+					return false;
+				}
+				OutPackRects = MoveTemp(CandidatePackRects);
+				OutInteriorMins = MoveTemp(CandidateInteriorMins);
+			}
+
+			OutAtlasResolution = MaximumAtlasResolution;
+			return true;
+		}
+
+		template <typename PlaneType>
+		void UpdateWorldTexelSizeStats(
+			const TArray<PlaneType>& Planes,
+			FPlaneProxyMeshStats& InOutStats)
+		{
+			double MinimumTexelSize = TNumericLimits<double>::Max();
+			double MaximumTexelSize = 0.0;
+			for (const PlaneType& Plane : Planes)
+			{
+				if (Plane.AtlasTileSize.X <= 0 || Plane.AtlasTileSize.Y <= 0)
+				{
+					continue;
+				}
+
+				const double TexelSizeU =
+					FMath::Max(Plane.MaxU - Plane.MinU, UE_DOUBLE_SMALL_NUMBER)
+					/ static_cast<double>(Plane.AtlasTileSize.X);
+				const double TexelSizeV =
+					FMath::Max(Plane.MaxV - Plane.MinV, UE_DOUBLE_SMALL_NUMBER)
+					/ static_cast<double>(Plane.AtlasTileSize.Y);
+				MinimumTexelSize = FMath::Min(
+					MinimumTexelSize,
+					FMath::Min(TexelSizeU, TexelSizeV));
+				MaximumTexelSize = FMath::Max(
+					MaximumTexelSize,
+					FMath::Max(TexelSizeU, TexelSizeV));
+			}
+
+			InOutStats.MinimumWorldTexelSizeCm =
+				MaximumTexelSize > 0.0 ? MinimumTexelSize : 0.0;
+			InOutStats.MaximumWorldTexelSizeCm = MaximumTexelSize;
+		}
+
 		bool PackPreparedProxyPlanesIntoAtlas(
 			TArray<FPreparedProxyPlane>& PreparedPlanes,
 			const FPlaneProxySettings& Settings,
@@ -565,7 +694,6 @@ namespace UE::FoliageBaker::PlaneCover
 			}
 
 			(void)SourceMaxDimension;
-			const int32 AtlasResolution = FMath::Clamp(Settings.TextureAtlasResolution, 256, 8192);
 
 			double MaxPlaneDimension = 1.0;
 			for (const FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
@@ -607,39 +735,18 @@ namespace UE::FoliageBaker::PlaneCover
 				}
 			};
 
-			TArray<FAtlasPackRect> CandidatePackRects;
 			TArray<FAtlasPackRect> BestPackRects;
-			TArray<FIntPoint> CandidateInteriorMins;
 			TArray<FIntPoint> BestInteriorMins;
-			double LowScale = 0.0;
-			double HighScale = static_cast<double>(AtlasResolution) / MaxPlaneDimension;
-			bool bFoundPack = false;
-			for (int32 Iteration = 0; Iteration < 28; ++Iteration)
+			int32 AtlasResolution = 0;
+			if (!ResolveAtlasPacking(
+				Settings,
+				MaxPlaneDimension,
+				BuildPackRects,
+				AtlasResolution,
+				BestPackRects,
+				BestInteriorMins))
 			{
-				const double MidScale = 0.5 * (LowScale + HighScale);
-				BuildPackRects(MidScale, CandidatePackRects);
-				if (TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
-				{
-					LowScale = MidScale;
-					BestPackRects = CandidatePackRects;
-					BestInteriorMins = CandidateInteriorMins;
-					bFoundPack = true;
-				}
-				else
-				{
-					HighScale = MidScale;
-				}
-			}
-
-			if (!bFoundPack)
-			{
-				BuildPackRects(0.0, CandidatePackRects);
-				if (!TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
-				{
-					return false;
-				}
-				BestPackRects = CandidatePackRects;
-				BestInteriorMins = CandidateInteriorMins;
+				return false;
 			}
 
 			OutAtlasWidth = AtlasResolution;
@@ -723,8 +830,6 @@ namespace UE::FoliageBaker::PlaneCover
 				return false;
 			}
 
-			const int32 AtlasResolution = FMath::Clamp(Settings.TextureAtlasResolution, 256, 8192);
-
 			double MaxPlaneDimension = 1.0;
 			for (const FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
 			{
@@ -765,39 +870,18 @@ namespace UE::FoliageBaker::PlaneCover
 				}
 			};
 
-			TArray<FAtlasPackRect> CandidatePackRects;
 			TArray<FAtlasPackRect> BestPackRects;
-			TArray<FIntPoint> CandidateInteriorMins;
 			TArray<FIntPoint> BestInteriorMins;
-			double LowScale = 0.0;
-			double HighScale = static_cast<double>(AtlasResolution) / MaxPlaneDimension;
-			bool bFoundPack = false;
-			for (int32 Iteration = 0; Iteration < 28; ++Iteration)
+			int32 AtlasResolution = 0;
+			if (!ResolveAtlasPacking(
+				Settings,
+				MaxPlaneDimension,
+				BuildPackRects,
+				AtlasResolution,
+				BestPackRects,
+				BestInteriorMins))
 			{
-				const double MidScale = 0.5 * (LowScale + HighScale);
-				BuildPackRects(MidScale, CandidatePackRects);
-				if (TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
-				{
-					LowScale = MidScale;
-					BestPackRects = CandidatePackRects;
-					BestInteriorMins = CandidateInteriorMins;
-					bFoundPack = true;
-				}
-				else
-				{
-					HighScale = MidScale;
-				}
-			}
-
-			if (!bFoundPack)
-			{
-				BuildPackRects(0.0, CandidatePackRects);
-				if (!TryPackAtlasRects(CandidatePackRects, AtlasResolution, CandidateInteriorMins))
-				{
-					return false;
-				}
-				BestPackRects = CandidatePackRects;
-				BestInteriorMins = CandidateInteriorMins;
+				return false;
 			}
 
 			OutAtlasWidth = AtlasResolution;
@@ -874,25 +958,72 @@ namespace UE::FoliageBaker::PlaneCover
 				return false;
 			}
 
-			const int32 AtlasResolution = FMath::Clamp(Settings.TextureAtlasResolution, 256, 8192);
 			const double PlaneWidth = FMath::Max(PlaneInfos[0].MaxU - PlaneInfos[0].MinU, 1.0);
 			const double PlaneHeight = FMath::Max(PlaneInfos[0].MaxV - PlaneInfos[0].MinV, 1.0);
 			const bool bHorizontalLayout = PlaneHeight > PlaneWidth;
-			const double PixelsPerUnit = bHorizontalLayout
-				? FMath::Min(
-					static_cast<double>(AtlasResolution) / (2.0 * PlaneWidth),
-					static_cast<double>(AtlasResolution) / PlaneHeight)
-				: FMath::Min(
-					static_cast<double>(AtlasResolution) / PlaneWidth,
-					static_cast<double>(AtlasResolution) / (2.0 * PlaneHeight));
-			const int32 TileWidth = FMath::Clamp(
-				FMath::FloorToInt(PlaneWidth * PixelsPerUnit),
-				1,
-				bHorizontalLayout ? AtlasResolution / 2 : AtlasResolution);
-			const int32 TileHeight = FMath::Clamp(
-				FMath::FloorToInt(PlaneHeight * PixelsPerUnit),
-				1,
-				bHorizontalLayout ? AtlasResolution : AtlasResolution / 2);
+			const bool bUseWorldTexelSize =
+				Settings.TextureResolutionMode
+				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
+			const int32 MaximumAtlasResolution = bUseWorldTexelSize
+				? TextureResolution::FloorToSupportedPowerOfTwo(
+					Settings.TextureAtlasResolution)
+				: FMath::Clamp(
+					Settings.TextureAtlasResolution,
+					TextureResolution::MinimumSupportedAtlasResolution,
+					TextureResolution::MaximumSupportedAtlasResolution);
+
+			int32 AtlasResolution = MaximumAtlasResolution;
+			int32 TileWidth = 0;
+			int32 TileHeight = 0;
+			if (bUseWorldTexelSize)
+			{
+				const double TargetPixelsPerCentimeter =
+					1.0 / FMath::Max(Settings.TargetWorldTexelSizeCm, 0.01);
+				const double TargetTileWidth =
+					PlaneWidth * TargetPixelsPerCentimeter;
+				const double TargetTileHeight =
+					PlaneHeight * TargetPixelsPerCentimeter;
+				const bool bTargetFits = bHorizontalLayout
+					? (TargetTileWidth <= MaximumAtlasResolution / 2.0
+						&& TargetTileHeight <= MaximumAtlasResolution)
+					: (TargetTileWidth <= MaximumAtlasResolution
+						&& TargetTileHeight <= MaximumAtlasResolution / 2.0);
+				if (bTargetFits)
+				{
+					TileWidth =
+						FMath::Max(1, FMath::CeilToInt(TargetTileWidth));
+					TileHeight =
+						FMath::Max(1, FMath::CeilToInt(TargetTileHeight));
+					const int32 RequiredAtlasResolution = bHorizontalLayout
+						? FMath::Max(TileWidth * 2, TileHeight)
+						: FMath::Max(TileWidth, TileHeight * 2);
+					AtlasResolution = FMath::Max(
+						TextureResolution::ResolveMinimumAtlasResolution(
+							Settings.MinimumTextureAtlasResolution,
+							MaximumAtlasResolution),
+						TextureResolution::CeilToSupportedPowerOfTwo(
+							RequiredAtlasResolution));
+				}
+			}
+
+			if (TileWidth == 0 || TileHeight == 0)
+			{
+				const double PixelsPerUnit = bHorizontalLayout
+					? FMath::Min(
+						static_cast<double>(AtlasResolution) / (2.0 * PlaneWidth),
+						static_cast<double>(AtlasResolution) / PlaneHeight)
+					: FMath::Min(
+						static_cast<double>(AtlasResolution) / PlaneWidth,
+						static_cast<double>(AtlasResolution) / (2.0 * PlaneHeight));
+				TileWidth = FMath::Clamp(
+					FMath::FloorToInt(PlaneWidth * PixelsPerUnit),
+					1,
+					bHorizontalLayout ? AtlasResolution / 2 : AtlasResolution);
+				TileHeight = FMath::Clamp(
+					FMath::FloorToInt(PlaneHeight * PixelsPerUnit),
+					1,
+					bHorizontalLayout ? AtlasResolution : AtlasResolution / 2);
+			}
 
 			OutAtlasWidth = AtlasResolution;
 			OutAtlasHeight = AtlasResolution;
@@ -1905,6 +2036,8 @@ namespace UE::FoliageBaker::PlaneCover
 			return false;
 		}
 
+		UpdateWorldTexelSizeStats(PreparedPlanes, OutStats);
+
 		double PlaneToShadingNormalDotSum = 0.0;
 		for (const FPreparedProxyPlane& PreparedPlane : PreparedPlanes)
 		{
@@ -2093,6 +2226,7 @@ namespace UE::FoliageBaker::PlaneCover
 			OutError = TEXT("No proxy planes could be reconstructed.");
 			return false;
 		}
+		UpdateWorldTexelSizeStats(PlaneInfos, InOutStats);
 		return true;
 	}
 
