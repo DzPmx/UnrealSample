@@ -1,25 +1,27 @@
 #include "SHThicknessBakeCore.h"
 
 #include "Algo/Sort.h"
+#include "Containers/BitArray.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "DynamicMesh/DynamicMeshAABBTree3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "GlobalShader.h"
 #include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
-#include "Image/ImageBuilder.h"
+#include "HAL/PlatformTime.h"
+#include "Image/BCSplineFilter.h"
+#include "Image/ImageOccupancyMap.h"
+#include "Image/ImageTile.h"
 #include "Misc/App.h"
-#include "Misc/ScopeLock.h"
 #include "Misc/ScopeExit.h"
 #include "RenderGraphBuilder.h"
+#include "RenderGraphResources.h"
 #include "RenderGraphUtils.h"
 #include "RenderingThread.h"
 #include "RHIFeatureLevel.h"
 #include "RHIGlobals.h"
 #include "RHIGPUReadback.h"
-#include "Sampling/MeshBakerCommon.h"
 #include "Sampling/MeshMapBaker.h"
-#include "Sampling/MeshMapEvaluator.h"
 #include "ShaderParameterStruct.h"
 
 #include <cfloat>
@@ -37,10 +39,9 @@ public:
 		SHADER_PARAMETER(uint32, DirectionCount)
 		SHADER_PARAMETER(uint32, DispatchGroupsX)
 		SHADER_PARAMETER(uint32, CoefficientSpace)
-		SHADER_PARAMETER(float, ThicknessScaleCm)
-		SHADER_PARAMETER(float, NormalOffsetCm)
-		SHADER_PARAMETER(float, NearClipCm)
-		SHADER_PARAMETER(float, FarClipCm)
+		SHADER_PARAMETER(float, ThicknessScale)
+		SHADER_PARAMETER(float, NormalOffset)
+		SHADER_PARAMETER(float, NearClip)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, Samples)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(
 			StructuredBuffer<float4>,
@@ -99,31 +100,11 @@ namespace
 
 using namespace UE::Geometry;
 
-constexpr float UnityCameraNormalOffsetCm = 1.1f;
-constexpr float UnityCameraNearClipCm = 1.0f;
-constexpr float UnityCameraFarClipCm = 30000.0f;
-constexpr int32 GPUSampleBatchSize = 4096;
+constexpr double GPUOperationTimeoutSeconds = 60.0;
+constexpr int32 GPUImageTileSize = 32;
+constexpr int32 GPUFilterTilePadding = 2;
+constexpr float GPUBSplineFilterRadius = 0.769f;
 constexpr int32 BVHLeafTriangleCount = 4;
-
-struct FSampleKey
-{
-	int32 TriangleID = INDEX_NONE;
-	FVector3d BaryCoords = FVector3d::Zero();
-
-	bool operator==(const FSampleKey& Other) const
-	{
-		return TriangleID == Other.TriangleID
-			&& BaryCoords == Other.BaryCoords;
-	}
-
-	friend uint32 GetTypeHash(const FSampleKey& Key)
-	{
-		uint32 Hash = GetTypeHash(Key.TriangleID);
-		Hash = HashCombineFast(Hash, GetTypeHash(Key.BaryCoords.X));
-		Hash = HashCombineFast(Hash, GetTypeHash(Key.BaryCoords.Y));
-		return HashCombineFast(Hash, GetTypeHash(Key.BaryCoords.Z));
-	}
-};
 
 struct FGPUBVHNode
 {
@@ -143,19 +124,72 @@ struct FGPUBakeData
 	TArray<FVector4f> Directions;
 };
 
-struct FGPUDispatchContext
+struct FGPUSession
 {
+	TRefCountPtr<FRDGPooledBuffer> TrianglePositions;
+	TRefCountPtr<FRDGPooledBuffer> TriangleTangents;
+	TRefCountPtr<FRDGPooledBuffer> TriangleNormals;
+	TRefCountPtr<FRDGPooledBuffer> BVHNodes;
+	TRefCountPtr<FRDGPooledBuffer> BVHTriangleIndices;
+	TRefCountPtr<FRDGPooledBuffer> Directions;
+	uint32 DirectionCount = 0;
+
+	bool IsValid() const
+	{
+		return TrianglePositions.IsValid()
+			&& TriangleTangents.IsValid()
+			&& TriangleNormals.IsValid()
+			&& BVHNodes.IsValid()
+			&& BVHTriangleIndices.IsValid()
+			&& Directions.IsValid()
+			&& DirectionCount > 0;
+	}
+};
+
+struct FGPUUploadContext
+{
+	~FGPUUploadContext()
+	{
+		if (CompletionEvent != nullptr)
+		{
+			FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		}
+	}
+
 	FEvent* CompletionEvent = nullptr;
 	TSharedPtr<const FGPUBakeData, ESPMode::ThreadSafe> CommonData;
+	TSharedPtr<FGPUSession, ESPMode::ThreadSafe> Session;
+	FString Error;
+};
+
+struct FGPUDispatchContext
+{
+	~FGPUDispatchContext()
+	{
+		if (CompletionEvent != nullptr)
+		{
+			FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		}
+	}
+
+	FEvent* CompletionEvent = nullptr;
+	TSharedPtr<const FGPUSession, ESPMode::ThreadSafe> Session;
 	TArray<FVector4f> Samples;
 	TArray<FVector4f> Output;
 	TUniquePtr<FRHIGPUBufferReadback> Readback;
 	uint32 OutputBytes = 0;
 	ECoefficientSpace CoefficientSpace =
 		ECoefficientSpace::Tangent;
-	float ThicknessScaleCm = 0.0f;
+	float ThicknessScale = 0.0f;
 	bool bReadbackComplete = false;
 	FString Error;
+};
+
+struct FGPUTileSample
+{
+	FVector2d FilterUV = FVector2d::Zero();
+	FVector2i ImageCoords = FVector2i::Zero();
+	int32 UVChart = INDEX_NONE;
 };
 
 TArray<FVector4f> BuildDirectionSet(const int32 DirectionCount)
@@ -190,219 +224,6 @@ TArray<FVector4f> BuildDirectionSet(const int32 DirectionCount)
 	}
 	return Result;
 }
-
-void ConfigureMapBaker(
-	FMeshMapBaker& Baker,
-	FDynamicMesh3& Mesh,
-	FMeshBakerDynamicMeshSampler& DetailSampler,
-	const FBakeSettings& Settings)
-{
-	Baker.SetTargetMesh(&Mesh);
-	Baker.SetTargetMeshUVLayer(Settings.BakeUVChannel);
-	Baker.SetDetailSampler(&DetailSampler);
-	Baker.SetCorrespondenceStrategy(
-		FMeshBaseBaker::ECorrespondenceStrategy::Identity);
-	const int32 TextureResolution =
-		GetTextureResolution(Settings.TextureResolution);
-	Baker.SetDimensions(FImageDimensions(
-		TextureResolution,
-		TextureResolution));
-	Baker.SetSamplesPerPixel(Settings.SamplesPerPixel);
-	Baker.SetFilter(FMeshMapBaker::EBakeFilterType::BSpline);
-	Baker.SetGutterEnabled(Settings.PaddingSize > 0);
-	Baker.SetGutterSize(Settings.PaddingSize);
-}
-
-class FGPUCollectEvaluator final : public FMeshMapEvaluator
-{
-public:
-	FGPUCollectEvaluator(
-		std::atomic<bool>& InCancelRequested,
-		std::atomic<int64>& InProcessedSurfaceSamples)
-		: CancelRequested(InCancelRequested)
-		, ProcessedSurfaceSamples(InProcessedSurfaceSamples)
-	{
-	}
-
-	virtual void Setup(
-		const FMeshBaseBaker& Baker,
-		FEvaluationContext& Context) override
-	{
-		Context.Evaluate = &EvaluateSample;
-		Context.EvaluateDefault = &EvaluateDefault;
-		Context.EvaluateColor = &EvaluateColor;
-		Context.EvalData = this;
-		Context.AccumulateMode = EAccumulateMode::Add;
-		Context.DataLayout = DataLayout();
-	}
-
-	virtual const TArray<EComponents>& DataLayout() const override
-	{
-		static const TArray<EComponents> Layout{ EComponents::Float4 };
-		return Layout;
-	}
-
-	virtual EMeshMapEvaluatorType Type() const override
-	{
-		return EMeshMapEvaluatorType::Property;
-	}
-
-	const TArray<FVector4f>& GetSamples() const
-	{
-		return Samples;
-	}
-
-	const TMap<FSampleKey, int32>& GetSampleLookup() const
-	{
-		return SampleLookup;
-	}
-
-private:
-	FVector4f CollectSample(const FCorrespondenceSample& Sample)
-	{
-		if (CancelRequested.load(std::memory_order_relaxed))
-		{
-			return FVector4f::Zero();
-		}
-
-		ProcessedSurfaceSamples.fetch_add(
-			1,
-			std::memory_order_relaxed);
-		const FSampleKey Key{
-			Sample.BaseSample.TriangleIndex,
-			Sample.BaseSample.BaryCoords
-		};
-
-		FScopeLock Lock(&SamplesCriticalSection);
-		if (!SampleLookup.Contains(Key))
-		{
-			const int32 SampleIndex = Samples.Add(FVector4f(
-				static_cast<float>(Key.BaryCoords.X),
-				static_cast<float>(Key.BaryCoords.Y),
-				static_cast<float>(Key.BaryCoords.Z),
-				FPlatformMath::AsFloat(
-					static_cast<uint32>(Key.TriangleID))));
-			SampleLookup.Add(Key, SampleIndex);
-		}
-		return FVector4f::Zero();
-	}
-
-	static void EvaluateSample(
-		float*& Out,
-		const FCorrespondenceSample& Sample,
-		void* EvalData)
-	{
-		FGPUCollectEvaluator* Evaluator =
-			static_cast<FGPUCollectEvaluator*>(EvalData);
-		WriteToBuffer(Out, Evaluator->CollectSample(Sample));
-	}
-
-	static void EvaluateDefault(float*& Out, void* EvalData)
-	{
-		WriteToBuffer(Out, FVector4f::Zero());
-	}
-
-	static void EvaluateColor(
-		const int DataIndex,
-		float*& In,
-		FVector4f& Out,
-		void* EvalData)
-	{
-		Out = FVector4f(In[0], In[1], In[2], In[3]);
-		In += 4;
-	}
-
-	std::atomic<bool>& CancelRequested;
-	std::atomic<int64>& ProcessedSurfaceSamples;
-	FCriticalSection SamplesCriticalSection;
-	TArray<FVector4f> Samples;
-	TMap<FSampleKey, int32> SampleLookup;
-};
-
-class FGPUResultEvaluator final : public FMeshMapEvaluator
-{
-public:
-	FGPUResultEvaluator(
-		const TMap<FSampleKey, int32>& InSampleLookup,
-		const TArray<FVector4f>& InResults,
-		std::atomic<int64>& InInvalidSampleCount)
-		: SampleLookup(InSampleLookup)
-		, Results(InResults)
-		, InvalidSampleCount(InInvalidSampleCount)
-	{
-	}
-
-	virtual void Setup(
-		const FMeshBaseBaker& Baker,
-		FEvaluationContext& Context) override
-	{
-		Context.Evaluate = &EvaluateSample;
-		Context.EvaluateDefault = &EvaluateDefault;
-		Context.EvaluateColor = &EvaluateColor;
-		Context.EvalData = this;
-		Context.AccumulateMode = EAccumulateMode::Add;
-		Context.DataLayout = DataLayout();
-	}
-
-	virtual const TArray<EComponents>& DataLayout() const override
-	{
-		static const TArray<EComponents> Layout{ EComponents::Float4 };
-		return Layout;
-	}
-
-	virtual EMeshMapEvaluatorType Type() const override
-	{
-		return EMeshMapEvaluatorType::Property;
-	}
-
-private:
-	FVector4f FindResult(const FCorrespondenceSample& Sample) const
-	{
-		const FSampleKey Key{
-			Sample.BaseSample.TriangleIndex,
-			Sample.BaseSample.BaryCoords
-		};
-		const int32* SampleIndex = SampleLookup.Find(Key);
-		if (SampleIndex == nullptr
-			|| !Results.IsValidIndex(*SampleIndex))
-		{
-			InvalidSampleCount.fetch_add(
-				1,
-				std::memory_order_relaxed);
-			return FVector4f::Zero();
-		}
-		return Results[*SampleIndex];
-	}
-
-	static void EvaluateSample(
-		float*& Out,
-		const FCorrespondenceSample& Sample,
-		void* EvalData)
-	{
-		const FGPUResultEvaluator* Evaluator =
-			static_cast<const FGPUResultEvaluator*>(EvalData);
-		WriteToBuffer(Out, Evaluator->FindResult(Sample));
-	}
-
-	static void EvaluateDefault(float*& Out, void* EvalData)
-	{
-		WriteToBuffer(Out, FVector4f::Zero());
-	}
-
-	static void EvaluateColor(
-		const int DataIndex,
-		float*& In,
-		FVector4f& Out,
-		void* EvalData)
-	{
-		Out = FVector4f(In[0], In[1], In[2], In[3]);
-		In += 4;
-	}
-
-	const TMap<FSampleKey, int32>& SampleLookup;
-	const TArray<FVector4f>& Results;
-	std::atomic<int64>& InvalidSampleCount;
-};
 
 bool BuildGPUBakeData(
 	const FDynamicMesh3& Mesh,
@@ -677,15 +498,179 @@ FRDGBufferRef CreateFloat4UploadBuffer(
 		static_cast<uint64>(Data.Num()) * sizeof(FVector4f));
 }
 
-bool DispatchGPUComputeBatch(
+enum class EGPUWaitResult : uint8
+{
+	Completed,
+	Cancelled,
+	TimedOut
+};
+
+EGPUWaitResult WaitForGPUEvent(
+	FEvent& Event,
+	const std::atomic<bool>& CancelRequested,
+	const double DeadlineSeconds)
+{
+	while (!Event.Wait(50))
+	{
+		if (CancelRequested.load(std::memory_order_relaxed))
+		{
+			return EGPUWaitResult::Cancelled;
+		}
+		if (FPlatformTime::Seconds() >= DeadlineSeconds)
+		{
+			return EGPUWaitResult::TimedOut;
+		}
+	}
+	return EGPUWaitResult::Completed;
+}
+
+bool InitializeGPUSession(
 	const TSharedPtr<const FGPUBakeData, ESPMode::ThreadSafe>& CommonData,
+	const std::atomic<bool>& CancelRequested,
+	TSharedPtr<FGPUSession, ESPMode::ThreadSafe>& OutSession,
+	FString& OutError)
+{
+	if (!CommonData.IsValid()
+		|| CommonData->TrianglePositions.IsEmpty()
+		|| CommonData->TriangleTangents.IsEmpty()
+		|| CommonData->TriangleNormals.IsEmpty()
+		|| CommonData->BVHNodes.IsEmpty()
+		|| CommonData->BVHTriangleIndices.IsEmpty()
+		|| CommonData->Directions.IsEmpty())
+	{
+		OutError = TEXT("The GPU bake session data is empty or invalid.");
+		return false;
+	}
+
+	const TSharedRef<FGPUUploadContext, ESPMode::ThreadSafe> Context =
+		MakeShared<FGPUUploadContext, ESPMode::ThreadSafe>();
+	Context->CompletionEvent =
+		FPlatformProcess::GetSynchEventFromPool(false);
+	Context->CommonData = CommonData;
+	Context->Session =
+		MakeShared<FGPUSession, ESPMode::ThreadSafe>();
+	Context->Session->DirectionCount =
+		static_cast<uint32>(CommonData->Directions.Num());
+
+	ENQUEUE_RENDER_COMMAND(TextureBakerUploadSHThicknessGPU)(
+		[Context](FRHICommandListImmediate& RHICmdList)
+		{
+			ON_SCOPE_EXIT
+			{
+				Context->CompletionEvent->Trigger();
+			};
+
+			if (GUsingNullRHI
+				|| GMaxRHIFeatureLevel < ERHIFeatureLevel::SM5)
+			{
+				Context->Error =
+					TEXT("GPU Bake requires an SM5-or-newer rendering RHI.");
+				return;
+			}
+
+			FRDGBuilder GraphBuilder(RHICmdList);
+			const FRDGBufferRef TrianglePositions =
+				CreateFloat4UploadBuffer(
+					GraphBuilder,
+					TEXT("TextureBaker.TrianglePositions"),
+					Context->CommonData->TrianglePositions);
+			const FRDGBufferRef TriangleTangents =
+				CreateFloat4UploadBuffer(
+					GraphBuilder,
+					TEXT("TextureBaker.TriangleTangents"),
+					Context->CommonData->TriangleTangents);
+			const FRDGBufferRef TriangleNormals =
+				CreateFloat4UploadBuffer(
+					GraphBuilder,
+					TEXT("TextureBaker.TriangleNormals"),
+					Context->CommonData->TriangleNormals);
+			const FRDGBufferRef BVHNodes =
+				CreateFloat4UploadBuffer(
+					GraphBuilder,
+					TEXT("TextureBaker.BVHNodes"),
+					Context->CommonData->BVHNodes);
+			const FRDGBufferRef BVHTriangleIndices =
+				CreateStructuredBuffer(
+					GraphBuilder,
+					TEXT("TextureBaker.BVHTriangleIndices"),
+					sizeof(uint32),
+					static_cast<uint32>(
+						Context->CommonData
+							->BVHTriangleIndices.Num()),
+					Context->CommonData
+						->BVHTriangleIndices.GetData(),
+					static_cast<uint64>(
+						Context->CommonData
+							->BVHTriangleIndices.Num())
+						* sizeof(uint32));
+			const FRDGBufferRef Directions =
+				CreateFloat4UploadBuffer(
+					GraphBuilder,
+					TEXT("TextureBaker.Directions"),
+					Context->CommonData->Directions);
+
+			GraphBuilder.QueueBufferExtraction(
+				TrianglePositions,
+				&Context->Session->TrianglePositions);
+			GraphBuilder.QueueBufferExtraction(
+				TriangleTangents,
+				&Context->Session->TriangleTangents);
+			GraphBuilder.QueueBufferExtraction(
+				TriangleNormals,
+				&Context->Session->TriangleNormals);
+			GraphBuilder.QueueBufferExtraction(
+				BVHNodes,
+				&Context->Session->BVHNodes);
+			GraphBuilder.QueueBufferExtraction(
+				BVHTriangleIndices,
+				&Context->Session->BVHTriangleIndices);
+			GraphBuilder.QueueBufferExtraction(
+				Directions,
+				&Context->Session->Directions);
+			GraphBuilder.Execute();
+		});
+
+	const EGPUWaitResult WaitResult = WaitForGPUEvent(
+		*Context->CompletionEvent,
+		CancelRequested,
+		FPlatformTime::Seconds() + GPUOperationTimeoutSeconds);
+	if (WaitResult == EGPUWaitResult::Cancelled)
+	{
+		OutError = TEXT("GPU Bake was cancelled while uploading common data.");
+		return false;
+	}
+	if (WaitResult == EGPUWaitResult::TimedOut)
+	{
+		OutError =
+			TEXT("GPU Bake timed out while uploading common data.");
+		return false;
+	}
+	if (!Context->Error.IsEmpty())
+	{
+		OutError = MoveTemp(Context->Error);
+		return false;
+	}
+	if (!Context->Session->IsValid())
+	{
+		OutError =
+			TEXT("GPU Bake failed to create persistent common buffers.");
+		return false;
+	}
+
+	OutSession = Context->Session;
+	return true;
+}
+
+bool DispatchGPUComputeBatch(
+	const TSharedPtr<const FGPUSession, ESPMode::ThreadSafe>& Session,
 	const TConstArrayView<FVector4f> Samples,
-	const float ThicknessScaleCm,
+	const float ThicknessScale,
 	const ECoefficientSpace CoefficientSpace,
+	const std::atomic<bool>& CancelRequested,
 	TArray<FVector4f>& OutCoefficients,
 	FString& OutError)
 {
-	if (!CommonData.IsValid() || Samples.IsEmpty())
+	if (!Session.IsValid() || !Session->IsValid() || Samples.IsEmpty())
 	{
 		OutError = TEXT("The GPU bake batch is empty or invalid.");
 		return false;
@@ -701,12 +686,12 @@ bool DispatchGPUComputeBatch(
 		MakeShared<FGPUDispatchContext, ESPMode::ThreadSafe>();
 	Context->CompletionEvent =
 		FPlatformProcess::GetSynchEventFromPool(false);
-	Context->CommonData = CommonData;
+	Context->Session = Session;
 	Context->Samples.Append(Samples.GetData(), Samples.Num());
 	Context->OutputBytes =
 		static_cast<uint32>(Samples.Num()) * sizeof(FVector4f);
 	Context->CoefficientSpace = CoefficientSpace;
-	Context->ThicknessScaleCm = ThicknessScaleCm;
+	Context->ThicknessScale = ThicknessScale;
 
 	ENQUEUE_RENDER_COMMAND(TextureBakerSHThicknessGPU)(
 		[Context](FRHICommandListImmediate& RHICmdList)
@@ -750,44 +735,23 @@ bool DispatchGPUComputeBatch(
 					TEXT("TextureBaker.Samples"),
 					Context->Samples);
 			const FRDGBufferRef TrianglePositionsBuffer =
-				CreateFloat4UploadBuffer(
-					GraphBuilder,
-					TEXT("TextureBaker.TrianglePositions"),
-					Context->CommonData->TrianglePositions);
+				GraphBuilder.RegisterExternalBuffer(
+					Context->Session->TrianglePositions);
 			const FRDGBufferRef TriangleTangentsBuffer =
-				CreateFloat4UploadBuffer(
-					GraphBuilder,
-					TEXT("TextureBaker.TriangleTangents"),
-					Context->CommonData->TriangleTangents);
+				GraphBuilder.RegisterExternalBuffer(
+					Context->Session->TriangleTangents);
 			const FRDGBufferRef TriangleNormalsBuffer =
-				CreateFloat4UploadBuffer(
-					GraphBuilder,
-					TEXT("TextureBaker.TriangleNormals"),
-					Context->CommonData->TriangleNormals);
+				GraphBuilder.RegisterExternalBuffer(
+					Context->Session->TriangleNormals);
 			const FRDGBufferRef BVHNodesBuffer =
-				CreateFloat4UploadBuffer(
-					GraphBuilder,
-					TEXT("TextureBaker.BVHNodes"),
-					Context->CommonData->BVHNodes);
+				GraphBuilder.RegisterExternalBuffer(
+					Context->Session->BVHNodes);
 			const FRDGBufferRef BVHTriangleIndicesBuffer =
-				CreateStructuredBuffer(
-					GraphBuilder,
-					TEXT("TextureBaker.BVHTriangleIndices"),
-					sizeof(uint32),
-					static_cast<uint32>(
-						Context->CommonData
-							->BVHTriangleIndices.Num()),
-					Context->CommonData
-						->BVHTriangleIndices.GetData(),
-					static_cast<uint64>(
-						Context->CommonData
-							->BVHTriangleIndices.Num())
-						* sizeof(uint32));
+				GraphBuilder.RegisterExternalBuffer(
+					Context->Session->BVHTriangleIndices);
 			const FRDGBufferRef DirectionsBuffer =
-				CreateFloat4UploadBuffer(
-					GraphBuilder,
-					TEXT("TextureBaker.Directions"),
-					Context->CommonData->Directions);
+				GraphBuilder.RegisterExternalBuffer(
+					Context->Session->Directions);
 			const FRDGBufferRef OutputBuffer =
 				GraphBuilder.CreateBuffer(
 					FRDGBufferDesc::CreateStructuredDesc(
@@ -799,17 +763,17 @@ bool DispatchGPUComputeBatch(
 				GraphBuilder.AllocParameters<
 					FSHThicknessBakeCS::FParameters>();
 			Parameters->SampleCount = SampleCount;
-			Parameters->DirectionCount = static_cast<uint32>(
-				Context->CommonData->Directions.Num());
+			Parameters->DirectionCount =
+				Context->Session->DirectionCount;
 			Parameters->DispatchGroupsX = DispatchGroupsX;
 			Parameters->CoefficientSpace = static_cast<uint32>(
 				Context->CoefficientSpace);
-			Parameters->ThicknessScaleCm =
-				Context->ThicknessScaleCm;
-			Parameters->NormalOffsetCm =
-				UnityCameraNormalOffsetCm;
-			Parameters->NearClipCm = UnityCameraNearClipCm;
-			Parameters->FarClipCm = UnityCameraFarClipCm;
+			Parameters->ThicknessScale =
+				Context->ThicknessScale;
+			Parameters->NormalOffset =
+				static_cast<float>(NormalizedRayNormalOffset);
+			Parameters->NearClip =
+				static_cast<float>(NormalizedRayNearClip);
 			Parameters->Samples =
 				GraphBuilder.CreateSRV(SamplesBuffer);
 			Parameters->TrianglePositions =
@@ -853,8 +817,22 @@ bool DispatchGPUComputeBatch(
 			GraphBuilder.Execute();
 		});
 
-	while (!Context->CompletionEvent->Wait(50))
+	const double DeadlineSeconds =
+		FPlatformTime::Seconds() + GPUOperationTimeoutSeconds;
+	EGPUWaitResult WaitResult = WaitForGPUEvent(
+		*Context->CompletionEvent,
+		CancelRequested,
+		DeadlineSeconds);
+	if (WaitResult == EGPUWaitResult::Cancelled)
 	{
+		OutError = TEXT("GPU Bake was cancelled while dispatching a tile.");
+		return false;
+	}
+	if (WaitResult == EGPUWaitResult::TimedOut)
+	{
+		OutError =
+			TEXT("GPU Bake tile dispatch/readback timed out after 60 seconds.");
+		return false;
 	}
 	while (Context->Error.IsEmpty()
 		&& !Context->bReadbackComplete)
@@ -898,8 +876,21 @@ bool DispatchGPUComputeBatch(
 				Context->bReadbackComplete = true;
 			});
 
-		while (!Context->CompletionEvent->Wait(50))
+		WaitResult = WaitForGPUEvent(
+			*Context->CompletionEvent,
+			CancelRequested,
+			DeadlineSeconds);
+		if (WaitResult == EGPUWaitResult::Cancelled)
 		{
+			OutError =
+				TEXT("GPU Bake was cancelled while reading back a tile.");
+			return false;
+		}
+		if (WaitResult == EGPUWaitResult::TimedOut)
+		{
+			OutError =
+				TEXT("GPU Bake tile dispatch/readback timed out after 60 seconds.");
+			return false;
 		}
 		if (!Context->bReadbackComplete
 			&& Context->Error.IsEmpty())
@@ -907,9 +898,6 @@ bool DispatchGPUComputeBatch(
 			FPlatformProcess::SleepNoStats(0.005f);
 		}
 	}
-	FPlatformProcess::ReturnSynchEventToPool(
-		Context->CompletionEvent);
-	Context->CompletionEvent = nullptr;
 
 	if (!Context->Error.IsEmpty())
 	{
@@ -938,6 +926,522 @@ bool DispatchGPUComputeBatch(
 	return true;
 }
 
+void ComputeGPUTileGutterTexels(
+	FImageOccupancyMap& OccupancyMap,
+	const FImageTile& Tile,
+	const FImageDimensions& Dimensions,
+	const FBSplineFilter& Filter)
+{
+	const int32 SamplesPerTexel = OccupancyMap.PixelSampler.Num();
+	TBitArray<> CoveredTexels(
+		false,
+		static_cast<int32>(Tile.Num()));
+
+	for (int64 PaddedTexelIndex = 0;
+		PaddedTexelIndex < OccupancyMap.Tile.Num();
+		++PaddedTexelIndex)
+	{
+		const FVector2i TexelCoords =
+			OccupancyMap.Tile.GetSourceCoords(PaddedTexelIndex);
+		for (int32 SampleIndex = 0;
+			SampleIndex < SamplesPerTexel;
+			++SampleIndex)
+		{
+			const int64 PaddedSampleIndex =
+				PaddedTexelIndex * SamplesPerTexel + SampleIndex;
+			if (!OccupancyMap.IsInterior(PaddedSampleIndex))
+			{
+				continue;
+			}
+
+			const FVector2i KernelStart(
+				FMath::Clamp(
+					TexelCoords.X - GPUFilterTilePadding,
+					0,
+					Dimensions.GetWidth()),
+				FMath::Clamp(
+					TexelCoords.Y - GPUFilterTilePadding,
+					0,
+					Dimensions.GetHeight()));
+			const FVector2i KernelEnd(
+				FMath::Clamp(
+					TexelCoords.X + GPUFilterTilePadding + 1,
+					0,
+					Dimensions.GetWidth()),
+				FMath::Clamp(
+					TexelCoords.Y + GPUFilterTilePadding + 1,
+					0,
+					Dimensions.GetHeight()));
+			const FImageTile KernelTile(KernelStart, KernelEnd);
+
+			const FVector2d TexelSize = Dimensions.GetTexelSize();
+			const FVector2d TexelCenterUV =
+				Dimensions.GetTexelUV(TexelCoords);
+			const FVector2d SampleUVInTexel =
+				OccupancyMap.PixelSampler.Sample(SampleIndex);
+			const FVector2d SampleUV =
+				TexelCenterUV - 0.5 * TexelSize
+				+ SampleUVInTexel * TexelSize;
+			const int32 SampleUVChart =
+				OccupancyMap.TexelQueryUVChart[PaddedTexelIndex];
+
+			for (int64 KernelIndex = 0;
+				KernelIndex < KernelTile.Num();
+				++KernelIndex)
+			{
+				const FVector2i NeighborCoords =
+					KernelTile.GetSourceCoords(KernelIndex);
+				if (!Tile.Contains(
+					NeighborCoords.X,
+					NeighborCoords.Y))
+				{
+					continue;
+				}
+
+				const int64 NeighborPaddedIndex =
+					OccupancyMap.Tile.GetIndexFromSourceCoords(
+						NeighborCoords);
+				if (SampleUVChart
+					!= OccupancyMap.TexelQueryUVChart[
+						NeighborPaddedIndex])
+				{
+					continue;
+				}
+
+				const FVector2d NeighborCenterUV =
+					Dimensions.GetTexelUV(NeighborCoords);
+				const FVector2d TexelDistance =
+					Dimensions.GetTexelDistance(
+						NeighborCenterUV,
+						SampleUV);
+				if (Filter.IsInFilterRegion(TexelDistance))
+				{
+					CoveredTexels[
+						static_cast<int32>(
+							Tile.GetIndexFromSourceCoords(
+								NeighborCoords))] = true;
+				}
+			}
+		}
+	}
+
+	for (int64 TileTexelIndex = 0;
+		TileTexelIndex < Tile.Num();
+		++TileTexelIndex)
+	{
+		if (CoveredTexels[static_cast<int32>(TileTexelIndex)])
+		{
+			continue;
+		}
+
+		const FVector2i GutterCoords =
+			Tile.GetSourceCoords(TileTexelIndex);
+		const int64 PaddedTexelIndex =
+			OccupancyMap.Tile.GetIndexFromSourceCoords(GutterCoords);
+		for (int32 SampleIndex = 0;
+			SampleIndex < SamplesPerTexel;
+			++SampleIndex)
+		{
+			const int64 PaddedSampleIndex =
+				PaddedTexelIndex * SamplesPerTexel + SampleIndex;
+			if (OccupancyMap.TexelType[PaddedSampleIndex]
+				!= FImageOccupancyMap::GutterTexel)
+			{
+				continue;
+			}
+
+			const FVector2d NearestUV =
+				static_cast<FVector2d>(
+					OccupancyMap.TexelQueryUV[PaddedSampleIndex]);
+			const FVector2i SourceCoords =
+				Dimensions.UVToCoords(NearestUV);
+			OccupancyMap.GutterTexels.Emplace(
+				Dimensions.GetIndex(GutterCoords),
+				Dimensions.GetIndex(SourceCoords));
+			break;
+		}
+	}
+}
+
+bool BakeGPUTarget(
+	FBakeJob& Job,
+	const FBakeTargetPreparation& Target,
+	const TSharedPtr<const FGPUSession, ESPMode::ThreadSafe>& Session,
+	TArray64<FVector4f>& OutCoefficientImage)
+{
+	if (!Target.DynamicMesh
+		|| !Target.DynamicMesh->HasAttributes())
+	{
+		Job.Error = FString::Printf(
+			TEXT("GPU target mesh data is invalid for %s."),
+			*GetNameSafe(Target.SourceMesh.Get()));
+		return false;
+	}
+
+	FDynamicMesh3& SurfaceMesh = *Target.DynamicMesh;
+	const FDynamicMeshUVOverlay* UVOverlay =
+		SurfaceMesh.Attributes()->GetUVLayer(
+			Job.Preparation.Settings.BakeUVChannel);
+	if (UVOverlay == nullptr)
+	{
+		Job.Error = FString::Printf(
+			TEXT("GPU target mesh has no UV%d for %s."),
+			Job.Preparation.Settings.BakeUVChannel,
+			*GetNameSafe(Target.SourceMesh.Get()));
+		return false;
+	}
+
+	FDynamicMesh3 FlatMesh(EMeshComponents::FaceGroups);
+	for (const int32 TriangleID : SurfaceMesh.TriangleIndicesItr())
+	{
+		if (!UVOverlay->IsSetTriangle(TriangleID))
+		{
+			continue;
+		}
+
+		FVector2f A;
+		FVector2f B;
+		FVector2f C;
+		UVOverlay->GetTriElements(TriangleID, A, B, C);
+		const int32 VertexA =
+			FlatMesh.AppendVertex(FVector3d(A.X, A.Y, 0.0));
+		const int32 VertexB =
+			FlatMesh.AppendVertex(FVector3d(B.X, B.Y, 0.0));
+		const int32 VertexC =
+			FlatMesh.AppendVertex(FVector3d(C.X, C.Y, 0.0));
+		FlatMesh.AppendTriangle(
+			VertexA,
+			VertexB,
+			VertexC,
+			TriangleID);
+	}
+	if (FlatMesh.TriangleCount() == 0)
+	{
+		Job.Error = FString::Printf(
+			TEXT("GPU target mesh has no UV triangles for %s."),
+			*GetNameSafe(Target.SourceMesh.Get()));
+		return false;
+	}
+
+	FDynamicMeshAABBTree3 FlatSpatial(&FlatMesh, true);
+	TArray<int32> UVCharts;
+	FMeshMapBaker::ComputeUVCharts(SurfaceMesh, UVCharts);
+	FMeshSurfaceUVSampler UVSampler;
+	UVSampler.Initialize(
+		&SurfaceMesh,
+		UVOverlay,
+		EMeshSurfaceSamplerQueryType::TriangleAndUV);
+
+	const int32 Resolution = GetTextureResolution(
+		Job.Preparation.Settings.TextureResolution);
+	const FImageDimensions Dimensions(Resolution, Resolution);
+	const int64 PixelCount =
+		static_cast<int64>(Resolution) * Resolution;
+	TArray64<FVector4f> AccumulatedCoefficients;
+	AccumulatedCoefficients.SetNumZeroed(PixelCount);
+	TArray64<float> AccumulatedWeights;
+	AccumulatedWeights.SetNumZeroed(PixelCount);
+	const FBSplineFilter Filter(GPUBSplineFilterRadius);
+	const FImageTiling Tiles(
+		Dimensions,
+		GPUImageTileSize,
+		GPUImageTileSize);
+
+	for (int32 TileIndex = 0;
+		TileIndex < Tiles.Num();
+		++TileIndex)
+	{
+		if (Job.bCancelRequested.load(std::memory_order_relaxed))
+		{
+			return false;
+		}
+
+		const FImageTile Tile = Tiles.GetTile(TileIndex);
+		const FImageTile PaddedTile =
+			Tiles.GetTile(TileIndex, GPUFilterTilePadding);
+		FImageOccupancyMap OccupancyMap;
+		OccupancyMap.GutterSize =
+			FMath::Max(1, Job.Preparation.Settings.PaddingSize);
+		OccupancyMap.Initialize(
+			Dimensions,
+			PaddedTile,
+			Job.Preparation.Settings.SamplesPerPixel);
+		const auto GetTriangleID =
+			[&FlatMesh](const int32 TriangleID)
+			{
+				return FlatMesh.GetTriangleGroup(TriangleID);
+			};
+		OccupancyMap.ClassifySamplesFromUVSpaceMesh(
+			FlatMesh,
+			FlatSpatial,
+			GetTriangleID,
+			&UVCharts);
+
+		TArray<FVector4f> TileGPUInputs;
+		TArray<FGPUTileSample> TileSamples;
+		const int32 MaximumTileSamples =
+			static_cast<int32>(Tile.Num())
+			* Job.Preparation.Settings.SamplesPerPixel;
+		TileGPUInputs.Reserve(MaximumTileSamples);
+		TileSamples.Reserve(MaximumTileSamples);
+
+		const int32 SamplesPerTexel =
+			OccupancyMap.PixelSampler.Num();
+		for (int64 TileTexelIndex = 0;
+			TileTexelIndex < Tile.Num();
+			++TileTexelIndex)
+		{
+			const FVector2i ImageCoords =
+				Tile.GetSourceCoords(TileTexelIndex);
+			const int64 PaddedTexelIndex =
+				OccupancyMap.Tile.GetIndexFromSourceCoords(
+					ImageCoords);
+			if (OccupancyMap.TexelNumSamples(PaddedTexelIndex) == 0)
+			{
+				continue;
+			}
+
+			for (int32 SampleIndex = 0;
+				SampleIndex < SamplesPerTexel;
+				++SampleIndex)
+			{
+				const int64 PaddedSampleIndex =
+					PaddedTexelIndex * SamplesPerTexel + SampleIndex;
+				if (!OccupancyMap.IsInterior(PaddedSampleIndex))
+				{
+					continue;
+				}
+
+				const FVector2d QueryUV =
+					static_cast<FVector2d>(
+						OccupancyMap.TexelQueryUV[
+							PaddedSampleIndex]);
+				const int32 UVTriangleID =
+					OccupancyMap.TexelQueryTriangle[
+						PaddedSampleIndex];
+				FMeshUVSampleInfo SampleInfo;
+				if (!UVSampler.QuerySampleInfo(
+					UVTriangleID,
+					QueryUV,
+					SampleInfo))
+				{
+					Job.Error = FString::Printf(
+						TEXT("GPU UV sample lookup failed for %s."),
+						*GetNameSafe(Target.SourceMesh.Get()));
+					return false;
+				}
+
+				const int32 SurfaceTriangleID =
+					SampleInfo.TriangleIndex;
+				if (!Target.CombinedTriangleIDs.IsValidIndex(
+						SurfaceTriangleID)
+					|| Target.CombinedTriangleIDs[
+						SurfaceTriangleID] == INDEX_NONE)
+				{
+					Job.Error = FString::Printf(
+						TEXT("GPU triangle mapping is invalid for %s."),
+						*GetNameSafe(Target.SourceMesh.Get()));
+					return false;
+				}
+
+				TileGPUInputs.Emplace(
+					static_cast<float>(
+						SampleInfo.BaryCoords.X),
+					static_cast<float>(
+						SampleInfo.BaryCoords.Y),
+					static_cast<float>(
+						SampleInfo.BaryCoords.Z),
+					FPlatformMath::AsFloat(
+						static_cast<uint32>(
+							Target.CombinedTriangleIDs[
+								SurfaceTriangleID])));
+
+				FGPUTileSample& TileSample =
+					TileSamples.AddDefaulted_GetRef();
+				const FVector2d TexelSize =
+					Dimensions.GetTexelSize();
+				const FVector2d TexelCenterUV =
+					Dimensions.GetTexelUV(ImageCoords);
+				TileSample.FilterUV =
+					TexelCenterUV - 0.5 * TexelSize
+					+ OccupancyMap.PixelSampler.Sample(SampleIndex)
+						* TexelSize;
+				TileSample.ImageCoords = ImageCoords;
+				TileSample.UVChart =
+					OccupancyMap.TexelQueryUVChart[
+						PaddedTexelIndex];
+			}
+		}
+
+		if (!TileGPUInputs.IsEmpty())
+		{
+			TArray<FVector4f> TileResults;
+			if (!DispatchGPUComputeBatch(
+				Session,
+				TileGPUInputs,
+				static_cast<float>(
+					Job.Preparation.ThicknessScale),
+				Job.Preparation.Settings.CoefficientSpace,
+				Job.bCancelRequested,
+				TileResults,
+				Job.Error))
+			{
+				return false;
+			}
+			if (TileResults.Num() != TileSamples.Num())
+			{
+				Job.Error =
+					TEXT("GPU tile returned an unexpected sample count.");
+				return false;
+			}
+
+			for (int32 SampleIndex = 0;
+				SampleIndex < TileSamples.Num();
+				++SampleIndex)
+			{
+				const FGPUTileSample& Sample =
+					TileSamples[SampleIndex];
+				const FVector2i KernelStart(
+					FMath::Clamp(
+						Sample.ImageCoords.X
+							- GPUFilterTilePadding,
+						0,
+						Dimensions.GetWidth()),
+					FMath::Clamp(
+						Sample.ImageCoords.Y
+							- GPUFilterTilePadding,
+						0,
+						Dimensions.GetHeight()));
+				const FVector2i KernelEnd(
+					FMath::Clamp(
+						Sample.ImageCoords.X
+							+ GPUFilterTilePadding + 1,
+						0,
+						Dimensions.GetWidth()),
+					FMath::Clamp(
+						Sample.ImageCoords.Y
+							+ GPUFilterTilePadding + 1,
+						0,
+						Dimensions.GetHeight()));
+				const FImageTile KernelTile(KernelStart, KernelEnd);
+
+				for (int64 KernelIndex = 0;
+					KernelIndex < KernelTile.Num();
+					++KernelIndex)
+				{
+					const FVector2i NeighborCoords =
+						KernelTile.GetSourceCoords(KernelIndex);
+					const int64 NeighborPaddedIndex =
+						OccupancyMap.Tile
+							.GetIndexFromSourceCoords(
+								NeighborCoords);
+					if (Sample.UVChart
+						!= OccupancyMap.TexelQueryUVChart[
+							NeighborPaddedIndex])
+					{
+						continue;
+					}
+
+					const FVector2d NeighborCenterUV =
+						Dimensions.GetTexelUV(NeighborCoords);
+					const float Weight = Filter.GetWeight(
+						Dimensions.GetTexelDistance(
+							NeighborCenterUV,
+							Sample.FilterUV));
+					if (Weight == 0.0f)
+					{
+						continue;
+					}
+
+					const int64 PixelIndex =
+						Dimensions.GetIndex(NeighborCoords);
+					AccumulatedCoefficients[PixelIndex] +=
+						TileResults[SampleIndex] * Weight;
+					AccumulatedWeights[PixelIndex] += Weight;
+				}
+			}
+		}
+
+		Job.ProcessedSurfaceSamples.fetch_add(
+			1,
+			std::memory_order_relaxed);
+	}
+
+	Job.Stage.store(EJobStage::Filtering);
+	for (int64 PixelIndex = 0;
+		PixelIndex < PixelCount;
+		++PixelIndex)
+	{
+		if (AccumulatedWeights[PixelIndex] > 0.0f)
+		{
+			AccumulatedCoefficients[PixelIndex] /=
+				AccumulatedWeights[PixelIndex];
+		}
+	}
+	OutCoefficientImage = MoveTemp(AccumulatedCoefficients);
+	AccumulatedWeights.Reset();
+
+	if (Job.Preparation.Settings.PaddingSize > 0)
+	{
+		for (int32 TileIndex = 0;
+			TileIndex < Tiles.Num();
+			++TileIndex)
+		{
+			if (Job.bCancelRequested.load(
+				std::memory_order_relaxed))
+			{
+				return false;
+			}
+
+			const FImageTile Tile = Tiles.GetTile(TileIndex);
+			const FImageTile PaddedTile =
+				Tiles.GetTile(
+					TileIndex,
+					GPUFilterTilePadding);
+			FImageOccupancyMap OccupancyMap;
+			OccupancyMap.GutterSize =
+				Job.Preparation.Settings.PaddingSize;
+			OccupancyMap.Initialize(
+				Dimensions,
+				PaddedTile,
+				Job.Preparation.Settings.SamplesPerPixel);
+			const auto GetTriangleID =
+				[&FlatMesh](const int32 TriangleID)
+				{
+					return FlatMesh.GetTriangleGroup(TriangleID);
+				};
+			OccupancyMap.ClassifySamplesFromUVSpaceMesh(
+				FlatMesh,
+				FlatSpatial,
+				GetTriangleID,
+				&UVCharts);
+			ComputeGPUTileGutterTexels(
+				OccupancyMap,
+				Tile,
+				Dimensions,
+				Filter);
+
+			for (const TTuple<int64, int64>& Gutter :
+				OccupancyMap.GutterTexels)
+			{
+				int64 DestinationPixel;
+				int64 SourcePixel;
+				Tie(DestinationPixel, SourcePixel) = Gutter;
+				if (OutCoefficientImage.IsValidIndex(
+						DestinationPixel)
+					&& OutCoefficientImage.IsValidIndex(
+						SourcePixel))
+				{
+					OutCoefficientImage[DestinationPixel] =
+						OutCoefficientImage[SourcePixel];
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
 void RunGPUBake(FBakeJob& Job)
 {
 	if (Job.bCancelRequested.load(std::memory_order_relaxed))
@@ -957,7 +1461,7 @@ void RunGPUBake(FBakeJob& Job)
 	check(!Job.Preparation.Targets.IsEmpty());
 	FDynamicMesh3& RayMesh =
 		*Job.Preparation.CombinedDynamicMesh;
-	const TSharedRef<FGPUBakeData, ESPMode::ThreadSafe> GPUData =
+	TSharedPtr<FGPUBakeData, ESPMode::ThreadSafe> GPUData =
 		MakeShared<FGPUBakeData, ESPMode::ThreadSafe>();
 	if (!BuildGPUBakeData(
 			RayMesh,
@@ -970,176 +1474,54 @@ void RunGPUBake(FBakeJob& Job)
 		return;
 	}
 
+	TSharedPtr<FGPUSession, ESPMode::ThreadSafe> GPUSession;
+	if (!InitializeGPUSession(
+		GPUData,
+		Job.bCancelRequested,
+		GPUSession,
+		Job.Error))
+	{
+		Job.Stage.store(
+			Job.bCancelRequested.load(std::memory_order_relaxed)
+				? EJobStage::Cancelled
+				: EJobStage::Failed);
+		return;
+	}
+	GPUData.Reset();
+
 	TArray<TArray64<FVector4f>> CoefficientImages;
 	CoefficientImages.Reserve(Job.Preparation.Targets.Num());
+	const int32 Resolution = GetTextureResolution(
+		Job.Preparation.Settings.TextureResolution);
+	const FImageTiling Tiles(
+		FImageDimensions(Resolution, Resolution),
+		GPUImageTileSize,
+		GPUImageTileSize);
+	Job.TotalSurfaceSamples.store(
+		static_cast<int64>(Tiles.Num())
+			* Job.Preparation.Targets.Num());
+	Job.ProcessedSurfaceSamples.store(0);
+	Job.Stage.store(EJobStage::GPUComputing);
 
 	for (const FBakeTargetPreparation& Target :
 		Job.Preparation.Targets)
 	{
-		check(Target.DynamicMesh);
-		FDynamicMesh3& SurfaceMesh = *Target.DynamicMesh;
-		const FDynamicMeshAABBTree3 SurfaceSpatial(
-			&SurfaceMesh,
-			true);
-		FMeshBakerDynamicMeshSampler DetailSampler(
-			&SurfaceMesh,
-			&SurfaceSpatial);
-
-		Job.ProcessedSurfaceSamples.store(0);
-		Job.Stage.store(EJobStage::CollectingSamples);
-		FMeshMapBaker CollectBaker;
-		ConfigureMapBaker(
-			CollectBaker,
-			SurfaceMesh,
-			DetailSampler,
-			Job.Preparation.Settings);
-		CollectBaker.CancelF = [&Job]()
-		{
-			return Job.bCancelRequested.load(
-				std::memory_order_relaxed);
-		};
-		const TSharedPtr<FGPUCollectEvaluator, ESPMode::ThreadSafe>
-			Collector =
-				MakeShared<FGPUCollectEvaluator, ESPMode::ThreadSafe>(
-					Job.bCancelRequested,
-					Job.ProcessedSurfaceSamples);
-		CollectBaker.AddEvaluator(Collector);
-		CollectBaker.Bake();
-
-		if (Job.bCancelRequested.load(std::memory_order_relaxed))
-		{
-			Job.Stage.store(EJobStage::Cancelled);
-			return;
-		}
-
-		const TArray<FVector4f>& SurfaceSamples =
-			Collector->GetSamples();
-		TArray<FVector4f> GPUSamples = SurfaceSamples;
-		for (FVector4f& Sample : GPUSamples)
-		{
-			const int32 SurfaceTriangleID =
-				static_cast<int32>(FPlatformMath::AsUInt(Sample.W));
-			if (!Target.CombinedTriangleIDs.IsValidIndex(
-					SurfaceTriangleID)
-				|| Target.CombinedTriangleIDs[SurfaceTriangleID]
-					== INDEX_NONE)
-			{
-				Job.Error = FString::Printf(
-					TEXT("GPU triangle mapping is invalid for %s."),
-					*GetNameSafe(Target.SourceMesh.Get()));
-				Job.Stage.store(EJobStage::Failed);
-				return;
-			}
-			Sample.W = FPlatformMath::AsFloat(
-				static_cast<uint32>(
-					Target.CombinedTriangleIDs[
-						SurfaceTriangleID]));
-		}
-
-		TArray<FVector4f> GPUResults;
-		GPUResults.SetNumUninitialized(GPUSamples.Num());
-		Job.TotalSurfaceSamples.store(GPUSamples.Num());
-		Job.ProcessedSurfaceSamples.store(0);
-
-		Job.Stage.store(EJobStage::GPUComputing);
-		for (int32 FirstSample = 0;
-			FirstSample < GPUSamples.Num();
-			FirstSample += GPUSampleBatchSize)
-		{
-			if (Job.bCancelRequested.load(
-				std::memory_order_relaxed))
-			{
-				Job.Stage.store(EJobStage::Cancelled);
-				return;
-			}
-
-			const int32 BatchCount = FMath::Min(
-				GPUSampleBatchSize,
-				GPUSamples.Num() - FirstSample);
-			TArray<FVector4f> BatchResults;
-			if (!DispatchGPUComputeBatch(
-				GPUData,
-				MakeArrayView(
-					GPUSamples.GetData() + FirstSample,
-					BatchCount),
-				static_cast<float>(
-					Job.Preparation.ThicknessScaleCm),
-				Job.Preparation.Settings.CoefficientSpace,
-				BatchResults,
-				Job.Error))
-			{
-				Job.Stage.store(EJobStage::Failed);
-				return;
-			}
-			check(BatchResults.Num() == BatchCount);
-			FMemory::Memcpy(
-				GPUResults.GetData() + FirstSample,
-				BatchResults.GetData(),
-				static_cast<SIZE_T>(BatchCount)
-					* sizeof(FVector4f));
-			Job.ProcessedSurfaceSamples.fetch_add(
-				BatchCount,
-				std::memory_order_relaxed);
-		}
-
-		Job.Stage.store(EJobStage::Filtering);
-		std::atomic<int64> InvalidSampleCount{ 0 };
-		FMeshMapBaker ResultBaker;
-		ConfigureMapBaker(
-			ResultBaker,
-			SurfaceMesh,
-			DetailSampler,
-			Job.Preparation.Settings);
-		ResultBaker.CancelF = [&Job, &InvalidSampleCount]()
-		{
-			return Job.bCancelRequested.load(
-					std::memory_order_relaxed)
-				|| InvalidSampleCount.load(
-					std::memory_order_relaxed) > 0;
-		};
-		const TSharedPtr<FGPUResultEvaluator, ESPMode::ThreadSafe>
-			ResultEvaluator =
-				MakeShared<FGPUResultEvaluator, ESPMode::ThreadSafe>(
-					Collector->GetSampleLookup(),
-					GPUResults,
-					InvalidSampleCount);
-		const int32 EvaluatorIndex =
-			ResultBaker.AddEvaluator(ResultEvaluator);
-		ResultBaker.Bake();
-
-		if (Job.bCancelRequested.load(std::memory_order_relaxed))
-		{
-			Job.Stage.store(EJobStage::Cancelled);
-			return;
-		}
-		if (InvalidSampleCount.load(std::memory_order_relaxed) > 0)
-		{
-			Job.Error = FString::Printf(
-				TEXT("GPU sample lookup changed between collection and filtering for %s."),
-				*GetNameSafe(Target.SourceMesh.Get()));
-			Job.Stage.store(EJobStage::Failed);
-			return;
-		}
-
-		const TArrayView<TUniquePtr<TImageBuilder<FVector4f>>>
-			Results =
-				ResultBaker.GetBakeResults(EvaluatorIndex);
-		if (Results.Num() != 1 || !Results[0])
-		{
-			Job.Error = FString::Printf(
-				TEXT("FMeshMapBaker returned no GPU coefficient image for %s."),
-				*GetNameSafe(Target.SourceMesh.Get()));
-			Job.Stage.store(EJobStage::Failed);
-			return;
-		}
-
-		const TConstArrayView64<FVector4f> ImageBuffer =
-			Results[0]->GetImageBuffer();
 		TArray64<FVector4f>& CoefficientImage =
 			CoefficientImages.AddDefaulted_GetRef();
-		CoefficientImage.Append(
-			ImageBuffer.GetData(),
-			ImageBuffer.Num());
+		if (!BakeGPUTarget(
+			Job,
+			Target,
+			GPUSession,
+			CoefficientImage))
+		{
+			Job.Stage.store(
+				Job.bCancelRequested.load(
+					std::memory_order_relaxed)
+					? EJobStage::Cancelled
+					: EJobStage::Failed);
+			return;
+		}
+		Job.Stage.store(EJobStage::GPUComputing);
 	}
 
 	Job.Stage.store(EJobStage::Encoding);

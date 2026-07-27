@@ -25,11 +25,6 @@ namespace
 
 using namespace UE::Geometry;
 
-// Assumption / needs confirmation: map one Unity unit to one meter
-// (100 UE centimeters) for the referenced tool's 0.011/0.01/300 values.
-constexpr double UnityCameraNormalOffsetCm = 1.1;
-constexpr double UnityCameraNearClipCm = 1.0;
-constexpr double UnityCameraFarClipCm = 30000.0;
 constexpr double RayDistanceRelativeTolerance = 1.0e-6;
 
 struct FDirectionSample
@@ -1103,7 +1098,8 @@ bool ValidateTangentSpaceBakeMesh(
 bool ValidateRayTraceGeometry(
 	const FDynamicMesh3& Mesh,
 	double& OutDiagonal,
-	FText& OutError)
+	FText& OutError,
+	FVector3d* OutBoundsCenter = nullptr)
 {
 	if (Mesh.TriangleCount() == 0 || Mesh.VertexCount() == 0)
 	{
@@ -1122,6 +1118,10 @@ bool ValidateRayTraceGeometry(
 		OutError = NSLOCTEXT("SHThicknessBaker", "ZeroBounds", "LOD0 has zero or invalid bounds after Build Scale.");
 		return false;
 	}
+	if (OutBoundsCenter != nullptr)
+	{
+		*OutBoundsCenter = Bounds.Center();
+	}
 
 	const double MinAreaTwice = FMath::Square(OutDiagonal) * 1.0e-16;
 	for (const int32 TriangleID : Mesh.TriangleIndicesItr())
@@ -1137,6 +1137,52 @@ bool ValidateRayTraceGeometry(
 				FText::AsNumber(TriangleID));
 			return false;
 		}
+	}
+
+	return true;
+}
+
+bool NormalizeBakeGeometry(
+	FDynamicMesh3& Mesh,
+	const FVector3d& BoundsCenter,
+	const double InverseBoundsDiagonal,
+	FText& OutError)
+{
+	if (!FMath::IsFinite(BoundsCenter.X)
+		|| !FMath::IsFinite(BoundsCenter.Y)
+		|| !FMath::IsFinite(BoundsCenter.Z)
+		|| !FMath::IsFinite(InverseBoundsDiagonal)
+		|| InverseBoundsDiagonal <= 0.0)
+	{
+		OutError = NSLOCTEXT(
+			"SHThicknessBaker",
+			"InvalidBoundsNormalization",
+			"The shared bake-bounds normalization is invalid.");
+		return false;
+	}
+
+	for (const int32 VertexID : Mesh.VertexIndicesItr())
+	{
+		if (Mesh.GetVtxTriangleCount(VertexID) == 0)
+		{
+			continue;
+		}
+		const FVector3d Position =
+			(Mesh.GetVertex(VertexID) - BoundsCenter)
+			* InverseBoundsDiagonal;
+		if (!FMath::IsFinite(Position.X)
+			|| !FMath::IsFinite(Position.Y)
+			|| !FMath::IsFinite(Position.Z))
+		{
+			OutError = FText::Format(
+				NSLOCTEXT(
+					"SHThicknessBaker",
+					"NonFiniteNormalizedVertex",
+					"The shared bake-bounds normalization produced an invalid position at vertex {0}."),
+				FText::AsNumber(VertexID));
+			return false;
+		}
+		Mesh.SetVertex(VertexID, Position);
 	}
 
 	return true;
@@ -1652,9 +1698,9 @@ private:
 		const FVector3d OffsetNormal =
 			SurfaceNormal / FMath::Sqrt(NormalLengthSquared);
 		const FVector3d Origin =
-			SurfacePoint - OffsetNormal * UnityCameraNormalOffsetCm;
+			SurfacePoint - OffsetNormal * NormalizedRayNormalOffset;
 
-		// Unity renders a 90-degree cubemap with near/far clip planes. For a
+		// Preserve the reference 90-degree cubemap near-plane behavior. For a
 		// unit ray, cubemap face depth is t * max(abs(Direction)).
 		const double MajorAxis = FMath::Max(
 			FMath::Abs(Direction.X),
@@ -1665,11 +1711,9 @@ private:
 			return false;
 		}
 
-		const double NearDistance = UnityCameraNearClipCm / MajorAxis;
-		const double FarDistance = UnityCameraFarClipCm / MajorAxis;
-		const double QueryMaxDistance = FMath::Min(
-			ThicknessScale * (1.0 + RayDistanceRelativeTolerance),
-			FarDistance);
+		const double NearDistance = NormalizedRayNearClip / MajorAxis;
+		const double QueryMaxDistance =
+			ThicknessScale * (1.0 + RayDistanceRelativeTolerance);
 		if (QueryMaxDistance < NearDistance)
 		{
 			return true;
@@ -1844,7 +1888,7 @@ FString FBakeJob::GetStatusText() const
 			ProcessedSurfaceSamples.load(std::memory_order_relaxed));
 	case EJobStage::GPUComputing:
 		return FString::Printf(
-			TEXT("GPU baking SH thickness... %lld / %lld samples"),
+			TEXT("GPU baking SH thickness... %lld / %lld tiles"),
 			ProcessedSurfaceSamples.load(std::memory_order_relaxed),
 			TotalSurfaceSamples.load(std::memory_order_relaxed));
 	case EJobStage::Filtering:
@@ -1929,7 +1973,7 @@ void FBakeJob::RunCPU()
 					SurfaceMesh,
 					RayMesh,
 					RaySpatial,
-					Preparation.ThicknessScaleCm,
+					Preparation.ThicknessScale,
 					Preparation.Settings.DirectionCount,
 					Preparation.Settings.CoefficientSpace,
 					bCancelRequested,
@@ -2107,12 +2151,21 @@ static bool PrepareBakeTarget(
 			"SkeletalMesh currently supports Tangent Space only. Local Space is available for StaticMesh assets.");
 		return false;
 	}
-	if (Settings.BakeUVChannel != 0 && Settings.BakeUVChannel != 1)
+	if (Settings.BakeUVChannel < 0 || Settings.BakeUVChannel > 2)
 	{
 		OutError = NSLOCTEXT(
 			"SHThicknessBaker",
 			"InvalidBakeUVChannel",
-			"Bake UV channel must be UV0 or UV1.");
+			"Bake UV channel must be UV0, UV1, or UV2.");
+		return false;
+	}
+	if (Settings.bRegenerateBakeUV
+		&& Settings.BakeUVChannel == 0)
+	{
+		OutError = NSLOCTEXT(
+			"SHThicknessBaker",
+			"UV0RegenerationUnsupported",
+			"UV0 is reuse-only. Select UV1 or UV2 to regenerate a Bake UV with XAtlas.");
 		return false;
 	}
 	switch (Settings.TextureResolution)
@@ -2315,6 +2368,14 @@ static bool PrepareBakeTarget(
 		return false;
 	}
 	const bool bHasBakeUV = UVChannelCount > BakeUVChannel;
+	if (BakeUVChannel == 2 && UVChannelCount <= 1)
+	{
+		OutError = NSLOCTEXT(
+			"SHThicknessBaker",
+			"UV2RequiresExistingUV1",
+			"UV2 can be used only when the source mesh already contains UV1. Add or generate UV1 first.");
+		return false;
+	}
 	if (!Settings.bRegenerateBakeUV && !bHasBakeUV)
 	{
 		OutError = FText::Format(
@@ -2375,8 +2436,8 @@ static bool PrepareBakeTarget(
 		{
 			OutError = NSLOCTEXT(
 				"SHThicknessBaker",
-				"AddingUV1ChangesGeneratedLightmapDestination",
-				"LOD0 currently contains only UV0 while automatic lightmap UV generation requests a destination above UV1. Adding UV1 would change which empty channel Unreal selects as the generated lightmap destination. Set the lightmap destination to UV1 or disable automatic lightmap UV generation before baking.");
+				"AddingBakeUVChangesGeneratedLightmapDestination",
+				"Adding the missing Bake UV would change which empty channel Unreal selects as the automatic lightmap destination. Set the lightmap destination to the selected Bake UV or disable automatic lightmap UV generation before baking.");
 			return false;
 		}
 		bDisableLightmapGeneration =
@@ -2473,13 +2534,6 @@ static bool PrepareBakeTarget(
 					"AddBakeUVWarning",
 					"{0} is missing. After a successful bake, XAtlas will add that channel directly to the selected source mesh."),
 				BakeUVText));
-		}
-		if (BakeUVChannel == 0)
-		{
-			OutTarget.Warnings.Add(NSLOCTEXT(
-				"SHThicknessBaker",
-				"ReplaceUV0MaterialWarning",
-				"Replacing UV0 changes the coordinates normally used by Base Color, Normal, and other material textures. It can also change the final MikkTSpace tangent basis."));
 		}
 	}
 	else
@@ -2774,10 +2828,12 @@ bool PrepareBake(
 
 	check(Preparation.CombinedDynamicMesh);
 	double CombinedDiagonal = 0.0;
+	FVector3d CombinedBoundsCenter = FVector3d::Zero();
 	if (!ValidateRayTraceGeometry(
 			*Preparation.CombinedDynamicMesh,
 			CombinedDiagonal,
-			OutError))
+			OutError,
+			&CombinedBoundsCenter))
 	{
 		OutError = FText::Format(
 			NSLOCTEXT(
@@ -2787,8 +2843,58 @@ bool PrepareBake(
 			OutError);
 		return false;
 	}
-	Preparation.ThicknessScaleCm =
-		CombinedDiagonal + UnityCameraNormalOffsetCm;
+
+	const double InverseCombinedDiagonal = 1.0 / CombinedDiagonal;
+	for (FBakeTargetPreparation& Target : Preparation.Targets)
+	{
+		check(Target.DynamicMesh);
+		if (!NormalizeBakeGeometry(
+				*Target.DynamicMesh,
+				CombinedBoundsCenter,
+				InverseCombinedDiagonal,
+				OutError))
+		{
+			OutError = FText::Format(
+				NSLOCTEXT(
+					"SHThicknessBaker",
+					"TargetBoundsNormalizationFailed",
+					"Failed to normalize source mesh {0} into the shared bake bounds: {1}"),
+				FText::FromString(GetNameSafe(Target.SourceMesh.Get())),
+				OutError);
+			return false;
+		}
+	}
+	if (!NormalizeBakeGeometry(
+			*Preparation.CombinedDynamicMesh,
+			CombinedBoundsCenter,
+			InverseCombinedDiagonal,
+			OutError))
+	{
+		OutError = FText::Format(
+			NSLOCTEXT(
+				"SHThicknessBaker",
+				"CombinedBoundsNormalizationFailed",
+				"Failed to normalize the combined source geometry into the shared bake bounds: {0}"),
+			OutError);
+		return false;
+	}
+
+	double NormalizedCombinedDiagonal = 0.0;
+	if (!ValidateRayTraceGeometry(
+			*Preparation.CombinedDynamicMesh,
+			NormalizedCombinedDiagonal,
+			OutError))
+	{
+		OutError = FText::Format(
+			NSLOCTEXT(
+				"SHThicknessBaker",
+				"NormalizedCombinedGeometryInvalid",
+				"Normalized combined source geometry is invalid: {0}"),
+			OutError);
+		return false;
+	}
+	Preparation.ThicknessScale =
+		NormalizedCombinedDiagonal + NormalizedRayNormalOffset;
 
 	if (Preparation.Targets.Num() > 1)
 	{
@@ -2796,7 +2902,7 @@ bool PrepareBake(
 			NSLOCTEXT(
 				"SHThicknessBaker",
 				"IdentityLocalGroupWarning",
-				"All source meshes are combined using their authored asset-local positions with identity transforms. The group shares one bounds normalization scale and, when enabled, one coefficient Remap gain; each source still writes its own texture."),
+				"All source meshes are combined using their authored asset-local positions with identity transforms. The group shares one transient bounds normalization transform and, when enabled, one coefficient Remap gain; each source still writes its own texture."),
 			0);
 	}
 

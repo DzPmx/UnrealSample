@@ -24,7 +24,6 @@ public class TextureBakerEditor : ModuleRules
 				"ToolMenus",
 				"PropertyEditor",
 				"AssetRegistry",
-				"AssetTools",
 				"Projects",
 				"RHI",
 				"RenderCore",

@@ -2,7 +2,6 @@
 
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "AssetToolsModule.h"
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
 #include "Editor.h"
@@ -13,10 +12,10 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/Notifications/NotificationManager.h"
-#include "IAssetTools.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/MessageDialog.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyCustomizationHelpers.h"
@@ -29,6 +28,7 @@
 #include "ToolMenus.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -86,6 +86,7 @@ TSharedRef<SWidget> MakeIntegerSettingRow(
 				.MinValue(MinValue)
 				.MaxValue(MaxValue)
 				.Delta(Delta)
+				.AlwaysUsesDeltaSnap(true)
 				.Value(Value)
 				.OnValueChanged(OnValueChanged)
 			]
@@ -139,7 +140,10 @@ public:
 		}
 		if (ActiveFuture.IsValid())
 		{
+			// GPU waits observe cancellation; then drain any render lambdas
+			// that still hold plugin-owned dispatch contexts.
 			ActiveFuture.Wait();
+			FlushRenderingCommands();
 		}
 		if (ActiveTickerHandle.IsValid())
 		{
@@ -515,17 +519,27 @@ private:
 			})
 			.OnValueChanged_Lambda([this](const int32 NewChannel)
 			{
-				check(NewChannel == 0 || NewChannel == 1);
+				check(
+					NewChannel == 0
+						|| NewChannel == 1
+						|| NewChannel == 2);
 				PanelSettings.BakeUVChannel = NewChannel;
+				if (NewChannel == 0)
+				{
+					PanelSettings.bRegenerateBakeUV = false;
+				}
 			})
 			.UniformPadding(FMargin(18.0f, 6.0f))
-			.MaxSegmentsPerLine(2);
+			.MaxSegmentsPerLine(3);
 		BakeUVSelector->AddSlot(0)
 			.HAlign(HAlign_Center)
 			.Text(LOCTEXT("BakeUV0", "UV0"));
 		BakeUVSelector->AddSlot(1)
 			.HAlign(HAlign_Center)
 			.Text(LOCTEXT("BakeUV1", "UV1"));
+		BakeUVSelector->AddSlot(2)
+			.HAlign(HAlign_Center)
+			.Text(LOCTEXT("BakeUV2", "UV2"));
 
 		TSharedRef<SSegmentedControl<ETextureResolution>>
 			TextureResolutionSelector =
@@ -618,7 +632,7 @@ private:
 				SNew(STextBlock)
 					.Text(LOCTEXT(
 						"InPlaceModificationWarning",
-						"All selected assets are combined at their authored identity Local transform for thickness rays, and each asset outputs its own texture using the shared UV channel. Tangent Space works for StaticMesh and SkeletalMesh; Local Space requires every source to be StaticMesh. SkeletalMesh uses its reference pose. By default UV0/UV1 is reused; enable XAtlas regeneration to replace or add that channel directly on every source only after all outputs succeed."))
+						"All selected assets are combined at their authored identity Local transform for thickness rays, and each asset outputs its own texture using the shared UV channel. Tangent Space works for StaticMesh and SkeletalMesh; Local Space requires every source to be StaticMesh. SkeletalMesh uses its reference pose. UV0 is reuse-only. UV1 and UV2 can be reused or regenerated with XAtlas; UV2 requires every source mesh to already contain UV1.\n\nThickness definition: the tool applies one transient shared combined-Bounds normalization, then stores the farthest two-sided triangle hit for each direction. A direction with no qualifying hit is zero. This is not SolidLength: inside intervals are not paired or summed, and air gaps may contribute. Source-asset positions are not changed."))
 					.AutoWrapText(true)
 					.ColorAndOpacity(FLinearColor(1.0f, 0.65f, 0.15f))
 			]
@@ -676,7 +690,11 @@ private:
 				SNew(SCheckBox)
 					.ToolTipText(LOCTEXT(
 						"RegenerateBakeUVTip",
-						"Unchecked: use the existing selected UV without changing it. Checked: generate a new XAtlas layout and replace the selected channel, or add UV1 when it is selected and missing."))
+						"Unchecked: use the existing selected UV without changing it. Checked: generate a new XAtlas layout and replace or add UV1/UV2. UV0 is reuse-only. Adding UV2 requires every source mesh to already contain UV1."))
+					.IsEnabled_Lambda([this]()
+					{
+						return PanelSettings.BakeUVChannel != 0;
+					})
 					.IsChecked_Lambda([this]()
 					{
 						return PanelSettings.bRegenerateBakeUV
@@ -877,7 +895,7 @@ private:
 								SNew(STextBlock)
 									.Text(LOCTEXT(
 										"OutputSummary",
-										"Output: one linear RGBA8 coefficient texture per source mesh, cooked as BC7 with a normal mip chain. The group shares bounds normalization and one optional Remap gain. Logical RGBA = (Cx, Cy, Cz, C0); decode Cxyz = 2*RGB-1 and C0 = A. Evaluate C0 + dot(Cxyz, D), where D is tangent-space or mesh-local according to Bake Space. Each material Texture Coordinate must match the shared UV0/UV1 selection."))
+										"Output: one linear RGBA8 coefficient texture per source mesh, cooked as BC7 with a normal mip chain. The group shares bounds normalization and one optional Remap gain. Logical RGBA = (Cx, Cy, Cz, C0); decode Cxyz = 2*RGB-1 and C0 = A. Evaluate max(0, C0 + dot(Cxyz, D)), where D is tangent-space or mesh-local according to Bake Space. Each material Texture Coordinate must match the shared UV0/UV1/UV2 selection. Names use T_<mesh name without SM_>_Thickness_M."))
 									.AutoWrapText(true)
 							]
 					]
@@ -1064,14 +1082,14 @@ private:
 						? FText::Format(
 							LOCTEXT(
 								"BakeSucceededWithRegeneratedUV",
-								"{0} SH thickness texture(s) created and every source-mesh UV{1} updated."),
+								"{0} SH thickness texture(s) created or updated, and every source-mesh UV{1} updated."),
 							FText::AsNumber(TextureCount),
 							FText::AsNumber(
 								ActiveJob->Preparation.Settings.BakeUVChannel))
 						: FText::Format(
 							LOCTEXT(
 								"BakeSucceededWithExistingUV",
-								"{0} SH thickness texture(s) created using existing UV{1}; source UVs were not modified."),
+								"{0} SH thickness texture(s) created or updated using existing UV{1}; source UVs were not modified."),
 							FText::AsNumber(TextureCount),
 							FText::AsNumber(
 								ActiveJob->Preparation.Settings.BakeUVChannel));
@@ -1143,8 +1161,13 @@ private:
 			UStaticMesh* StaticMesh = nullptr;
 			USkeletalMesh* SkeletalMesh = nullptr;
 			FMeshDescription CurrentMeshDescription;
+			bool bSourcePackageWasDirty = false;
+			FString TexturePackageName;
+			FString TextureAssetName;
 			UPackage* TexturePackage = nullptr;
 			UTexture2D* Texture = nullptr;
+			bool bTexturePackageWasDirty = false;
+			bool bTextureIsNew = false;
 		};
 
 		const int32 Resolution = GetTextureResolution(
@@ -1153,6 +1176,7 @@ private:
 			static_cast<int64>(Resolution) * Resolution;
 		TArray<FPendingCommit> PendingCommits;
 		PendingCommits.Reserve(Job.Preparation.Targets.Num());
+		TSet<FString> PendingTexturePaths;
 
 		for (int32 TargetIndex = 0;
 			TargetIndex < Job.Preparation.Targets.Num();
@@ -1176,6 +1200,8 @@ private:
 					"A source mesh was unloaded before the bake completed. No changes were committed.");
 				return false;
 			}
+			Pending.bSourcePackageWasDirty =
+				Pending.SourceMesh->GetOutermost()->IsDirty();
 			if ((Preparation.bSourceIsSkeletalMesh
 					&& Pending.SkeletalMesh == nullptr)
 				|| (!Preparation.bSourceIsSkeletalMesh
@@ -1284,188 +1310,376 @@ private:
 						Pending.SourceMesh->GetName()));
 				return false;
 			}
-		}
 
-		IAssetTools& AssetTools =
-			FModuleManager::LoadModuleChecked<FAssetToolsModule>(
-				TEXT("AssetTools")).Get();
-		const FString TextureSuffix = FString::Printf(
-			TEXT("_SHThickness_L1_%s_UV%d"),
-			Job.Preparation.Settings.CoefficientSpace
-					== ECoefficientSpace::Tangent
-				? TEXT("TS")
-				: TEXT("LS"),
-			Job.Preparation.Settings.BakeUVChannel);
-
-		for (int32 TargetIndex = 0;
-			TargetIndex < PendingCommits.Num();
-			++TargetIndex)
-		{
-			FPendingCommit& Pending =
-				PendingCommits[TargetIndex];
-			const FString TextureBasePackageName =
+			FString SourceBaseName = Pending.SourceMesh->GetName();
+			SourceBaseName.RemoveFromStart(TEXT("SM_"));
+			const FString TextureOutputDirectory =
 				Pending.SourceMesh->GetOutermost()->GetName()
 						.StartsWith(TEXT("/Engine/"))
-					? FString::Printf(
-						TEXT("/Game/TextureBaker/%s"),
-						*Pending.SourceMesh->GetName())
-					: Pending.SourceMesh->GetOutermost()
-						->GetName();
-			FString TexturePackageName;
-			FString TextureAssetName;
-			AssetTools.CreateUniqueAssetName(
-				TextureBasePackageName,
-				TextureSuffix,
-				TexturePackageName,
-				TextureAssetName);
+					? TEXT("/Game/TextureBaker")
+					: FPackageName::GetLongPackagePath(
+						Pending.SourceMesh->GetOutermost()
+							->GetName());
+			Pending.TextureAssetName = FString::Printf(
+				TEXT("T_%s_Thickness_M"),
+				*SourceBaseName);
+			Pending.TexturePackageName = FString::Printf(
+				TEXT("%s/%s"),
+				*TextureOutputDirectory,
+				*Pending.TextureAssetName);
+			const FString TextureObjectPath = FString::Printf(
+				TEXT("%s.%s"),
+				*Pending.TexturePackageName,
+				*Pending.TextureAssetName);
+			if (PendingTexturePaths.Contains(TextureObjectPath))
+			{
+				OutError = FText::Format(
+					LOCTEXT(
+						"DuplicateTextureOutput",
+						"Multiple source meshes resolve to the same output texture {0}. No changes were committed."),
+					FText::FromString(TextureObjectPath));
+				return false;
+			}
+			PendingTexturePaths.Add(TextureObjectPath);
+
 			Pending.TexturePackage =
-				CreatePackage(*TexturePackageName);
-			if (Pending.TexturePackage == nullptr)
+				FindPackage(nullptr, *Pending.TexturePackageName);
+			const bool bTexturePackageExists =
+				FPackageName::DoesPackageExist(
+					Pending.TexturePackageName);
+			if (Pending.TexturePackage == nullptr
+				&& bTexturePackageExists)
+			{
+				Pending.TexturePackage = LoadPackage(
+					nullptr,
+					*Pending.TexturePackageName,
+					LOAD_None);
+			}
+			if (bTexturePackageExists
+				&& Pending.TexturePackage == nullptr)
 			{
 				OutError = FText::Format(
 					LOCTEXT(
-						"CreateTexturePackageFailed",
-						"{0}: failed to create the SH coefficient texture package. No source mesh was modified."),
+						"LoadTexturePackageFailed",
+						"{0} exists but could not be loaded. No changes were committed."),
 					FText::FromString(
-						Pending.SourceMesh->GetName()));
+						Pending.TexturePackageName));
 				return false;
 			}
-
-			Pending.Texture = NewObject<UTexture2D>(
-				Pending.TexturePackage,
-				*TextureAssetName,
-				RF_Transactional);
-			if (Pending.Texture == nullptr)
+			if (Pending.TexturePackage != nullptr)
 			{
-				OutError = FText::Format(
-					LOCTEXT(
-						"CreateTextureAssetFailed",
-						"{0}: failed to create the SH coefficient texture asset. No source mesh was modified."),
-					FText::FromString(
-						Pending.SourceMesh->GetName()));
-				return false;
+				Pending.bTexturePackageWasDirty =
+					Pending.TexturePackage->IsDirty();
+				UObject* ExistingObject = StaticFindObject(
+					UObject::StaticClass(),
+					Pending.TexturePackage,
+					*Pending.TextureAssetName);
+				if (ExistingObject != nullptr)
+				{
+					Pending.Texture =
+						Cast<UTexture2D>(ExistingObject);
+					if (Pending.Texture == nullptr)
+					{
+						OutError = FText::Format(
+							LOCTEXT(
+								"TextureOutputTypeConflict",
+								"{0} already exists but is not a Texture2D. No changes were committed."),
+							FText::FromString(
+								TextureObjectPath));
+						return false;
+					}
+				}
 			}
-
-			Pending.Texture->PreEditChange(nullptr);
-			Pending.Texture->Source.Init(
-				Resolution,
-				Resolution,
-				1,
-				1,
-				TSF_BGRA8);
-			uint8* SourceBGRA =
-				Pending.Texture->Source.LockMip(0);
-			if (SourceBGRA == nullptr)
-			{
-				Pending.Texture->PostEditChange();
-				OutError = FText::Format(
-					LOCTEXT(
-						"LockTextureSourceFailed",
-						"{0}: failed to lock the coefficient texture source mip. No source mesh was modified."),
-					FText::FromString(
-						Pending.SourceMesh->GetName()));
-				return false;
-			}
-
-			const TArray64<uint8>& EncodedRGBA =
-				Job.EncodedRGBA[TargetIndex];
-			for (int64 PixelIndex = 0;
-				PixelIndex < PixelCount;
-				++PixelIndex)
-			{
-				SourceBGRA[PixelIndex * 4 + 0] =
-					EncodedRGBA[PixelIndex * 4 + 2];
-				SourceBGRA[PixelIndex * 4 + 1] =
-					EncodedRGBA[PixelIndex * 4 + 1];
-				SourceBGRA[PixelIndex * 4 + 2] =
-					EncodedRGBA[PixelIndex * 4 + 0];
-				SourceBGRA[PixelIndex * 4 + 3] =
-					EncodedRGBA[PixelIndex * 4 + 3];
-			}
-			Pending.Texture->Source.UnlockMip(0);
-			Pending.Texture->SRGB = false;
-			Pending.Texture->CompressionSettings = TC_BC7;
-			Pending.Texture->CompressionNoAlpha = false;
-			Pending.Texture->CompressionForceAlpha = true;
-			Pending.Texture->LossyCompressionAmount = TLCA_None;
-			Pending.Texture->MipGenSettings =
-				TMGS_FromTextureGroup;
-			Pending.Texture->AddressX = TA_Clamp;
-			Pending.Texture->AddressY = TA_Clamp;
-			Pending.Texture
-				->SetModernSettingsForNewOrChangedTexture();
-			Pending.Texture->PostEditChange();
 		}
 
-		if (Job.Preparation.Settings.bRegenerateBakeUV)
+		FlushRenderingCommands();
+		bool bCommitSucceeded = true;
+		bool bTransactionChanged = false;
+		FText CommitError;
 		{
-			FlushRenderingCommands();
-			const FScopedTransaction Transaction(FText::Format(
+			const FScopedTransaction Transaction(
 				LOCTEXT(
-					"ReplaceSourceMeshesBakeUVTransaction",
-					"Texture Baker: Replace Source Meshes UV{0}"),
-				FText::AsNumber(
-					Job.Preparation.Settings.BakeUVChannel)));
+					"CommitSHThicknessBakeTransaction",
+					"Texture Baker: Commit SH Thickness Bake"));
 
 			for (FPendingCommit& Pending : PendingCommits)
 			{
-				Pending.SourceMesh->SetFlags(RF_Transactional);
-				Pending.SourceMesh->Modify();
-				if (Pending.StaticMesh != nullptr)
+				if (Pending.TexturePackage == nullptr)
 				{
-					Pending.StaticMesh->ModifyMeshDescription(0);
+					Pending.TexturePackage =
+						CreatePackage(*Pending.TexturePackageName);
 				}
-				else if (!Pending.SkeletalMesh
-					->ModifyMeshDescription(0))
+				if (Pending.TexturePackage == nullptr)
 				{
-					OutError = FText::Format(
+					CommitError = FText::Format(
 						LOCTEXT(
-							"ModifySkeletalMeshDescriptionFailed",
-							"{0}: failed to add LOD0 source data to the editor transaction. No UV data was written."),
+							"CreateTexturePackageFailed",
+							"{0}: failed to create the SH coefficient texture package."),
 						FText::FromString(
 							Pending.SourceMesh->GetName()));
-					return false;
+					bCommitSucceeded = false;
+					break;
 				}
+				if (Pending.Texture == nullptr)
+				{
+					Pending.Texture = NewObject<UTexture2D>(
+						Pending.TexturePackage,
+						*Pending.TextureAssetName,
+						RF_Public | RF_Standalone
+							| RF_Transactional);
+					Pending.bTextureIsNew = true;
+				}
+				if (Pending.Texture == nullptr)
+				{
+					CommitError = FText::Format(
+						LOCTEXT(
+							"CreateTextureAssetFailed",
+							"{0}: failed to create the SH coefficient texture asset."),
+						FText::FromString(
+							Pending.SourceMesh->GetName()));
+					bCommitSucceeded = false;
+					break;
+				}
+				Pending.Texture->SetFlags(
+					RF_Public | RF_Standalone | RF_Transactional);
+				if (!Pending.Texture->Modify())
+				{
+					CommitError = FText::Format(
+						LOCTEXT(
+							"ModifyTextureTransactionFailed",
+							"{0}: failed to add the output texture to the editor transaction."),
+						FText::FromString(
+							Pending.TextureAssetName));
+					bCommitSucceeded = false;
+					break;
+				}
+				bTransactionChanged = true;
 			}
 
 			for (FPendingCommit& Pending : PendingCommits)
 			{
-				Pending.SourceMesh->PreEditChange(nullptr);
-				FMeshDescription* TargetMeshDescription =
-					Pending.StaticMesh != nullptr
-						? Pending.StaticMesh
-							->GetMeshDescription(0)
-						: Pending.SkeletalMesh
-							->GetMeshDescription(0);
-				check(TargetMeshDescription);
-				*TargetMeshDescription =
-					MoveTemp(Pending.CurrentMeshDescription);
+				if (!bCommitSucceeded)
+				{
+					break;
+				}
 
-				if (Pending.Preparation
-					->bDisableLightmapGeneration)
+				Pending.Texture->PreEditChange(nullptr);
+				Pending.Texture->Source.Init(
+					Resolution,
+					Resolution,
+					1,
+					1,
+					TSF_BGRA8);
+				uint8* SourceBGRA =
+					Pending.Texture->Source.LockMip(0);
+				if (SourceBGRA == nullptr)
 				{
-					check(Pending.StaticMesh);
-					Pending.StaticMesh->GetSourceModel(0)
-						.BuildSettings.bGenerateLightmapUVs =
-							false;
+					Pending.Texture->PostEditChange();
+					CommitError = FText::Format(
+						LOCTEXT(
+							"LockTextureSourceFailed",
+							"{0}: failed to lock the coefficient texture source mip."),
+						FText::FromString(
+							Pending.SourceMesh->GetName()));
+					bCommitSucceeded = false;
+					break;
 				}
-				if (Pending.StaticMesh != nullptr)
+
+				const int32 TargetIndex =
+					static_cast<int32>(
+						&Pending - PendingCommits.GetData());
+				const TArray64<uint8>& EncodedRGBA =
+					Job.EncodedRGBA[TargetIndex];
+				for (int64 PixelIndex = 0;
+					PixelIndex < PixelCount;
+					++PixelIndex)
 				{
-					Pending.StaticMesh
-						->CommitMeshDescription(0);
+					SourceBGRA[PixelIndex * 4 + 0] =
+						EncodedRGBA[PixelIndex * 4 + 2];
+					SourceBGRA[PixelIndex * 4 + 1] =
+						EncodedRGBA[PixelIndex * 4 + 1];
+					SourceBGRA[PixelIndex * 4 + 2] =
+						EncodedRGBA[PixelIndex * 4 + 0];
+					SourceBGRA[PixelIndex * 4 + 3] =
+						EncodedRGBA[PixelIndex * 4 + 3];
 				}
-				else
-				{
-					const bool bCommitted =
-						Pending.SkeletalMesh
-							->CommitMeshDescription(0);
-					checkf(
-						bCommitted,
-						TEXT("Validated SkeletalMesh LOD0 failed to commit its MeshDescription."));
-				}
-				Pending.SourceMesh->PostEditChange();
-				Pending.SourceMesh->MarkPackageDirty();
+				Pending.Texture->Source.UnlockMip(0);
+				Pending.Texture->SRGB = false;
+				Pending.Texture->CompressionSettings = TC_BC7;
+				Pending.Texture->CompressionNoAlpha = false;
+				Pending.Texture->CompressionForceAlpha = true;
+				Pending.Texture->LossyCompressionAmount =
+					TLCA_None;
+				Pending.Texture->MipGenSettings =
+					TMGS_FromTextureGroup;
+				Pending.Texture->AddressX = TA_Clamp;
+				Pending.Texture->AddressY = TA_Clamp;
+				Pending.Texture
+					->SetModernSettingsForNewOrChangedTexture();
+				Pending.Texture->PostEditChange();
 			}
+
+			if (bCommitSucceeded
+				&& Job.Preparation.Settings.bRegenerateBakeUV)
+			{
+				for (FPendingCommit& Pending : PendingCommits)
+				{
+					Pending.SourceMesh->SetFlags(RF_Transactional);
+					if (!Pending.SourceMesh->Modify())
+					{
+						CommitError = FText::Format(
+							LOCTEXT(
+								"ModifySourceMeshTransactionFailed",
+								"{0}: failed to add the source mesh to the editor transaction."),
+							FText::FromString(
+								Pending.SourceMesh->GetName()));
+						bCommitSucceeded = false;
+						break;
+					}
+					if (Pending.StaticMesh != nullptr)
+					{
+						Pending.StaticMesh->ModifyMeshDescription(0);
+					}
+					else if (!Pending.SkeletalMesh
+						->ModifyMeshDescription(0))
+					{
+						CommitError = FText::Format(
+							LOCTEXT(
+								"ModifySkeletalMeshDescriptionFailed",
+								"{0}: failed to add LOD0 source data to the editor transaction."),
+							FText::FromString(
+								Pending.SourceMesh->GetName()));
+						bCommitSucceeded = false;
+						break;
+					}
+				}
+
+				for (FPendingCommit& Pending : PendingCommits)
+				{
+					if (!bCommitSucceeded)
+					{
+						break;
+					}
+
+					Pending.SourceMesh->PreEditChange(nullptr);
+					FMeshDescription* TargetMeshDescription =
+						Pending.StaticMesh != nullptr
+							? Pending.StaticMesh
+								->GetMeshDescription(0)
+							: Pending.SkeletalMesh
+								->GetMeshDescription(0);
+					if (TargetMeshDescription == nullptr)
+					{
+						Pending.SourceMesh->PostEditChange();
+						CommitError = FText::Format(
+							LOCTEXT(
+								"CommitMeshDescriptionMissing",
+								"{0}: LOD0 MeshDescription became unavailable during commit."),
+							FText::FromString(
+								Pending.SourceMesh->GetName()));
+						bCommitSucceeded = false;
+						break;
+					}
+					*TargetMeshDescription =
+						MoveTemp(Pending.CurrentMeshDescription);
+
+					if (Pending.Preparation
+						->bDisableLightmapGeneration)
+					{
+						if (Pending.StaticMesh == nullptr)
+						{
+							Pending.SourceMesh->PostEditChange();
+							CommitError = FText::Format(
+								LOCTEXT(
+									"LightmapDisableRequiresStaticMesh",
+									"{0}: lightmap UV generation can only be disabled on a StaticMesh."),
+								FText::FromString(
+									Pending.SourceMesh->GetName()));
+							bCommitSucceeded = false;
+							break;
+						}
+						Pending.StaticMesh->GetSourceModel(0)
+							.BuildSettings.bGenerateLightmapUVs =
+								false;
+					}
+
+					bool bMeshCommitted = true;
+					if (Pending.StaticMesh != nullptr)
+					{
+						Pending.StaticMesh
+							->CommitMeshDescription(0);
+					}
+					else
+					{
+						bMeshCommitted =
+							Pending.SkeletalMesh
+								->CommitMeshDescription(0);
+					}
+					Pending.SourceMesh->PostEditChange();
+					if (!bMeshCommitted)
+					{
+						CommitError = FText::Format(
+							LOCTEXT(
+								"CommitSkeletalMeshDescriptionFailed",
+								"{0}: failed to commit the LOD0 MeshDescription."),
+							FText::FromString(
+								Pending.SourceMesh->GetName()));
+						bCommitSucceeded = false;
+						break;
+					}
+					Pending.SourceMesh->MarkPackageDirty();
+				}
+			}
+		}
+
+		if (!bCommitSucceeded)
+		{
+			if (!bTransactionChanged)
+			{
+				OutError = CommitError;
+			}
+			else if (!GEditor->UndoTransaction(false))
+			{
+				OutError = FText::Format(
+					LOCTEXT(
+						"CommitRollbackFailed",
+						"{0} Automatic rollback also failed; inspect the affected assets before continuing."),
+					CommitError);
+			}
+			else
+			{
+				OutError = FText::Format(
+					LOCTEXT(
+						"CommitRolledBack",
+						"{0} All transactional changes were rolled back."),
+					CommitError);
+			}
+			for (FPendingCommit& Pending : PendingCommits)
+			{
+				if (Pending.bTextureIsNew
+					&& IsValid(Pending.Texture))
+				{
+					Pending.Texture->ClearFlags(
+						RF_Public | RF_Standalone);
+					Pending.Texture->Rename(
+						nullptr,
+						GetTransientPackage(),
+						REN_DontCreateRedirectors
+							| REN_NonTransactional);
+					Pending.Texture->MarkAsGarbage();
+				}
+				if (Pending.TexturePackage != nullptr)
+				{
+					Pending.TexturePackage->SetDirtyFlag(
+						Pending.bTexturePackageWasDirty);
+				}
+				if (Pending.SourceMesh != nullptr)
+				{
+					Pending.SourceMesh->GetOutermost()->SetDirtyFlag(
+						Pending.bSourcePackageWasDirty);
+				}
+			}
+			return false;
 		}
 
 		TArray<UObject*> AssetsToSync;
@@ -1478,7 +1692,10 @@ private:
 		{
 			Pending.Texture->SetFlags(
 				RF_Public | RF_Standalone | RF_Transactional);
-			FAssetRegistryModule::AssetCreated(Pending.Texture);
+			if (Pending.bTextureIsNew)
+			{
+				FAssetRegistryModule::AssetCreated(Pending.Texture);
+			}
 			Pending.Texture->MarkPackageDirty();
 			Pending.TexturePackage->MarkPackageDirty();
 			if (Job.Preparation.Settings.bRegenerateBakeUV)

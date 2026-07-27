@@ -13,15 +13,16 @@ The first baker type is **SH Thickness**.
 - LOD0 reduction must be disabled.
 - Bake space: Tangent Space or Local Space for StaticMesh; Tangent Space only
   for SkeletalMesh.
-- Bake UV: UV0 or UV1.
+- Bake UV: UV0, UV1, or UV2.
 - Bake backend: CPU reference path or GPU Compute Shader path.
 - Texture resolution: fixed choices of 256, 512, 1024, or 2048.
 - UV reuse is the default and never modifies the source mesh.
-- Optional XAtlas regeneration replaces only the selected UV channel, or adds
-  a missing UV1, directly on the selected StaticMesh or SkeletalMesh after a
-  successful bake.
+- UV0 is reuse-only. Optional XAtlas regeneration replaces or adds UV1/UV2
+  directly on the selected StaticMesh or SkeletalMesh after a successful
+  bake. UV2 requires every source mesh to already contain UV1.
 - Output: one tangent-space or local-space affine L1 coefficient texture per
   source asset.
+- Output texture names use `T_<MeshNameWithoutSM_>_Thickness_M`.
 - Optional coefficient-range remapping improves RGBA8 utilization after the
   normal bounds-normalized bake.
 - Source format: linear `TSF_BGRA8`.
@@ -57,12 +58,14 @@ padding, encoding, and asset-output contract:
   uploads that BVH and the required render normal/TBN data, and traverses it
   in an SM5 Compute Shader. It does not require hardware ray tracing or DXR.
 
-GPU work is submitted one bounded batch at a time. A batch contains at most
-4096 surface samples, and its readback fence is polled without synchronously
-waiting on the render thread. The existing texture filter and RGBA8 encoder
-run after all coefficients have been read back. The GPU ray tests use
-single-precision arithmetic, so texels close to triangle edges can differ
-slightly from the CPU result while retaining the same coefficient meaning.
+GPU work is streamed one 32x32 UV tile at a time. Only the current tile's
+surface samples and readback are retained; the full-image sample lookup is not
+materialized. Combined geometry, BVH, render normal/TBN data, and directions
+are uploaded once and reused by every tile. Each tile dispatch/readback has a
+60-second timeout and observes cancellation between render-thread polls. The
+GPU ray tests use single-precision arithmetic, so texels close to triangle
+edges can differ slightly from the CPU result while retaining the same
+coefficient meaning.
 GPU mode requires an active SM5-or-newer rendering RHI; it does not silently
 fall back to CPU when explicitly selected.
 
@@ -71,7 +74,10 @@ ray-query mesh using their authored asset-local positions and identity
 transforms. There is no component or instance transform input. Every target
 is rasterized through its own selected UV channel into its own texture, while
 its thickness rays can hit triangles from any mesh in the group. The combined
-geometry is uploaded once by the GPU backend.
+geometry is uploaded once by the GPU backend. Before either backend runs, all
+target working meshes and the combined ray mesh receive the same translation
+and uniform scale so the combined bounds diagonal is one. This changes only
+the transient bake copies, not source-asset positions, UVs, normals, or TBN.
 
 ## Geometry contract
 
@@ -83,30 +89,27 @@ The farthest-hit thickness kernel accepts:
 - inconsistent winding;
 - cavities, intersections, and air gaps.
 
-For a surface point `P`, render normal `N`, and direction `w`, the ray origin
-and Unity-sample clip distances are:
+For a normalized working-space surface point `P`, render normal `N`, and
+direction `w`, the ray origin and near distance are:
 
 ```text
-O = P - normalize(N) * 1.1 cm
+O = P - normalize(N) * 1.1e-5
 
 m     = max(abs(w.x), abs(w.y), abs(w.z))
-NearT = 1 cm / m
-FarT  = 30000 cm / m
+NearT = 1e-5 / m
+MaxT  = NormalizedBoundsDiagonal + 1.1e-5
 ```
 
-The result is the farthest two-sided triangle intersection between `NearT` and
-`FarT`, or zero when there is no qualifying hit. It is not `SolidLength`:
-inside intervals are not paired or summed, and gaps can contribute to the
-camera-to-farthest-hit distance.
+The result is the farthest two-sided triangle intersection between `NearT`
+and `MaxT`, or zero when there is no qualifying hit. There is no fixed
+centimeter far clip. It is not `SolidLength`: inside intervals are not paired
+or summed, and gaps can contribute to the camera-to-farthest-hit distance.
 
-This reproduces the geometric behavior of the referenced Unity sample's
-two-sided cubemap pass with `ZTest Always` and `BlendOp Max`. The UE
-implementation uses continuous ray/triangle intersections instead of a
-128-by-128 cubemap.
-
-**Assumption / needs confirmation:** one Unity unit is mapped to one meter,
-which produces the centimeter constants above. These constants are a sample
-compatibility choice, not a general scale-independent thickness definition.
+This keeps the geometric behavior of the referenced Unity sample's two-sided
+cubemap pass with `ZTest Always` and `BlendOp Max`, including its cubemap
+near-plane direction dependence, while making the ray tolerances independent
+of the imported asset scale. The UE implementation uses continuous
+ray/triangle intersections instead of a 128-by-128 cubemap.
 
 Zero-area and duplicate source triangles do not stop the bake. The working
 DynamicMesh omits them because they do not change farthest-hit distance.
@@ -121,8 +124,8 @@ tangent basis from the current Build Settings:
 
 - Recompute Normals and Recompute Tangents are supported.
 - MikkTSpace and Compute Weighted Normals keep their Unreal behavior.
-- UV0 regeneration occurs before the final tangent build so MikkTSpace reads
-  the UV state that will be committed.
+- UV1/UV2 regeneration occurs before final render-basis preparation. UV0
+  remains unchanged and continues to drive MikkTSpace.
 - `BuildScale3D` and the StaticMesh legacy tangent-scaling mode are applied to
   the working geometry and TBN.
 - Temporary built normals, tangents, and binormal signs are never committed.
@@ -164,7 +167,9 @@ With regeneration disabled:
 
 With regeneration enabled:
 
-- XAtlas replaces the selected channel, or adds missing UV1;
+- UV0 regeneration is rejected;
+- XAtlas replaces or adds UV1;
+- XAtlas replaces or adds UV2 only when UV1 already exists;
 - other UV channels, skeletal attributes, and imported normal/tangent
   attributes are preserved;
 - the change is committed only after the texture bake succeeds;
@@ -232,10 +237,11 @@ NormalizedThickness = max(0, C0 + dot(Cxyz, DirectionInBakeSpace))
 The RGBA8 mapping follows the referenced shader convention. UNORM8, BC7,
 bilinear filtering, and mips all make the reconstructed field approximate.
 
-`ThicknessScaleCm` is the combined built working-geometry bounds diagonal plus
-the 1.1 cm origin offset. It normalizes every output in the group with the same
-scale. By request, it is not stored as metadata. Materials that need physical
-distance rather than normalized thickness must receive the same scale through
+`ThicknessScale` is the normalized combined working-geometry bounds diagonal
+plus the `1.1e-5` origin offset. It normalizes every output in the group with
+the same dimensionless scale. By request, neither the original combined
+bounds diagonal nor this scale is stored as metadata. Materials that need
+physical distance must receive the original combined bounds diagonal through
 a project-owned parameter.
 
 When **Remap SH range for RGBA8** is enabled, all filtered floating-point
@@ -268,16 +274,15 @@ metadata.
 3. Select the CPU or GPU Compute backend.
 4. Select Tangent Space or Local Space. SkeletalMesh locks this to Tangent
    Space.
-5. Select UV0 or UV1.
+5. Select UV0, UV1, or UV2. UV0 is reuse-only; UV2 requires every source to
+   already contain UV1.
 6. Leave regeneration unchecked to reuse the channel without modifying the
-   mesh, or enable it to replace/add the selected channel.
+   mesh, or enable it to replace/add UV1 or UV2.
 7. Optionally enable coefficient remapping to improve RGBA8 range usage.
 8. Configure quality and press **Bake**.
 9. Review warnings, including the identity-local placement contract, and
    confirm.
-10. Save each generated `_SHThickness_L1_TS_UV0`,
-   `_SHThickness_L1_TS_UV1`, `_SHThickness_L1_LS_UV0`, or
-   `_SHThickness_L1_LS_UV1` texture.
+10. Save each generated `T_<MeshNameWithoutSM_>_Thickness_M` texture.
 11. Save the source meshes only when regeneration modified them.
 
 Read-only `/Engine/` meshes can be baked with regeneration disabled; their
@@ -285,12 +290,13 @@ textures are created under `/Game/TextureBaker`. Regeneration of `/Engine/`
 assets remains unsupported.
 
 Preparation and XAtlas run on the game thread. CPU ray evaluation runs on a
-worker thread. GPU mode collects the exact map-baker surface samples on the
-worker, submits batched Compute Shader work to the render thread, reads the
-coefficients back, and runs the same texture filtering and RGBA8 encoding on
-the worker. Cancellation, invalid numerical output, asset creation failure, or
-a bake-relevant change to any source prevents the prepared UV set from being
-committed. Group UV changes use one editor transaction.
+worker thread. GPU mode generates the same subpixel samples and BSpline filter
+weights tile by tile, submits Compute Shader work to the render thread, and
+discards each tile's temporary data after filtering. Cancellation, timeout,
+invalid numerical output, asset creation failure, or a bake-relevant change to
+any source prevents the prepared UV set from being committed. Textures and
+optional group UV changes use one editor transaction. Re-baking updates the
+existing fixed-name `T_<MeshNameWithoutSM_>_Thickness_M` texture in place.
 
 ## Hard errors
 
@@ -300,6 +306,8 @@ The tool stops for:
 - missing editable source LOD0;
 - Local Space selected for SkeletalMesh;
 - reuse of a missing UV channel;
+- UV0 regeneration;
+- UV2 selection when the source mesh does not already contain UV1;
 - non-finite referenced geometry or zero/non-finite Build Scale;
 - missing or unusable final render normal/TBN required by the selected space;
 - non-finite, out-of-range, or zero-area Bake UV data on a working triangle;
@@ -307,21 +315,22 @@ The tool stops for:
 - an XAtlas result the current UV writer cannot represent;
 - conflicting automatic lightmap generation described above;
 - GPU mode without an active SM5 rendering RHI;
+- a GPU tile dispatch/readback that exceeds 60 seconds;
 - non-finite ray or coefficient data;
 - source changes during an active job;
+- duplicate fixed output paths or a fixed output occupied by a non-Texture2D;
 - texture or commit failures.
 
 ## Warnings
 
 The tool allows but reports:
 
-- open, multi-shell, boundary, or non-manifold topology;
+- open, boundary, or non-manifold topology;
 - duplicate or zero-area source triangles omitted by the working mesh;
 - sub-texel UV overlap slivers;
 - continuous Bake UV across materially different render TBN seams;
 - zero Padding;
 - additional LODs;
-- UV0 replacement side effects;
 - lightmap-coordinate sharing;
 - Build Settings changed with explicit confirmation;
 - large estimated ray counts.

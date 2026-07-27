@@ -4,10 +4,9 @@ uint SampleCount;
 uint DirectionCount;
 uint DispatchGroupsX;
 uint CoefficientSpace;
-float ThicknessScaleCm;
-float NormalOffsetCm;
-float NearClipCm;
-float FarClipCm;
+float ThicknessScale;
+float NormalOffset;
+float NearClip;
 
 StructuredBuffer<float4> Samples;
 StructuredBuffer<float4> TrianglePositions;
@@ -217,7 +216,7 @@ void MainCS(
 
 	const float3 Origin =
 		SurfacePoint
-		- Normal * rsqrt(NormalLengthSquared) * NormalOffsetCm;
+		- Normal * rsqrt(NormalLengthSquared) * NormalOffset;
 	const float ProjectionWeight = rcp((float)DirectionCount);
 
 	for (uint DirectionIndex = GroupThreadIndex;
@@ -246,11 +245,10 @@ void MainCS(
 		const float MajorAxis = max(
 			abs(ObjectDirection.x),
 			max(abs(ObjectDirection.y), abs(ObjectDirection.z)));
-		const float NearDistance = NearClipCm / MajorAxis;
-		const float MaximumDistance = min(
-			ThicknessScaleCm
-				* (1.0f + RAY_DISTANCE_RELATIVE_TOLERANCE),
-			FarClipCm / MajorAxis);
+		const float NearDistance = NearClip / MajorAxis;
+		const float MaximumDistance =
+			ThicknessScale
+			* (1.0f + RAY_DISTANCE_RELATIVE_TOLERANCE);
 		if (MaximumDistance < NearDistance)
 		{
 			continue;
@@ -262,7 +260,7 @@ void MainCS(
 				ObjectDirection,
 				NearDistance,
 				MaximumDistance)
-			/ ThicknessScaleCm;
+			/ ThicknessScale;
 		Coefficients += float4(
 				3.0f * CoefficientDirection,
 				1.0f)

@@ -13,6 +13,9 @@ class UObject;
 namespace SHThicknessBaker
 {
 
+inline constexpr double NormalizedRayNormalOffset = 1.1e-5;
+inline constexpr double NormalizedRayNearClip = 1.0e-5;
+
 enum class EBakeMode : uint8
 {
 	CPU,
@@ -87,7 +90,7 @@ struct FBakePreparation
 	TArray<FBakeTargetPreparation> Targets;
 	TUniquePtr<UE::Geometry::FDynamicMesh3> CombinedDynamicMesh;
 	FBakeSettings Settings;
-	double ThicknessScaleCm = 0.0;
+	double ThicknessScale = 0.0;
 	TArray<FText> Warnings;
 };
 
