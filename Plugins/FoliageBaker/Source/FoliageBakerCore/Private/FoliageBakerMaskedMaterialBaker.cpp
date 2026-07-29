@@ -1,6 +1,7 @@
 #include "FoliageBakerMaskedMaterialBaker.h"
 
 #include "DynamicMeshBuilder.h"
+#include "Engine/StaticMesh.h"
 #include "EngineModule.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "ExportMaterialProxy.h"
@@ -11,6 +12,7 @@
 #include "Materials/MaterialExpressionCustomOutput.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "MeshMaterialShader.h"
 #include "MeshPassProcessor.h"
 #include "MeshPassProcessor.inl"
@@ -28,8 +30,292 @@
 #include "UnrealClient.h"
 #include "UObject/StrongObjectPtr.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerMaterialOverride, Log, All);
+
+bool FFoliageBakerBakeMaterialOverrideSet::Build(
+	const UStaticMesh& SourceStaticMesh,
+	const TConstArrayView<int32> ReferencedMaterialIndices,
+	const bool bEnableStaticSwitchOverrides,
+	const TConstArrayView<FFoliageBakerBakeStaticSwitchOverride> InStaticSwitchOverrides,
+	FString& OutError)
+{
+	OverriddenMaterialsByIndex.Reset();
+	bEnabled = bEnableStaticSwitchOverrides;
+	StaticSwitchOverrides.Reset();
+	ReferencedMaterialCount = 0;
+	OverriddenMaterialCount = 0;
+	AppliedStaticSwitchOverrideCount = 0;
+	MissingParameterMaterialNames.Reset();
+
+	if (!bEnabled)
+	{
+		return true;
+	}
+	if (InStaticSwitchOverrides.IsEmpty())
+	{
+		UE_LOG(
+			LogFoliageBakerMaterialOverride,
+			Warning,
+			TEXT("Bake Static Switch Override is enabled, but no overrides are configured; Bake will continue unchanged."));
+		return true;
+	}
+
+	TSet<FName> SeenParameterNames;
+	StaticSwitchOverrides.Reserve(InStaticSwitchOverrides.Num());
+	for (int32 OverrideIndex = 0;
+		OverrideIndex < InStaticSwitchOverrides.Num();
+		++OverrideIndex)
+	{
+		const FFoliageBakerBakeStaticSwitchOverride& StaticSwitchOverride =
+			InStaticSwitchOverrides[OverrideIndex];
+		if (StaticSwitchOverride.ParameterName.IsNone())
+		{
+			OutError = FString::Printf(
+				TEXT("Bake Static Switch Override entry %d has a None parameter name."),
+				OverrideIndex);
+			return false;
+		}
+		if (SeenParameterNames.Contains(StaticSwitchOverride.ParameterName))
+		{
+			OutError = FString::Printf(
+				TEXT("Bake Static Switch Override contains duplicate parameter '%s'. Each switch may be configured only once."),
+				*StaticSwitchOverride.ParameterName.ToString());
+			return false;
+		}
+
+		SeenParameterNames.Add(StaticSwitchOverride.ParameterName);
+		StaticSwitchOverrides.Add(StaticSwitchOverride);
+	}
+
+	struct FResolvedMaterialOverride
+	{
+		TStrongObjectPtr<UMaterialInterface> SourceMaterial;
+		TStrongObjectPtr<UMaterialInterface> BakeMaterial;
+	};
+	struct FResolvedStaticSwitchOverride
+	{
+		FMaterialParameterInfo ParameterInfo;
+		bool bValue = false;
+	};
+
+	const TArray<FStaticMaterial>& SourceMaterials =
+		SourceStaticMesh.GetStaticMaterials();
+	TArray<FResolvedMaterialOverride> ResolvedMaterialOverrides;
+	ResolvedMaterialOverrides.Reserve(ReferencedMaterialIndices.Num());
+
+	for (const int32 MaterialIndex : ReferencedMaterialIndices)
+	{
+		if (!SourceMaterials.IsValidIndex(MaterialIndex)
+			|| !SourceMaterials[MaterialIndex].MaterialInterface)
+		{
+			continue;
+		}
+
+		const TStrongObjectPtr<UMaterialInterface> SourceMaterial(
+			SourceMaterials[MaterialIndex].MaterialInterface.Get());
+		const int32 ExistingOverrideIndex =
+			ResolvedMaterialOverrides.IndexOfByPredicate(
+				[&SourceMaterial](const FResolvedMaterialOverride& Candidate)
+				{
+					return Candidate.SourceMaterial == SourceMaterial;
+				});
+		if (ExistingOverrideIndex != INDEX_NONE)
+		{
+			if (ResolvedMaterialOverrides[ExistingOverrideIndex].BakeMaterial)
+			{
+				OverriddenMaterialsByIndex.Add(
+					MaterialIndex,
+					ResolvedMaterialOverrides[ExistingOverrideIndex].BakeMaterial);
+			}
+			continue;
+		}
+
+		++ReferencedMaterialCount;
+		TArray<FMaterialParameterInfo> StaticSwitchParameterInfos;
+		TArray<FGuid> StaticSwitchParameterIds;
+		SourceMaterial->GetAllStaticSwitchParameterInfo(
+			StaticSwitchParameterInfos,
+			StaticSwitchParameterIds);
+
+		TArray<FResolvedStaticSwitchOverride> ResolvedStaticSwitchOverrides;
+		ResolvedStaticSwitchOverrides.Reserve(StaticSwitchOverrides.Num());
+		for (const FFoliageBakerBakeStaticSwitchOverride& StaticSwitchOverride :
+			StaticSwitchOverrides)
+		{
+			const FMaterialParameterInfo* MatchedParameterInfo =
+				StaticSwitchParameterInfos.FindByPredicate(
+					[&StaticSwitchOverride](
+						const FMaterialParameterInfo& ParameterInfo)
+					{
+						return ParameterInfo.Name
+								== StaticSwitchOverride.ParameterName
+							&& ParameterInfo.Association
+								== EMaterialParameterAssociation::GlobalParameter;
+					});
+			if (MatchedParameterInfo)
+			{
+				FResolvedStaticSwitchOverride& ResolvedStaticSwitchOverride =
+					ResolvedStaticSwitchOverrides.AddDefaulted_GetRef();
+				ResolvedStaticSwitchOverride.ParameterInfo =
+					*MatchedParameterInfo;
+				ResolvedStaticSwitchOverride.bValue =
+					StaticSwitchOverride.bValue;
+			}
+			else
+			{
+				MissingParameterMaterialNames
+					.FindOrAdd(StaticSwitchOverride.ParameterName)
+					.Add(SourceMaterial->GetPathName());
+			}
+		}
+
+		FResolvedMaterialOverride& ResolvedOverride =
+			ResolvedMaterialOverrides.AddDefaulted_GetRef();
+		ResolvedOverride.SourceMaterial = SourceMaterial;
+		if (ResolvedStaticSwitchOverrides.IsEmpty())
+		{
+			continue;
+		}
+
+		const TStrongObjectPtr<UMaterialInstanceConstant> TemporaryMaterial(
+			NewObject<UMaterialInstanceConstant>(
+				GetTransientPackage(),
+				NAME_None,
+				RF_Transient));
+		TemporaryMaterial->SetParentEditorOnly(SourceMaterial.Get());
+		for (const FResolvedStaticSwitchOverride& StaticSwitchOverride :
+			ResolvedStaticSwitchOverrides)
+		{
+			TemporaryMaterial->SetStaticSwitchParameterValueEditorOnly(
+				StaticSwitchOverride.ParameterInfo,
+				StaticSwitchOverride.bValue);
+			++AppliedStaticSwitchOverrideCount;
+		}
+		TemporaryMaterial->UpdateStaticPermutation();
+		TemporaryMaterial->PostEditChange();
+
+		ResolvedOverride.BakeMaterial = TemporaryMaterial;
+		OverriddenMaterialsByIndex.Add(
+			MaterialIndex,
+			ResolvedOverride.BakeMaterial);
+		++OverriddenMaterialCount;
+	}
+
+	for (const FFoliageBakerBakeStaticSwitchOverride& StaticSwitchOverride :
+		StaticSwitchOverrides)
+	{
+		TArray<FString>* MissingMaterialNames =
+			MissingParameterMaterialNames.Find(StaticSwitchOverride.ParameterName);
+		if (MissingMaterialNames)
+		{
+			MissingMaterialNames->Sort();
+			UE_LOG(
+				LogFoliageBakerMaterialOverride,
+				Warning,
+				TEXT("Bake static switch '%s' is missing on %d selected-LOD material(s); that switch remains unchanged while any other configured overrides still apply: %s"),
+				*StaticSwitchOverride.ParameterName.ToString(),
+				MissingMaterialNames->Num(),
+				*FString::Join(*MissingMaterialNames, TEXT(", ")));
+		}
+	}
+	if (ReferencedMaterialCount == 0)
+	{
+		UE_LOG(
+			LogFoliageBakerMaterialOverride,
+			Warning,
+			TEXT("Bake static switch overrides could not be applied because no valid selected-LOD source materials were referenced; Bake will continue unchanged."));
+	}
+	return true;
+}
+
+TStrongObjectPtr<UMaterialInterface>
+FFoliageBakerBakeMaterialOverrideSet::ResolveMaterial(
+	const int32 MaterialIndex) const
+{
+	return OverriddenMaterialsByIndex.FindRef(MaterialIndex);
+}
+
+FString FFoliageBakerBakeMaterialOverrideSet::BuildReportDetails() const
+{
+	if (!bEnabled)
+	{
+		return TEXT("disabled");
+	}
+	if (StaticSwitchOverrides.IsEmpty())
+	{
+		return TEXT("enabled; no static switch overrides configured; source assets unchanged");
+	}
+
+	TArray<FString> OverrideDetails;
+	OverrideDetails.Reserve(StaticSwitchOverrides.Num());
+	TArray<FString> MissingDetails;
+	for (const FFoliageBakerBakeStaticSwitchOverride& StaticSwitchOverride :
+		StaticSwitchOverrides)
+	{
+		OverrideDetails.Add(FString::Printf(
+			TEXT("%s=%s"),
+			*StaticSwitchOverride.ParameterName.ToString(),
+			StaticSwitchOverride.bValue ? TEXT("true") : TEXT("false")));
+
+		if (const TArray<FString>* MissingMaterialNames =
+			MissingParameterMaterialNames.Find(
+				StaticSwitchOverride.ParameterName))
+		{
+			MissingDetails.Add(FString::Printf(
+				TEXT("%s missing on: %s"),
+				*StaticSwitchOverride.ParameterName.ToString(),
+				*FString::Join(*MissingMaterialNames, TEXT(", "))));
+		}
+	}
+	if (ReferencedMaterialCount == 0)
+	{
+		MissingDetails.Add(
+			TEXT("no valid selected-LOD source materials were referenced"));
+	}
+
+	const FString WarningDetails = MissingDetails.IsEmpty()
+		? FString()
+		: FString::Printf(
+			TEXT("; warning: %s"),
+			*FString::Join(MissingDetails, TEXT("; ")));
+	return FString::Printf(
+		TEXT("%s; transient child MICs=%d/%d unique selected-LOD materials; applied switch assignments=%d; source assets unchanged%s"),
+		*FString::Join(OverrideDetails, TEXT(", ")),
+		OverriddenMaterialCount,
+		ReferencedMaterialCount,
+		AppliedStaticSwitchOverrideCount,
+		*WarningDetails);
+}
+
 namespace
 {
+	// FoliageBaker bakes a StaticMesh asset rather than a particular component
+	// instance, so PerInstanceCustomData expressions keep their graph defaults.
+	class FFoliageBakerExportMaterialCompiler final
+		: public FExportMaterialCompiler
+	{
+	public:
+		explicit FFoliageBakerExportMaterialCompiler(
+			FMaterialCompiler* InCompiler)
+			: FExportMaterialCompiler(InCompiler)
+		{
+		}
+
+		virtual int32 PerInstanceCustomData(
+			int32,
+			int32 DefaultValueIndex) override
+		{
+			return DefaultValueIndex;
+		}
+
+		virtual int32 PerInstanceCustomData3Vector(
+			int32,
+			int32 DefaultValueIndex) override
+		{
+			return DefaultValueIndex;
+		}
+	};
+
 	class FFoliageBakerDepthCorrectTileVS final : public FMeshMaterialShader
 	{
 		DECLARE_SHADER_TYPE(FFoliageBakerDepthCorrectTileVS, MeshMaterial);
@@ -65,6 +351,93 @@ namespace
 		static bool ShouldCompilePermutation(const FMeshMaterialShaderPermutationParameters& Parameters)
 		{
 			return FFoliageBakerDepthCorrectTileVS::ShouldCompilePermutation(Parameters);
+		}
+	};
+
+	class FFoliageBakerFixedFrameWPOShaderElementData final
+		: public FMeshMaterialShaderElementData
+	{
+	public:
+		uint32 VertexIndexOffset = 0;
+	};
+
+	class FFoliageBakerFixedFrameWPOBoundsVS final
+		: public FMeshMaterialShader
+	{
+		DECLARE_SHADER_TYPE(
+			FFoliageBakerFixedFrameWPOBoundsVS,
+			MeshMaterial);
+
+	public:
+		FFoliageBakerFixedFrameWPOBoundsVS() = default;
+
+		FFoliageBakerFixedFrameWPOBoundsVS(
+			const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+			: FMeshMaterialShader(Initializer)
+		{
+			VertexIndexOffsetParameter.Bind(
+				Initializer.ParameterMap,
+				TEXT("WPOBoundsVertexIndexOffset"));
+		}
+
+		static bool ShouldCompilePermutation(
+			const FMeshMaterialShaderPermutationParameters& Parameters)
+		{
+			return FFoliageBakerDepthCorrectTileVS::ShouldCompilePermutation(
+				Parameters);
+		}
+
+		void GetShaderBindings(
+			const FScene* Scene,
+			const ERHIFeatureLevel::Type FeatureLevel,
+			const FPrimitiveSceneProxy* PrimitiveSceneProxy,
+			const FMaterialRenderProxy& MaterialRenderProxy,
+			const FMaterial& Material,
+			const FMeshMaterialShaderElementData& ShaderElementData,
+			FMeshDrawSingleShaderBindings& ShaderBindings) const
+		{
+			FMeshMaterialShader::GetShaderBindings(
+				Scene,
+				FeatureLevel,
+				PrimitiveSceneProxy,
+				MaterialRenderProxy,
+				Material,
+				ShaderElementData,
+				ShaderBindings);
+			const FFoliageBakerFixedFrameWPOShaderElementData& WPOElementData =
+				static_cast<
+					const FFoliageBakerFixedFrameWPOShaderElementData&>(
+						ShaderElementData);
+			ShaderBindings.Add(
+				VertexIndexOffsetParameter,
+				WPOElementData.VertexIndexOffset);
+		}
+
+	private:
+		LAYOUT_FIELD(FShaderParameter, VertexIndexOffsetParameter);
+	};
+
+	class FFoliageBakerFixedFrameWPOBoundsPS final
+		: public FMeshMaterialShader
+	{
+		DECLARE_SHADER_TYPE(
+			FFoliageBakerFixedFrameWPOBoundsPS,
+			MeshMaterial);
+
+	public:
+		FFoliageBakerFixedFrameWPOBoundsPS() = default;
+
+		FFoliageBakerFixedFrameWPOBoundsPS(
+			const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+			: FMeshMaterialShader(Initializer)
+		{
+		}
+
+		static bool ShouldCompilePermutation(
+			const FMeshMaterialShaderPermutationParameters& Parameters)
+		{
+			return FFoliageBakerFixedFrameWPOBoundsVS::
+				ShouldCompilePermutation(Parameters);
 		}
 	};
 
@@ -157,6 +530,102 @@ namespace
 		FMeshPassProcessorRenderState PassDrawRenderState;
 	};
 
+	class FFoliageBakerFixedFrameWPOBoundsMeshProcessor final
+		: public FMeshPassProcessor
+	{
+	public:
+		FFoliageBakerFixedFrameWPOBoundsMeshProcessor(
+			const ERHIFeatureLevel::Type FeatureLevel,
+			const FSceneView* View,
+			const FMeshPassProcessorRenderState& RenderState,
+			FMeshPassDrawListContext* DrawListContext)
+			: FMeshPassProcessor(
+				TEXT("FoliageBakerFixedFrameWPOBounds"),
+				nullptr,
+				FeatureLevel,
+				View,
+				DrawListContext)
+			, PassDrawRenderState(RenderState)
+		{
+		}
+
+		virtual void AddMeshBatch(
+			const FMeshBatch& MeshBatch,
+			const uint64 BatchElementMask,
+			const FPrimitiveSceneProxy* PrimitiveSceneProxy,
+			const int32 StaticMeshId = -1) override
+		{
+			const FMaterialRenderProxy* MaterialRenderProxy =
+				MeshBatch.MaterialRenderProxy;
+			if (!MaterialRenderProxy || MeshBatch.SegmentIndex < 0)
+			{
+				return;
+			}
+			const FMaterial* Material =
+				MaterialRenderProxy->GetMaterialNoFallback(FeatureLevel);
+			if (!Material || !Material->GetRenderingThreadShaderMap())
+			{
+				return;
+			}
+
+			FMaterialShaderTypes ShaderTypes;
+			ShaderTypes.AddShaderType<
+				FFoliageBakerFixedFrameWPOBoundsVS>();
+			ShaderTypes.AddShaderType<
+				FFoliageBakerFixedFrameWPOBoundsPS>();
+			FMaterialShaders Shaders;
+			if (!Material->TryGetShaders(
+					ShaderTypes,
+					MeshBatch.VertexFactory->GetType(),
+					Shaders))
+			{
+				return;
+			}
+
+			TMeshProcessorShaders<
+				FFoliageBakerFixedFrameWPOBoundsVS,
+				FFoliageBakerFixedFrameWPOBoundsPS> PassShaders;
+			Shaders.TryGetVertexShader(PassShaders.VertexShader);
+			Shaders.TryGetPixelShader(PassShaders.PixelShader);
+			if (!PassShaders.VertexShader.IsValid()
+				|| !PassShaders.PixelShader.IsValid())
+			{
+				return;
+			}
+
+			FFoliageBakerFixedFrameWPOShaderElementData ShaderElementData;
+			ShaderElementData.VertexIndexOffset =
+				static_cast<uint32>(MeshBatch.SegmentIndex);
+			ShaderElementData.InitializeMeshMaterialData(
+				ViewIfDynamicMeshCommand,
+				PrimitiveSceneProxy,
+				MeshBatch,
+				StaticMeshId,
+				false);
+			FMeshDrawCommandSortKey SortKey =
+				FMeshDrawCommandSortKey::Default;
+			SortKey.Generic.VertexShaderHash = 0;
+			SortKey.Generic.PixelShaderHash =
+				static_cast<uint32>(MeshBatch.SegmentIndex);
+			BuildMeshDrawCommands(
+				MeshBatch,
+				BatchElementMask,
+				PrimitiveSceneProxy,
+				*MaterialRenderProxy,
+				*Material,
+				PassDrawRenderState,
+				PassShaders,
+				FM_Solid,
+				CM_None,
+				SortKey,
+				EMeshPassFeatures::Default,
+				ShaderElementData);
+		}
+
+	private:
+		FMeshPassProcessorRenderState PassDrawRenderState;
+	};
+
 	IMPLEMENT_MATERIAL_SHADER_TYPE(
 		,
 		FFoliageBakerDepthCorrectTileVS,
@@ -168,6 +637,18 @@ namespace
 		FFoliageBakerDepthCorrectTilePS,
 		TEXT("/Plugin/FoliageBaker/Private/FoliageBakerDepthCorrectTile.usf"),
 		TEXT("MainPS"),
+		SF_Pixel);
+	IMPLEMENT_MATERIAL_SHADER_TYPE(
+		,
+		FFoliageBakerFixedFrameWPOBoundsVS,
+		TEXT("/Plugin/FoliageBaker/Private/FoliageBakerDepthCorrectTile.usf"),
+		TEXT("FixedFrameWPOBoundsVS"),
+		SF_Vertex);
+	IMPLEMENT_MATERIAL_SHADER_TYPE(
+		,
+		FFoliageBakerFixedFrameWPOBoundsPS,
+		TEXT("/Plugin/FoliageBaker/Private/FoliageBakerDepthCorrectTile.usf"),
+		TEXT("FixedFrameWPOBoundsPS"),
 		SF_Pixel);
 
 	enum class EFoliageBakerMaskedOutput : uint8
@@ -227,6 +708,10 @@ namespace
 		const FGuid& SourceMaterialId,
 		const EFoliageBakerMaskedOutput Output)
 	{
+		// v2: PerInstanceCustomData expressions compile to their graph defaults.
+		// v3: source World Position Offset is compiled and evaluated at Time=0.
+		constexpr uint32 CompilerSemanticVersion = 0x57504F33u; // "WPO3"
+
 		// Each direct proxy needs a stable plugin-specific material id. Its masked
 		// base-pass shader contains the source custom outputs and must not reuse an
 		// ordinary MaterialBaking shader map or the other output mode's shader map.
@@ -236,7 +721,7 @@ namespace
 				SourceMaterialId.A ^ 0x46424231u, // "FBB1"
 				SourceMaterialId.B ^ 0x42415345u, // "BASE"
 				SourceMaterialId.C ^ 0x434F4C4Fu, // "COLO"
-				SourceMaterialId.D ^ 0x52535247u); // "RSRG"
+				SourceMaterialId.D ^ 0x52535247u ^ CompilerSemanticVersion); // "RSRG"
 		}
 		if (Output == EFoliageBakerMaskedOutput::ObjectSpaceNormal)
 		{
@@ -244,7 +729,7 @@ namespace
 				SourceMaterialId.A ^ 0x46424E32u, // "FBN2"
 				SourceMaterialId.B ^ 0x4F424A45u, // "OBJE"
 				SourceMaterialId.C ^ 0x43544E4Fu, // "CTNO"
-				SourceMaterialId.D ^ 0x524D414Cu);
+				SourceMaterialId.D ^ 0x524D414Cu ^ CompilerSemanticVersion);
 		}
 		if (Output == EFoliageBakerMaskedOutput::AmbientOcclusion)
 		{
@@ -252,7 +737,7 @@ namespace
 				SourceMaterialId.A ^ 0x4642414Fu,
 				SourceMaterialId.B ^ 0x414D4249u,
 				SourceMaterialId.C ^ 0x454E544Fu,
-				SourceMaterialId.D ^ 0x43434C55u);
+				SourceMaterialId.D ^ 0x43434C55u ^ CompilerSemanticVersion);
 		}
 		if (Output == EFoliageBakerMaskedOutput::Roughness)
 		{
@@ -260,7 +745,7 @@ namespace
 				SourceMaterialId.A ^ 0x4642524Fu,
 				SourceMaterialId.B ^ 0x5547484Eu,
 				SourceMaterialId.C ^ 0x45535330u,
-				SourceMaterialId.D ^ 0x4D495831u);
+				SourceMaterialId.D ^ 0x4D495831u ^ CompilerSemanticVersion);
 		}
 		if (Output == EFoliageBakerMaskedOutput::Specular)
 		{
@@ -268,7 +753,7 @@ namespace
 				SourceMaterialId.A ^ 0x46425350u,
 				SourceMaterialId.B ^ 0x4543554Cu,
 				SourceMaterialId.C ^ 0x41523030u,
-				SourceMaterialId.D ^ 0x41564731u);
+				SourceMaterialId.D ^ 0x41564731u ^ CompilerSemanticVersion);
 		}
 		if (Output == EFoliageBakerMaskedOutput::Metallic)
 		{
@@ -276,7 +761,7 @@ namespace
 				SourceMaterialId.A ^ 0x46424D45u,
 				SourceMaterialId.B ^ 0x54414C4Cu,
 				SourceMaterialId.C ^ 0x49433030u,
-				SourceMaterialId.D ^ 0x4D495832u);
+				SourceMaterialId.D ^ 0x4D495832u ^ CompilerSemanticVersion);
 		}
 		if (Output == EFoliageBakerMaskedOutput::Emission)
 		{
@@ -284,13 +769,13 @@ namespace
 				SourceMaterialId.A ^ 0x4642454Du,
 				SourceMaterialId.B ^ 0x49535349u,
 				SourceMaterialId.C ^ 0x4F4E3030u,
-				SourceMaterialId.D ^ 0x4D495833u);
+				SourceMaterialId.D ^ 0x4D495833u ^ CompilerSemanticVersion);
 		}
 		return FGuid(
 			SourceMaterialId.A ^ 0x46424932u, // "FBI2"
 			SourceMaterialId.B ^ 0x534F5552u, // "SOUR"
 			SourceMaterialId.C ^ 0x43455452u, // "CETR"
-			SourceMaterialId.D ^ 0x49414E47u); // "IANG"
+			SourceMaterialId.D ^ 0x49414E47u ^ CompilerSemanticVersion); // "IANG"
 	}
 
 	// FExportMaterialProxy caches shaders inside its constructor. A derived proxy
@@ -419,7 +904,7 @@ namespace
 		{
 			if (Property == MP_EmissiveColor)
 			{
-				FExportMaterialCompiler ProxyCompiler(Compiler);
+				FFoliageBakerExportMaterialCompiler ProxyCompiler(Compiler);
 				const uint32 ForceCastFlags = MFCF_ForceCast | MFCF_ExactMatch | MFCF_ReplicateValue;
 				if (Output == EFoliageBakerMaskedOutput::BaseColor)
 				{
@@ -530,7 +1015,13 @@ namespace
 					Compiler->Mul(ObjectSpaceNormal, Compiler->Constant(0.5f)),
 					Compiler->Constant(0.5f));
 			}
-			if (Property == MP_WorldPositionOffset || Property == MP_Displacement)
+			if (Property == MP_WorldPositionOffset)
+			{
+				return MaterialInterface->CompileProperty(
+					Compiler,
+					MP_WorldPositionOffset);
+			}
+			if (Property == MP_Displacement)
 			{
 				return Compiler->Constant(0.0f);
 			}
@@ -544,7 +1035,7 @@ namespace
 				// context as exported color/normal. EarlyOpacityMask is intentionally
 				// compiled by the engine as a custom output; that node's own contract
 				// only permits UV/texture/constant/vertex-color inputs.
-				FExportMaterialCompiler ProxyCompiler(Compiler);
+				FFoliageBakerExportMaterialCompiler ProxyCompiler(Compiler);
 				return MaterialInterface->CompileProperty(&ProxyCompiler, MP_OpacityMask);
 			}
 			if (Property == MP_ShadingModel)
@@ -576,9 +1067,9 @@ namespace
 		virtual FString GetMaterialUsageDescription() const override
 		{
 			return FString::Printf(
-				TEXT("FoliageBakerMasked%s_v3_%s"),
+				TEXT("FoliageBakerMasked%s_v4_%s"),
 				GetMaskedOutputName(Output),
-				*GetNameSafe(MaterialInterface));
+				*GetNameSafe(MaterialInterface.Get()));
 		}
 
 		virtual EMaterialDomain GetMaterialDomain() const override { return MD_Surface; }
@@ -642,7 +1133,7 @@ namespace
 		}
 		virtual bool IsPersistent() const override { return true; }
 		virtual FGuid GetMaterialId() const override { return MaskedOutputMaterialId; }
-		virtual UMaterialInterface* GetMaterialInterface() const override { return MaterialInterface; }
+		virtual UMaterialInterface* GetMaterialInterface() const override { return MaterialInterface.Get(); }
 		virtual bool IsUsedWithStaticLighting() const override { return true; }
 
 		virtual void GatherCustomOutputExpressions(TArray<UMaterialExpressionCustomOutput*>& OutCustomOutputs) const override
@@ -683,8 +1174,8 @@ namespace
 		}
 
 	private:
-		UMaterialInterface* MaterialInterface = nullptr;
-		UMaterial* Material = nullptr;
+		TStrongObjectPtr<UMaterialInterface> MaterialInterface;
+		TStrongObjectPtr<UMaterial> Material;
 		TArray<TObjectPtr<UObject>> ReferencedTextures;
 		TArray<TObjectPtr<UTextureCollection>> ReferencedTextureCollections;
 		FGuid MaskedOutputMaterialId;
@@ -697,29 +1188,34 @@ namespace
 	{
 	public:
 		FFoliageBakerDepthCorrectTileMesh(
-			const FIntPoint& InTextureSize,
 			const FMeshData& InMeshSettings,
-			const TArray<int32>& InRasterSourceTriangleIndices,
-			const FVector& InCaptureRayDirection,
-			const FBoxSphereBounds& InSourceBounds)
-			: MeshSettings(InMeshSettings)
-			, TextureSize(InTextureSize)
-			, RasterSourceTriangleIndices(InRasterSourceTriangleIndices)
-			, CaptureRayDirection(InCaptureRayDirection.GetSafeNormal())
-			, SourceBounds(InSourceBounds)
-			, LCI(new FMeshRenderInfo(
+			const TArray<int32>& InRasterSourceTriangleIndices)
+			: LightMapIndex(InMeshSettings.LightMapIndex)
+			, SourceMesh(InMeshSettings.Mesh)
+			, LCI(MakeUnique<FMeshRenderInfo>(
 				InMeshSettings.LightMap,
 				nullptr,
 				nullptr,
 				InMeshSettings.LightmapResourceCluster))
 		{
-			PopulateWithMeshData();
+			const FPrimitiveData DefaultPrimitiveData;
+			PrimitiveData =
+				InMeshSettings.PrimitiveData.Get(DefaultPrimitiveData);
+			if (PrimitiveData.CustomPrimitiveData)
+			{
+				CustomPrimitiveData.Emplace(
+					*PrimitiveData.CustomPrimitiveData);
+				PrimitiveData.CustomPrimitiveData =
+					&CustomPrimitiveData.GetValue();
+			}
+			PopulateWithMeshData(
+				InMeshSettings,
+				InRasterSourceTriangleIndices);
 		}
 
 		~FFoliageBakerDepthCorrectTileMesh()
 		{
-			delete LCI;
-			LCI = nullptr;
+			LCI.Reset();
 			ENQUEUE_RENDER_COMMAND(ReleaseFoliageBakerDepthCorrectTileResources)(
 				[ResourcesToRelease = MoveTemp(MeshBuilderResources)](FRHICommandListImmediate&) {});
 		}
@@ -736,12 +1232,10 @@ namespace
 			FDynamicMeshBuilder DynamicMeshBuilder(
 				View.GetFeatureLevel(),
 				MAX_STATIC_TEXCOORDS,
-				MeshSettings.LightMapIndex);
+				LightMapIndex);
 			DynamicMeshBuilder.AddVertices(Vertices);
 			DynamicMeshBuilder.AddTriangles(Indices);
 
-			const FPrimitiveData DefaultPrimitiveData;
-			const FPrimitiveData& PrimitiveData = MeshSettings.PrimitiveData.Get(DefaultPrimitiveData);
 			const FPrimitiveUniformShaderParameters PrimitiveParameters =
 				FPrimitiveUniformShaderParametersBuilder{}
 					.Defaults()
@@ -761,10 +1255,10 @@ namespace
 				SDPG_Foreground,
 				true,
 				0,
-				MeshBuilderResources,
-				MeshElement);
+					MeshBuilderResources,
+					MeshElement);
 			LCI->CreatePrecomputedLightingUniformBuffer_RenderingThread(View.GetFeatureLevel());
-			MeshElement.LCI = LCI;
+			MeshElement.LCI = LCI.Get();
 			bMeshElementInitialized = true;
 		}
 
@@ -788,7 +1282,9 @@ namespace
 		}
 
 	private:
-		void PopulateWithMeshData()
+		void PopulateWithMeshData(
+			const FMeshData& MeshSettings,
+			const TArray<int32>& RasterSourceTriangleIndices)
 		{
 			check(MeshSettings.MeshDescription);
 			const FMatrix44f WorldToLocal = MeshSettings.PrimitiveData.IsSet()
@@ -804,20 +1300,11 @@ namespace
 			const TArrayView<const float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns().GetRawArray();
 			const TArrayView<const FVector4f> VertexInstanceColors = Attributes.GetVertexInstanceColors().GetRawArray();
 			const TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
-			const bool bUseCustomUVs = !MeshSettings.CustomTextureCoordinates.IsEmpty();
-			if (bUseCustomUVs)
-			{
-				check(MeshSettings.CustomTextureCoordinates.Num() == VertexInstanceUVs.GetNumElements());
-			}
 
 			constexpr int32 VertexPositionStoredUVChannel = 6;
 			const int32 NumTexcoords = FMath::Min(
 				VertexInstanceUVs.GetNumChannels(),
 				VertexPositionStoredUVChannel);
-			const double DepthRadius = FMath::Max(
-				static_cast<double>(SourceBounds.SphereRadius),
-				UE_DOUBLE_SMALL_NUMBER);
-
 			Vertices.Empty(RawMesh.Triangles().Num() * 3);
 			Indices.Empty(RawMesh.Triangles().Num() * 3);
 			int32 FaceIndex = 0;
@@ -828,31 +1315,16 @@ namespace
 				{
 					for (int32 Corner = 0; Corner < 3; ++Corner)
 					{
-						const int32 CornerIndex = !MeshSettings.bMirrored ? Corner : 2 - Corner;
-						const int32 SourceVertexIndex = FaceIndex * 3 + CornerIndex;
 						const FVertexInstanceID SourceVertexInstanceID =
 							RawMesh.GetTriangleVertexInstance(TriangleID, Corner);
 						const FVertexID SourceVertexID =
 							RawMesh.GetVertexInstanceVertex(SourceVertexInstanceID);
 						const FVector SourcePosition(VertexPositions[SourceVertexID]);
-						const FVector2D BakeUV = bUseCustomUVs
-							? MeshSettings.CustomTextureCoordinates[SourceVertexIndex]
-							: FVector2D(VertexInstanceUVs.Get(
-								SourceVertexInstanceID,
-								MeshSettings.TextureCoordinateIndex));
-						const double SignedDepth = FVector::DotProduct(
-							SourcePosition - SourceBounds.Origin,
-							CaptureRayDirection);
-						const double LinearDepth = FMath::Clamp(
-							(SignedDepth + DepthRadius) / (2.0 * DepthRadius),
-							0.0,
-							1.0);
 
 						FDynamicMeshVertex& Vertex = Vertices.AddDefaulted_GetRef();
-						Vertex.Position = WorldToLocal.TransformPosition(FVector3f(
-							static_cast<float>(BakeUV.X * TextureSize.X),
-							static_cast<float>(BakeUV.Y * TextureSize.Y),
-							static_cast<float>(1.0 - LinearDepth)));
+						Vertex.Position =
+							WorldToLocal.TransformPosition(
+								FVector3f(SourcePosition));
 
 						const FVector3f TangentX = WorldToLocal.TransformVector(
 							VertexInstanceTangents[SourceVertexInstanceID]);
@@ -884,14 +1356,186 @@ namespace
 			}
 		}
 
-		const FMeshData& MeshSettings;
-		FIntPoint TextureSize;
-		TArray<int32> RasterSourceTriangleIndices;
-		FVector CaptureRayDirection;
-		FBoxSphereBounds SourceBounds;
+		int32 LightMapIndex = 0;
+		FPrimitiveData PrimitiveData;
+		TOptional<FCustomPrimitiveData> CustomPrimitiveData;
+		TStrongObjectPtr<const UStaticMesh> SourceMesh;
 		TArray<FDynamicMeshVertex> Vertices;
 		TArray<uint32> Indices;
-		FMeshRenderInfo* LCI = nullptr;
+		TUniquePtr<FMeshRenderInfo> LCI;
+		FMeshBatch MeshElement;
+		FMeshBuilderResources MeshBuilderResources;
+		bool bMeshElementInitialized = false;
+	};
+
+	class FFoliageBakerFixedFrameWPOMesh final
+	{
+	public:
+		FFoliageBakerFixedFrameWPOMesh(
+			const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>&
+				SourceTriangles,
+			const int32 MaterialIndex,
+			const FBoxSphereBounds& PrimitiveBounds)
+			: PrimitiveData(PrimitiveBounds)
+			, LCI(MakeUnique<FMeshRenderInfo>(
+				nullptr,
+				nullptr,
+				nullptr,
+				nullptr))
+		{
+			Populate(SourceTriangles, MaterialIndex);
+		}
+
+		~FFoliageBakerFixedFrameWPOMesh()
+		{
+			LCI.Reset();
+			ENQUEUE_RENDER_COMMAND(ReleaseFoliageBakerFixedFrameWPOResources)(
+				[ResourcesToRelease = MoveTemp(MeshBuilderResources)](
+					FRHICommandListImmediate&) {});
+		}
+
+		void PrepareMeshElement(
+			const FSceneView& View,
+			FMaterialRenderProxy& InitialMaterialRenderProxy)
+		{
+			if (bMeshElementInitialized)
+			{
+				return;
+			}
+
+			FDynamicMeshBuilder DynamicMeshBuilder(
+				View.GetFeatureLevel(),
+				MAX_STATIC_TEXCOORDS,
+				0);
+			DynamicMeshBuilder.AddVertices(Vertices);
+			DynamicMeshBuilder.AddTriangles(Indices);
+
+			const FPrimitiveUniformShaderParameters PrimitiveParameters =
+				FPrimitiveUniformShaderParametersBuilder{}
+					.Defaults()
+					.LocalToWorld(PrimitiveData.LocalToWorld)
+					.ActorWorldPosition(PrimitiveData.ActorPosition)
+					.WorldBounds(PrimitiveData.WorldBounds)
+					.LocalBounds(PrimitiveData.LocalBounds)
+					.PreSkinnedLocalBounds(PrimitiveData.PreSkinnedLocalBounds)
+					.ReceivesDecals(false)
+					.OutputVelocity(false)
+					.Build();
+
+			DynamicMeshBuilder.GetMeshElement(
+				PrimitiveParameters,
+				&InitialMaterialRenderProxy,
+				SDPG_Foreground,
+				true,
+				0,
+				MeshBuilderResources,
+				MeshElement);
+			LCI->CreatePrecomputedLightingUniformBuffer_RenderingThread(
+				View.GetFeatureLevel());
+			MeshElement.LCI = LCI.Get();
+			MeshElement.Type = PT_PointList;
+			for (FMeshBatchElement& BatchElement : MeshElement.Elements)
+			{
+				BatchElement.NumPrimitives = Vertices.Num();
+				BatchElement.PrimitiveIdMode = PrimID_ForceZero;
+			}
+			bMeshElementInitialized = true;
+		}
+
+		FMeshBatch MakeMeshBatch(
+			FMaterialRenderProxy& MaterialRenderProxy,
+			const int32 VertexIndexOffset) const
+		{
+			FMeshBatch Result = MeshElement;
+			Result.MaterialRenderProxy = &MaterialRenderProxy;
+			Result.SegmentIndex = VertexIndexOffset;
+			return Result;
+		}
+
+		bool HasGeometry() const
+		{
+			return !Vertices.IsEmpty();
+		}
+
+		const TArray<int32>& GetSourceVertexIndices() const
+		{
+			return SourceVertexIndices;
+		}
+
+	private:
+		void Populate(
+			const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>&
+				SourceTriangles,
+			const int32 MaterialIndex)
+		{
+			using UE::FoliageBaker::PlaneCover::FSourceTriangle;
+			constexpr int32 VertexPositionStoredUVChannel = 6;
+			for (int32 TriangleIndex = 0;
+				TriangleIndex < SourceTriangles.Num();
+				++TriangleIndex)
+			{
+				const FSourceTriangle& SourceTriangle =
+					SourceTriangles[TriangleIndex];
+				if (SourceTriangle.MaterialIndex != MaterialIndex)
+				{
+					continue;
+				}
+
+				const int32 NumTexcoords = FMath::Min(
+					SourceTriangle.NumUVChannels,
+					VertexPositionStoredUVChannel);
+				for (int32 Corner = 0; Corner < 3; ++Corner)
+				{
+					const FVector& SourcePosition =
+						SourceTriangle.Vertices[Corner];
+					FDynamicMeshVertex& Vertex =
+						Vertices.AddDefaulted_GetRef();
+					Vertex.Position = FVector3f(SourcePosition);
+
+					const FVector3f TangentX(
+						SourceTriangle.VertexTangents[Corner]);
+					const FVector3f TangentZ(
+						SourceTriangle.VertexNormals[Corner]);
+					const FVector3f TangentY =
+						FVector3f::CrossProduct(TangentZ, TangentX)
+							.GetSafeNormal()
+						* SourceTriangle.BinormalSigns[Corner];
+					Vertex.SetTangents(TangentX, TangentY, TangentZ);
+
+					for (int32 UVChannel = 0;
+						UVChannel < NumTexcoords;
+						++UVChannel)
+					{
+						Vertex.TextureCoordinate[UVChannel] =
+							SourceTriangle.UVChannels[UVChannel][Corner];
+					}
+					for (int32 UVChannel = NumTexcoords;
+						UVChannel < VertexPositionStoredUVChannel;
+						++UVChannel)
+					{
+						Vertex.TextureCoordinate[UVChannel] =
+							Vertex.TextureCoordinate[
+								FMath::Max(NumTexcoords - 1, 0)];
+					}
+					Vertex.TextureCoordinate[6] =
+						FVector2f(SourcePosition.X, SourcePosition.Y);
+					Vertex.TextureCoordinate[7] = FVector2f(
+						SourcePosition.Z,
+						static_cast<float>(TriangleIndex + 1));
+					Vertex.Color = FLinearColor(
+						SourceTriangle.VertexColors[Corner]).ToFColor(true);
+
+					Indices.Add(Indices.Num());
+					SourceVertexIndices.Add(TriangleIndex * 3 + Corner);
+				}
+			}
+		}
+
+		FPrimitiveData PrimitiveData;
+		TArray<FDynamicMeshVertex> Vertices;
+		TArray<uint32> Indices;
+		TArray<int32> SourceVertexIndices;
+		TUniquePtr<FMeshRenderInfo> LCI;
 		FMeshBatch MeshElement;
 		FMeshBuilderResources MeshBuilderResources;
 		bool bMeshElementInitialized = false;
@@ -918,6 +1562,33 @@ namespace
 		FFoliageBakerMaskedMaterialProxy* EmissionProxy = nullptr;
 	};
 
+	struct FFoliageBakerFixedFrameWPOMaterialResources
+	{
+		TUniquePtr<FFoliageBakerFixedFrameWPOMesh> Mesh;
+		FFoliageBakerMaskedMaterialProxy* MaterialProxy = nullptr;
+		int32 VertexIndexOffset = 0;
+	};
+
+	TStrongObjectPtr<UTextureRenderTarget2D> CreateFixedFrameWPOPositionTarget(
+		const FIntPoint& TextureSize)
+	{
+		TStrongObjectPtr<UTextureRenderTarget2D> RenderTarget(
+			NewObject<UTextureRenderTarget2D>(GetTransientPackage()));
+		if (!RenderTarget.IsValid())
+		{
+			return RenderTarget;
+		}
+		RenderTarget->ClearColor = FLinearColor::Transparent;
+		RenderTarget->TargetGamma = 0.0f;
+		RenderTarget->InitCustomFormat(
+			TextureSize.X,
+			TextureSize.Y,
+			PF_A32B32G32R32F,
+			true);
+		RenderTarget->UpdateResourceImmediate(true);
+		return RenderTarget;
+	}
+
 	TStrongObjectPtr<UTextureRenderTarget2D> CreateDepthCorrectTileRenderTarget(
 		const FIntPoint& TextureSize,
 		const FLinearColor& ClearColor,
@@ -940,15 +1611,71 @@ namespace
 		return RenderTarget;
 	}
 
-	FMatrix BuildDepthCorrectTileProjectionMatrix(const FIntPoint& TextureSize)
+	FMatrix BuildDepthCorrectTileViewRotationMatrix(
+		const FFoliageBakerDepthCorrectTileRequest& Request)
 	{
-		const double Width = FMath::Max(TextureSize.X, 1);
-		const double Height = FMath::Max(TextureSize.Y, 1);
+		const FVector AxisU = Request.ProjectionAxisU.GetSafeNormal();
+		const FVector AxisV = Request.ProjectionAxisV.GetSafeNormal();
+		const FVector DepthAxis =
+			Request.CaptureRayDirection.GetSafeNormal();
+		return FMatrix(
+			FPlane(AxisU.X, AxisV.X, DepthAxis.X, 0.0),
+			FPlane(AxisU.Y, AxisV.Y, DepthAxis.Y, 0.0),
+			FPlane(AxisU.Z, AxisV.Z, DepthAxis.Z, 0.0),
+			FPlane(0.0, 0.0, 0.0, 1.0));
+	}
+
+	FVector BuildDepthCorrectTileViewOrigin(
+		const FFoliageBakerDepthCorrectTileRequest& Request)
+	{
+		const double DepthRadius = FMath::Max(
+			static_cast<double>(Request.SourceBounds.SphereRadius),
+			UE_DOUBLE_SMALL_NUMBER);
+		return Request.SourceBounds.Origin
+			- Request.CaptureRayDirection.GetSafeNormal()
+				* (2.0 * DepthRadius);
+	}
+
+	FMatrix BuildDepthCorrectTileProjectionMatrix(
+		const FFoliageBakerDepthCorrectTileRequest& Request,
+		const FVector& ViewOrigin)
+	{
+		const FVector AxisU = Request.ProjectionAxisU.GetSafeNormal();
+		const FVector AxisV = Request.ProjectionAxisV.GetSafeNormal();
+		const FVector DepthAxis =
+			Request.CaptureRayDirection.GetSafeNormal();
+		const double UExtent = FMath::Max(
+			Request.ProjectionMaxU - Request.ProjectionMinU,
+			UE_DOUBLE_SMALL_NUMBER);
+		const double VExtent = FMath::Max(
+			Request.ProjectionMaxV - Request.ProjectionMinV,
+			UE_DOUBLE_SMALL_NUMBER);
+		const double ViewMinU = Request.ProjectionMinU
+			- FVector::DotProduct(ViewOrigin, AxisU);
+		const double ViewMinV = Request.ProjectionMinV
+			- FVector::DotProduct(ViewOrigin, AxisV);
+		const double DepthRadius = FMath::Max(
+			static_cast<double>(Request.SourceBounds.SphereRadius),
+			UE_DOUBLE_SMALL_NUMBER);
+		const double SourceCenterDepth = FVector::DotProduct(
+			Request.SourceBounds.Origin - ViewOrigin,
+			DepthAxis);
+		const double VScale = Request.bFlipProjectionV
+			? 2.0 / VExtent
+			: -2.0 / VExtent;
+		const double VOffset = Request.bFlipProjectionV
+			? -1.0 - 2.0 * ViewMinV / VExtent
+			: 1.0 + 2.0 * ViewMinV / VExtent;
+
 		return AdjustProjectionMatrixForRHI(FMatrix(
-			FPlane(2.0 / Width, 0.0, 0.0, 0.0),
-			FPlane(0.0, -2.0 / Height, 0.0, 0.0),
-			FPlane(0.0, 0.0, 1.0, 0.0),
-			FPlane(-1.0, 1.0, 0.0, 1.0)));
+			FPlane(2.0 / UExtent, 0.0, 0.0, 0.0),
+			FPlane(0.0, VScale, 0.0, 0.0),
+			FPlane(0.0, 0.0, -1.0 / (2.0 * DepthRadius), 0.0),
+			FPlane(
+				-1.0 - 2.0 * ViewMinU / UExtent,
+				VOffset,
+				0.5 + SourceCenterDepth / (2.0 * DepthRadius),
+				1.0)));
 	}
 
 	void AddDepthCorrectTileDrawPass(
@@ -1001,6 +1728,489 @@ namespace
 			true);
 	}
 
+	void AddFixedFrameWPOBoundsDrawPass(
+		FRDGBuilder& GraphBuilder,
+		FRDGTextureRef PositionTarget,
+		const FMeshPassProcessorRenderState& RenderState,
+		const FSceneView& View,
+		const TRDGUniformBufferRef<FSceneUniformParameters>& SceneUniformBuffer,
+		const TRDGUniformBufferRef<FInstanceCullingGlobalUniforms>&
+			InstanceCullingUniformBuffer,
+		const FIntRect& ViewRect,
+		const TArray<FMeshBatch>& MeshBatches)
+	{
+		FFoliageBakerDepthCorrectTilePassParameters* PassParameters =
+			GraphBuilder.AllocParameters<
+				FFoliageBakerDepthCorrectTilePassParameters>();
+		PassParameters->View.View = View.ViewUniformBuffer;
+		PassParameters->View.InstancedView =
+			View.GetInstancedViewUniformBuffer();
+		PassParameters->InstanceCullingDrawParams.Scene =
+			SceneUniformBuffer;
+		PassParameters->InstanceCullingDrawParams.InstanceCulling =
+			InstanceCullingUniformBuffer;
+		PassParameters->RenderTargets[0] = FRenderTargetBinding(
+			PositionTarget,
+			ERenderTargetLoadAction::EClear);
+
+		AddDrawDynamicMeshPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("FoliageBaker.FixedFrameWPOBounds"),
+			PassParameters,
+			View,
+			ViewRect,
+			[&View, RenderState, &MeshBatches](
+				FDynamicPassMeshDrawListContext* DynamicMeshPassContext)
+			{
+				FFoliageBakerFixedFrameWPOBoundsMeshProcessor
+					PassMeshProcessor(
+						View.GetFeatureLevel(),
+						&View,
+						RenderState,
+						DynamicMeshPassContext);
+				for (const FMeshBatch& MeshBatch : MeshBatches)
+				{
+					PassMeshProcessor.AddMeshBatch(
+						MeshBatch,
+						~0ull,
+						nullptr);
+				}
+			},
+			true,
+			true);
+	}
+
+}
+
+bool FFoliageBakerMaskedMaterialBaker::
+	EvaluateFixedFrameWorldPositionOffset(
+		const UStaticMesh& SourceStaticMesh,
+		const FBoxSphereBounds& PrimitiveBounds,
+		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>&
+			SourceTriangles,
+		const FFoliageBakerBakeMaterialOverrideSet& BakeMaterialOverrides,
+		FFoliageBakerFixedFrameWPOResult& OutResult,
+		FString* OutError)
+{
+	using UE::FoliageBaker::PlaneCover::FSourceTriangle;
+	OutResult = FFoliageBakerFixedFrameWPOResult();
+	if (OutError)
+	{
+		OutError->Reset();
+	}
+	if (!IsInGameThread())
+	{
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds evaluation must run on the game thread."));
+		return false;
+	}
+	if (SourceTriangles.IsEmpty()
+		|| PrimitiveBounds.SphereRadius <= UE_DOUBLE_SMALL_NUMBER)
+	{
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds evaluation received invalid source geometry."));
+		return false;
+	}
+
+	TSet<int32> ReferencedMaterialSet;
+	for (const FSourceTriangle& SourceTriangle : SourceTriangles)
+	{
+		ReferencedMaterialSet.Add(SourceTriangle.MaterialIndex);
+	}
+	TArray<int32> ReferencedMaterialIndices = ReferencedMaterialSet.Array();
+	ReferencedMaterialIndices.Sort();
+
+	const TArray<FStaticMaterial>& SourceMaterials =
+		SourceStaticMesh.GetStaticMaterials();
+	struct FResolvedMaterial
+	{
+		int32 MaterialIndex = INDEX_NONE;
+		TStrongObjectPtr<UMaterialInterface> MaterialInterface;
+	};
+	TArray<FResolvedMaterial> ResolvedMaterials;
+	ResolvedMaterials.Reserve(ReferencedMaterialIndices.Num());
+	for (const int32 MaterialIndex : ReferencedMaterialIndices)
+	{
+		if (!SourceMaterials.IsValidIndex(MaterialIndex))
+		{
+			const FString Message = FString::Printf(
+				TEXT("Fixed-frame WPO bounds evaluation references invalid material index %d."),
+				MaterialIndex);
+			SetMaskedBakeError(OutError, *Message);
+			return false;
+		}
+
+		FResolvedMaterial& ResolvedMaterial =
+			ResolvedMaterials.AddDefaulted_GetRef();
+		ResolvedMaterial.MaterialIndex = MaterialIndex;
+		ResolvedMaterial.MaterialInterface =
+			BakeMaterialOverrides.ResolveMaterial(MaterialIndex);
+		if (!ResolvedMaterial.MaterialInterface)
+		{
+			ResolvedMaterial.MaterialInterface.Reset(
+				SourceMaterials[MaterialIndex].MaterialInterface.Get());
+		}
+		if (!ResolvedMaterial.MaterialInterface)
+		{
+			ResolvedMaterial.MaterialInterface.Reset(
+				UMaterial::GetDefaultMaterial(MD_Surface));
+		}
+	}
+
+	TArray<FFoliageBakerFixedFrameWPOMaterialResources> Resources;
+	Resources.Reserve(ResolvedMaterials.Num());
+	TArray<int32> OutputToSourceVertexIndex;
+	const int64 SourceVertexCount64 =
+		static_cast<int64>(SourceTriangles.Num()) * 3;
+	if (SourceVertexCount64 <= 0 || SourceVertexCount64 > MAX_int32)
+	{
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds source vertex count is unsupported."));
+		return false;
+	}
+	OutputToSourceVertexIndex.Reserve(
+		static_cast<int32>(SourceVertexCount64));
+
+	auto ReleaseResources = [&Resources]()
+	{
+		for (FFoliageBakerFixedFrameWPOMaterialResources& Resource :
+			Resources)
+		{
+			if (Resource.MaterialProxy)
+			{
+				FMaterial::DeferredDelete(Resource.MaterialProxy);
+				Resource.MaterialProxy = nullptr;
+			}
+			Resource.Mesh.Reset();
+		}
+		Resources.Reset();
+	};
+	auto FinishProxy = [OutError](
+		FFoliageBakerMaskedMaterialProxy& Proxy) -> bool
+	{
+		Proxy.FinishCompilation();
+		if (Proxy.DidCacheShadersSucceed()
+			&& Proxy.GetGameThreadShaderMap())
+		{
+			return true;
+		}
+		FString CompileErrorDetails;
+#if WITH_EDITOR
+		const TArray<FString>& CompileErrors = Proxy.GetCompileErrors();
+		if (!CompileErrors.IsEmpty())
+		{
+			CompileErrorDetails = FString::Printf(
+				TEXT(" Details: %s"),
+				*FString::Join(CompileErrors, TEXT(" | ")));
+		}
+#endif
+		const FString Message = FString::Printf(
+			TEXT("Fixed-frame WPO bounds shader compilation failed.%s"),
+			*CompileErrorDetails);
+		SetMaskedBakeError(OutError, *Message);
+		return false;
+	};
+
+	for (const FResolvedMaterial& ResolvedMaterial : ResolvedMaterials)
+	{
+		FFoliageBakerFixedFrameWPOMaterialResources& Resource =
+			Resources.AddDefaulted_GetRef();
+		Resource.Mesh = MakeUnique<FFoliageBakerFixedFrameWPOMesh>(
+			SourceTriangles,
+			ResolvedMaterial.MaterialIndex,
+			PrimitiveBounds);
+		if (!Resource.Mesh->HasGeometry())
+		{
+			continue;
+		}
+		Resource.VertexIndexOffset = OutputToSourceVertexIndex.Num();
+		OutputToSourceVertexIndex.Append(
+			Resource.Mesh->GetSourceVertexIndices());
+		Resource.MaterialProxy =
+			new FFoliageBakerMaskedMaterialProxy(
+				*ResolvedMaterial.MaterialInterface,
+				EFoliageBakerMaskedOutput::SourceTriangleId);
+		if (!FinishProxy(*Resource.MaterialProxy))
+		{
+			FlushRenderingCommands();
+			ReleaseResources();
+			return false;
+		}
+	}
+
+	const int32 OutputVertexCount = OutputToSourceVertexIndex.Num();
+	constexpr int32 MaxExactFloatOutputIndex = 1 << 24;
+	if (OutputVertexCount <= 0
+		|| OutputVertexCount != SourceVertexCount64
+		|| OutputVertexCount > MaxExactFloatOutputIndex)
+	{
+		FlushRenderingCommands();
+		ReleaseResources();
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds could not map every source vertex to an exact GPU output index."));
+		return false;
+	}
+
+	const int32 MaxTextureDimension =
+		static_cast<int32>(GetMax2DTextureDimension());
+	const int32 TextureWidth = FMath::Min(
+		MaxTextureDimension,
+		FMath::Max(
+			1,
+			FMath::CeilToInt(
+				FMath::Sqrt(static_cast<double>(OutputVertexCount)))));
+	const int32 TextureHeight =
+		FMath::DivideAndRoundUp(OutputVertexCount, TextureWidth);
+	if (TextureHeight <= 0 || TextureHeight > MaxTextureDimension)
+	{
+		FlushRenderingCommands();
+		ReleaseResources();
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds output exceeds the maximum 2D texture size."));
+		return false;
+	}
+
+	const FIntPoint TextureSize(TextureWidth, TextureHeight);
+	TStrongObjectPtr<UTextureRenderTarget2D> PositionTarget =
+		CreateFixedFrameWPOPositionTarget(TextureSize);
+	if (!PositionTarget.IsValid())
+	{
+		FlushRenderingCommands();
+		ReleaseResources();
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds could not allocate its RGBA32F render target."));
+		return false;
+	}
+
+	FFoliageBakerDepthCorrectTileRequest ViewRequest;
+	ViewRequest.CaptureRayDirection = FVector::ForwardVector;
+	ViewRequest.ProjectionAxisU = FVector::RightVector;
+	ViewRequest.ProjectionAxisV = FVector::UpVector;
+	ViewRequest.SourceBounds = PrimitiveBounds;
+	const FVector BoundsOrigin = PrimitiveBounds.Origin;
+	const FVector BoundsExtent = PrimitiveBounds.BoxExtent;
+	const double ExtentU = FMath::Max(
+		static_cast<double>(BoundsExtent.Y),
+		1.0);
+	const double ExtentV = FMath::Max(
+		static_cast<double>(BoundsExtent.Z),
+		1.0);
+	const double CenterU = FVector::DotProduct(
+		BoundsOrigin,
+		ViewRequest.ProjectionAxisU);
+	const double CenterV = FVector::DotProduct(
+		BoundsOrigin,
+		ViewRequest.ProjectionAxisV);
+	ViewRequest.ProjectionMinU = CenterU - ExtentU;
+	ViewRequest.ProjectionMaxU = CenterU + ExtentU;
+	ViewRequest.ProjectionMinV = CenterV - ExtentV;
+	ViewRequest.ProjectionMaxV = CenterV + ExtentV;
+	const FVector ViewOrigin =
+		BuildDepthCorrectTileViewOrigin(ViewRequest);
+	const FMatrix ViewRotationMatrix =
+		BuildDepthCorrectTileViewRotationMatrix(ViewRequest);
+	const FMatrix ProjectionMatrix =
+		BuildDepthCorrectTileProjectionMatrix(ViewRequest, ViewOrigin);
+
+	UTextureRenderTarget2D* PositionTargetPtr = PositionTarget.Get();
+	TArray<FFoliageBakerFixedFrameWPOMaterialResources>* ResourcesPtr =
+		&Resources;
+	ENQUEUE_RENDER_COMMAND(RenderFoliageBakerFixedFrameWPOBounds)(
+		[PositionTargetPtr,
+		 ResourcesPtr,
+		 TextureSize,
+		 ViewOrigin,
+		 ViewRotationMatrix,
+		 ProjectionMatrix](FRHICommandListImmediate& RHICmdList)
+		{
+			FTextureRenderTargetResource* PositionResource =
+				PositionTargetPtr->GetRenderTargetResource();
+			FSceneViewFamilyContext ViewFamily(
+				FSceneViewFamily::ConstructionValues(
+					PositionResource,
+					nullptr,
+					FEngineShowFlags(ESFIM_Game))
+				.SetTime(
+					FGameTime::CreateDilated(
+						0.0,
+						0.0f,
+						0.0,
+						0.0f)));
+			FSceneViewInitOptions ViewInitOptions;
+			ViewInitOptions.ViewFamily = &ViewFamily;
+			ViewInitOptions.SetViewRectangle(
+				FIntRect(FIntPoint::ZeroValue, TextureSize));
+			ViewInitOptions.ViewOrigin = ViewOrigin;
+			ViewInitOptions.ViewRotationMatrix = ViewRotationMatrix;
+			ViewInitOptions.ProjectionMatrix = ProjectionMatrix;
+			ViewInitOptions.BackgroundColor = FLinearColor::Transparent;
+			GetRendererModule().CreateAndInitSingleView(
+				RHICmdList,
+				&ViewFamily,
+				&ViewInitOptions);
+			const FSceneView& View = *ViewFamily.Views[0];
+
+			TArray<FMeshBatch> MeshBatches;
+			MeshBatches.Reserve(ResourcesPtr->Num());
+			for (FFoliageBakerFixedFrameWPOMaterialResources& Resource :
+				*ResourcesPtr)
+			{
+				if (!Resource.MaterialProxy
+					|| !Resource.Mesh
+					|| !Resource.Mesh->HasGeometry())
+				{
+					continue;
+				}
+				Resource.MaterialProxy->UpdateUniformExpressionCacheIfNeeded(
+					RHICmdList,
+					View.GetFeatureLevel());
+				Resource.Mesh->PrepareMeshElement(
+					View,
+					*Resource.MaterialProxy);
+				MeshBatches.Add(Resource.Mesh->MakeMeshBatch(
+					*Resource.MaterialProxy,
+					Resource.VertexIndexOffset));
+			}
+
+			FRDGBuilder GraphBuilder(RHICmdList);
+			GetRendererModule().InitializeSystemTextures(RHICmdList);
+			FRDGSystemTextures::Create(GraphBuilder);
+			FRDGTextureRef PositionTexture =
+				PositionResource->GetRenderTargetTexture(GraphBuilder);
+			if (!MeshBatches.IsEmpty())
+			{
+				FSceneUniformBuffer* SceneUniforms =
+					GetRendererModule()
+						.CreateSinglePrimitiveSceneUniformBuffer(
+							GraphBuilder,
+							View.GetFeatureLevel(),
+							MeshBatches[0]);
+				const TRDGUniformBufferRef<FSceneUniformParameters>
+					SceneUniformBuffer =
+						SceneUniforms->GetBuffer(GraphBuilder);
+				const TRDGUniformBufferRef<FInstanceCullingGlobalUniforms>
+					InstanceCullingUniformBuffer =
+						FInstanceCullingContext::
+							CreateDummyInstanceCullingUniformBuffer(
+								GraphBuilder);
+
+				FMeshPassProcessorRenderState RenderState;
+				RenderState.SetBlendState(
+					TStaticBlendState<CW_RGBA>::GetRHI());
+				RenderState.SetDepthStencilState(
+					TStaticDepthStencilState<false, CF_Always>::GetRHI());
+				AddFixedFrameWPOBoundsDrawPass(
+					GraphBuilder,
+					PositionTexture,
+					RenderState,
+					View,
+					SceneUniformBuffer,
+					InstanceCullingUniformBuffer,
+					FIntRect(FIntPoint::ZeroValue, TextureSize),
+					MeshBatches);
+			}
+			GraphBuilder.Execute();
+		});
+
+	FlushRenderingCommands();
+	TArray<FLinearColor> PositionPixels;
+	FReadSurfaceDataFlags ReadFlags(RCM_MinMax);
+	ReadFlags.SetLinearToGamma(false);
+	const int32 ExpectedPixelCount = TextureSize.X * TextureSize.Y;
+	const bool bReadSucceeded =
+		PositionTarget
+			->GameThread_GetRenderTargetResource()
+			->ReadLinearColorPixels(PositionPixels, ReadFlags)
+		&& PositionPixels.Num() == ExpectedPixelCount;
+	ReleaseResources();
+	if (!bReadSucceeded)
+	{
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds GPU readback failed or returned an invalid size."));
+		return false;
+	}
+
+	OutResult.Triangles = SourceTriangles;
+	TBitArray<> SeenOutputVertices;
+	SeenOutputVertices.Init(false, OutputVertexCount);
+	FBox FixedFrameBounds(ForceInit);
+	for (const FLinearColor& PositionPixel : PositionPixels)
+	{
+		if (PositionPixel.A < 0.5f)
+		{
+			continue;
+		}
+		const int32 OutputIndex =
+			FMath::RoundToInt(PositionPixel.A) - 1;
+		if (!SeenOutputVertices.IsValidIndex(OutputIndex)
+			|| SeenOutputVertices[OutputIndex])
+		{
+			OutResult = FFoliageBakerFixedFrameWPOResult();
+			SetMaskedBakeError(
+				OutError,
+				TEXT("Fixed-frame WPO bounds GPU output contained an invalid or duplicate vertex index."));
+			return false;
+		}
+
+		const FVector Position(
+			PositionPixel.R,
+			PositionPixel.G,
+			PositionPixel.B);
+		if (!FMath::IsFinite(Position.X)
+			|| !FMath::IsFinite(Position.Y)
+			|| !FMath::IsFinite(Position.Z))
+		{
+			OutResult = FFoliageBakerFixedFrameWPOResult();
+			SetMaskedBakeError(
+				OutError,
+				TEXT("Fixed-frame WPO produced a non-finite vertex position."));
+			return false;
+		}
+
+		const int32 SourceVertexIndex =
+			OutputToSourceVertexIndex[OutputIndex];
+		const int32 SourceTriangleIndex = SourceVertexIndex / 3;
+		const int32 SourceCorner = SourceVertexIndex % 3;
+		if (!OutResult.Triangles.IsValidIndex(SourceTriangleIndex))
+		{
+			OutResult = FFoliageBakerFixedFrameWPOResult();
+			SetMaskedBakeError(
+				OutError,
+				TEXT("Fixed-frame WPO output mapped outside the source triangle array."));
+			return false;
+		}
+		OutResult.Triangles[SourceTriangleIndex].Vertices[SourceCorner] =
+			Position;
+		FixedFrameBounds += Position;
+		SeenOutputVertices[OutputIndex] = true;
+	}
+
+	if (SeenOutputVertices.CountSetBits() != OutputVertexCount
+		|| !FixedFrameBounds.IsValid)
+	{
+		OutResult = FFoliageBakerFixedFrameWPOResult();
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO bounds did not receive every source vertex."));
+		return false;
+	}
+	OutResult.Bounds = FBoxSphereBounds(FixedFrameBounds);
+	if (OutResult.Bounds.SphereRadius <= UE_DOUBLE_SMALL_NUMBER)
+	{
+		OutResult = FFoliageBakerFixedFrameWPOResult();
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO collapsed the selected LOD to a zero-size bounds."));
+		return false;
+	}
+	return true;
 }
 
 bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
@@ -1025,6 +2235,14 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 		|| ExpectedPixelCount <= 0
 		|| ExpectedPixelCount > MAX_int32
 		|| Request.CaptureRayDirection.IsNearlyZero()
+		|| Request.ProjectionAxisU.IsNearlyZero()
+		|| Request.ProjectionAxisV.IsNearlyZero()
+		|| FMath::IsNearlyEqual(
+			Request.ProjectionMaxU,
+			Request.ProjectionMinU)
+		|| FMath::IsNearlyEqual(
+			Request.ProjectionMaxV,
+			Request.ProjectionMinV)
 		|| Request.SourceBounds.SphereRadius <= UE_DOUBLE_SMALL_NUMBER
 		|| Request.Materials.IsEmpty())
 	{
@@ -1180,11 +2398,8 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	{
 		FFoliageBakerDepthCorrectTileMaterialResources& Resource = Resources.AddDefaulted_GetRef();
 		Resource.Mesh = MakeUnique<FFoliageBakerDepthCorrectTileMesh>(
-			Request.TextureSize,
 			*Input.MeshSettings,
-			*Input.RasterSourceTriangleIndices,
-			Request.CaptureRayDirection,
-			Request.SourceBounds);
+			*Input.RasterSourceTriangleIndices);
 		Resource.SourceTriangleIdProxy = new FFoliageBakerMaskedMaterialProxy(
 			*Input.MaterialInterface,
 			EFoliageBakerMaskedOutput::SourceTriangleId);
@@ -1274,6 +2489,12 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	UTextureRenderTarget2D* EmissionTargetPtr = EmissionTarget.Get();
 	TArray<FFoliageBakerDepthCorrectTileMaterialResources>* ResourcesPtr = &Resources;
 	const FIntPoint TextureSize = Request.TextureSize;
+	const FVector ViewOrigin =
+		BuildDepthCorrectTileViewOrigin(Request);
+	const FMatrix ViewRotationMatrix =
+		BuildDepthCorrectTileViewRotationMatrix(Request);
+	const FMatrix ProjectionMatrix =
+		BuildDepthCorrectTileProjectionMatrix(Request, ViewOrigin);
 	ENQUEUE_RENDER_COMMAND(RenderFoliageBakerDepthCorrectTile)(
 		[SourceTriangleIdTargetPtr,
 		 BaseColorTargetPtr,
@@ -1284,7 +2505,10 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 		 MetallicTargetPtr,
 		 EmissionTargetPtr,
 		 ResourcesPtr,
-		 TextureSize](FRHICommandListImmediate& RHICmdList)
+		 TextureSize,
+		 ViewOrigin,
+		 ViewRotationMatrix,
+		 ProjectionMatrix](FRHICommandListImmediate& RHICmdList)
 		{
 			FTextureRenderTargetResource* SourceTriangleIdResource =
 				SourceTriangleIdTargetPtr->GetRenderTargetResource();
@@ -1293,13 +2517,18 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 					SourceTriangleIdResource,
 					nullptr,
 					FEngineShowFlags(ESFIM_Game))
-				.SetTime(FGameTime()));
+				.SetTime(
+					FGameTime::CreateDilated(
+						0.0,
+						0.0f,
+						0.0,
+						0.0f)));
 			FSceneViewInitOptions ViewInitOptions;
 			ViewInitOptions.ViewFamily = &ViewFamily;
 			ViewInitOptions.SetViewRectangle(FIntRect(FIntPoint::ZeroValue, TextureSize));
-			ViewInitOptions.ViewOrigin = FVector::ZeroVector;
-			ViewInitOptions.ViewRotationMatrix = FMatrix::Identity;
-			ViewInitOptions.ProjectionMatrix = BuildDepthCorrectTileProjectionMatrix(TextureSize);
+			ViewInitOptions.ViewOrigin = ViewOrigin;
+			ViewInitOptions.ViewRotationMatrix = ViewRotationMatrix;
+			ViewInitOptions.ProjectionMatrix = ProjectionMatrix;
 			ViewInitOptions.BackgroundColor = FLinearColor::Black;
 			ViewInitOptions.OverlayColor = FLinearColor::White;
 			GetRendererModule().CreateAndInitSingleView(

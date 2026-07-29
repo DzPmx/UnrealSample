@@ -39,7 +39,7 @@ public:
 private:
 	struct FObjectSnapshot
 	{
-		UObject* Original = nullptr;
+		TStrongObjectPtr<UObject> Original;
 		TStrongObjectPtr<UObject> Backup;
 		bool bPackageWasDirty = false;
 		EObjectFlags ObjectFlags = RF_NoFlags;
@@ -47,13 +47,13 @@ private:
 
 	struct FMetadataSnapshot
 	{
-		UObject* Asset = nullptr;
+		TStrongObjectPtr<UObject> Asset;
 		FName Key = NAME_None;
 		FString Value;
 		bool bHadValue = false;
 	};
 
-	TArray<UObject*> CreatedAssets;
+	TArray<TStrongObjectPtr<UObject>> CreatedAssets;
 	TArray<FObjectSnapshot> ObjectSnapshots;
 	TArray<FMetadataSnapshot> MetadataSnapshots;
 	bool bFinished = false;
@@ -62,7 +62,20 @@ private:
 enum class EFoliageBakerExistingAssetPolicy : uint8
 {
 	ReuseOrCreate,
+	CreateOnly,
 	CreateUnique
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerGeneratedAssetPath
+{
+	FString DisplayName;
+	FString PackagePath;
+	FString AssetNameStem;
+	FString AssetNameSuffix;
+
+	FString BuildAssetName(int32 AssetNameVersion = 0) const;
+	FString BuildPackageName(int32 AssetNameVersion = 0) const;
+	FString BuildObjectPath(int32 AssetNameVersion = 0) const;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerGeneratedAssetOutputFolders
@@ -95,7 +108,13 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 	TArray<FIntRect> MipTileRects;
 	FColor MipBackgroundColor = FColor(0, 0, 0, 0);
 	EFoliageBakerTextureMipMode MipMode = EFoliageBakerTextureMipMode::Default;
+	// Padding RGB is always copied from the nearest independently filtered tile.
+	// Keep this false for semantic alpha such as opacity, depth, or classification masks.
+	bool bFillMipPaddingAlpha = false;
 	FString EmptyPixelsError = TEXT("No texture pixels were generated.");
+	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy =
+		EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
+	int32 AssetNameVersion = 0;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerPlaneAtlasTextureAssetParams
@@ -109,7 +128,11 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerPlaneAtlasTextureAssetParams
 	TextureGroup LODGroup = TEXTUREGROUP_World;
 	bool bSRGB = true;
 	float SemanticMaskMipCoverageThreshold = 0.0f;
+	bool bFillMipPaddingAlpha = false;
 	FString EmptyPixelsError = TEXT("No atlas pixels were generated.");
+	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy =
+		EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
+	int32 AssetNameVersion = 0;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
@@ -137,6 +160,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	FString AssetNamePrefix;
 	FString AssetNameSuffix;
 	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
+	int32 AssetNameVersion = 0;
 	FName BaseColorOpacityTextureParameterName = NAME_None;
 	FName NormalDepthTextureParameterName = NAME_None;
 	FName MixTextureParameterName = NAME_None;
@@ -154,6 +178,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerStaticMeshAssetParams
 {
 	FString AssetNameSuffix;
 	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
+	int32 AssetNameVersion = 0;
 	int32 DesiredUVChannelCount = 2;
 	// Used as a legacy/fallback identifier; generated slots are named after the assigned material asset.
 	FName MaterialSlotName = FName(TEXT("BillboardProxy"));
@@ -193,6 +218,21 @@ public:
 		const FString& AssetNameSuffix,
 		FString& OutBasePackageName,
 		FString& OutBaseAssetName,
+		FString& OutError);
+
+	static bool BuildGeneratedAssetPath(
+		const UStaticMesh& SourceStaticMesh,
+		const FString& ConfiguredOutputFolder,
+		const FString& OutputPackagePathOverride,
+		const FString& AssetNamePrefix,
+		const FString& AssetNameSuffix,
+		FFoliageBakerGeneratedAssetPath& OutAssetPath,
+		FString& OutError);
+
+	static bool BuildGeneratedStaticMeshAssetPath(
+		const UStaticMesh& SourceStaticMesh,
+		const FString& AssetNameSuffix,
+		FFoliageBakerGeneratedAssetPath& OutAssetPath,
 		FString& OutError);
 
 	static bool BuildGeneratedAssetBasePath(

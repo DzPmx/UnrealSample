@@ -578,6 +578,74 @@ namespace UE::FoliageBaker::Atlas
 		}
 	}
 
+	bool BuildTileOwnerMap(
+		const int32 Width,
+		const int32 Height,
+		const TArray<FIntRect>& TileRects,
+		TArray<uint16>& OutTileOwners)
+	{
+		OutTileOwners.Reset();
+		if (Width <= 0
+			|| Height <= 0
+			|| TileRects.IsEmpty()
+			|| TileRects.Num() > MAX_uint16)
+		{
+			return false;
+		}
+
+		TBitArray<> TileMask;
+		TileMask.Init(false, Width * Height);
+		OutTileOwners.Init(MAX_uint16, Width * Height);
+		int32 CoveredPixelCount = 0;
+		for (int32 TileIndex = 0; TileIndex < TileRects.Num(); ++TileIndex)
+		{
+			const FIntRect& TileRect = TileRects[TileIndex];
+			const int32 MinX = FMath::Clamp(TileRect.Min.X, 0, Width);
+			const int32 MinY = FMath::Clamp(TileRect.Min.Y, 0, Height);
+			const int32 MaxX = FMath::Clamp(TileRect.Max.X, 0, Width);
+			const int32 MaxY = FMath::Clamp(TileRect.Max.Y, 0, Height);
+			for (int32 Y = MinY; Y < MaxY; ++Y)
+			{
+				for (int32 X = MinX; X < MaxX; ++X)
+				{
+					const int32 PixelIndex = Y * Width + X;
+					if (TileMask[PixelIndex])
+					{
+						OutTileOwners.Reset();
+						return false;
+					}
+					TileMask[PixelIndex] = true;
+					OutTileOwners[PixelIndex] = static_cast<uint16>(TileIndex);
+					++CoveredPixelCount;
+				}
+			}
+		}
+		if (CoveredPixelCount == Width * Height)
+		{
+			return true;
+		}
+
+		TArray<int32> NearestSource;
+		if (!BuildNearestSourceMap(TileMask, Width, Height, NearestSource))
+		{
+			OutTileOwners.Reset();
+			return false;
+		}
+
+		for (int32 PixelIndex = 0; PixelIndex < OutTileOwners.Num(); ++PixelIndex)
+		{
+			const int32 SourceIndex = NearestSource[PixelIndex];
+			if (!OutTileOwners.IsValidIndex(SourceIndex)
+				|| OutTileOwners[SourceIndex] == MAX_uint16)
+			{
+				OutTileOwners.Reset();
+				return false;
+			}
+			OutTileOwners[PixelIndex] = OutTileOwners[SourceIndex];
+		}
+		return true;
+	}
+
 	void WriteUnionSdfToAlpha(
 		TArray<FColor>& Pixels,
 		const int32 Width,

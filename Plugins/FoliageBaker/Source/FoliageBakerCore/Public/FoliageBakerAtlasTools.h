@@ -9,6 +9,14 @@ namespace UE::FoliageBaker::Atlas
 
 	FOLIAGEBAKERCORE_API void NormalizeEncodedObjectSpaceNormals(TArray<FColor>& Pixels);
 
+	// Assign every atlas pixel to one non-overlapping tile. Pixels outside all
+	// tile interiors belong to the tile that supplies their infinite padding.
+	FOLIAGEBAKERCORE_API bool BuildTileOwnerMap(
+		int32 Width,
+		int32 Height,
+		const TArray<FIntRect>& TileRects,
+		TArray<uint16>& OutTileOwners);
+
 	FOLIAGEBAKERCORE_API bool ResizeTileIsolated(
 		const TArray<FColor>& SourcePixels,
 		int32 SourceWidth,

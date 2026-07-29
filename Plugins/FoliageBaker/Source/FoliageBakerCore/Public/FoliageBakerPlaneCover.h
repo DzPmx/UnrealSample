@@ -176,6 +176,7 @@ namespace UE::FoliageBaker::PlaneCover
 
 	FOLIAGEBAKERCORE_API bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError);
 	FOLIAGEBAKERCORE_API FVector ProjectPointToPlane(const FVector& Point, const FVector& PlaneNormal, double PlaneRho);
+	FOLIAGEBAKERCORE_API bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const TArray<FSourceTriangle>& CaptureBoundsTriangles, const FPlaneProxySet& Result, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
 	FOLIAGEBAKERCORE_API bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneProxySet& Result, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos = nullptr);
 	FOLIAGEBAKERCORE_API bool RebuildPlaneProxyMeshDescriptionFromPlaneInfos(const TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);
 	FOLIAGEBAKERCORE_API bool ApplySharedPlaneProxyBoundsAndRebuildMeshDescription(TArray<FPlaneProxyPlaneInfo>& PlaneInfos, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& InOutStats, FString& OutError);

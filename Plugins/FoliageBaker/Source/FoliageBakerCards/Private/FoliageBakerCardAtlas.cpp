@@ -169,53 +169,60 @@ namespace UE::FoliageBaker::Cards::Atlas
 		}
 
 		constexpr int32 TextureBlockSize = 4;
-		int32 CropMinX = 0;
-		int32 CropMinY = 0;
-		int32 NewWidth = OldWidth;
-		int32 NewHeight = OldHeight;
+		const int32 CopyMinX = FMath::Clamp(
+			(UsedMinX / TextureBlockSize) * TextureBlockSize,
+			0,
+			OldWidth - 1);
+		const int32 CopyMinY = FMath::Clamp(
+			(UsedMinY / TextureBlockSize) * TextureBlockSize,
+			0,
+			OldHeight - 1);
+		const int32 CopyMaxX = FMath::Clamp(
+			((UsedMaxX + TextureBlockSize - 1) / TextureBlockSize) * TextureBlockSize,
+			CopyMinX + 1,
+			OldWidth);
+		const int32 CopyMaxY = FMath::Clamp(
+			((UsedMaxY + TextureBlockSize - 1) / TextureBlockSize) * TextureBlockSize,
+			CopyMinY + 1,
+			OldHeight);
+		const int32 CopyWidth = CopyMaxX - CopyMinX;
+		const int32 CopyHeight = CopyMaxY - CopyMinY;
+		int32 NewWidth = CopyWidth;
+		int32 NewHeight = CopyHeight;
+		int32 ContentOffsetX = 0;
+		int32 ContentOffsetY = 0;
 		if (CropMode == EOuterCropMode::PowerOfTwoUsedBounds)
 		{
-			const int32 UsedWidth = UsedMaxX - UsedMinX;
-			const int32 UsedHeight = UsedMaxY - UsedMinY;
 			NewWidth = FMath::Min(
 				OldWidth,
 				static_cast<int32>(FMath::RoundUpToPowerOfTwo(
-					static_cast<uint32>(FMath::Max(TextureBlockSize, UsedWidth)))));
+					static_cast<uint32>(FMath::Max(TextureBlockSize, CopyWidth)))));
 			NewHeight = FMath::Min(
 				OldHeight,
 				static_cast<int32>(FMath::RoundUpToPowerOfTwo(
-					static_cast<uint32>(FMath::Max(TextureBlockSize, UsedHeight)))));
-			CropMinX = FMath::Clamp(UsedMinX, 0, OldWidth - NewWidth);
-			CropMinY = FMath::Clamp(UsedMinY, 0, OldHeight - NewHeight);
+					static_cast<uint32>(FMath::Max(TextureBlockSize, CopyHeight)))));
+			const int32 RemainingBlocksX =
+				FMath::Max(0, NewWidth - CopyWidth) / TextureBlockSize;
+			const int32 RemainingBlocksY =
+				FMath::Max(0, NewHeight - CopyHeight) / TextureBlockSize;
+			ContentOffsetX = (RemainingBlocksX / 2) * TextureBlockSize;
+			ContentOffsetY = (RemainingBlocksY / 2) * TextureBlockSize;
 		}
-		else
-		{
-			CropMinX = FMath::Clamp(
-				(UsedMinX / TextureBlockSize) * TextureBlockSize,
-				0,
-				OldWidth - 1);
-			CropMinY = FMath::Clamp(
-				(UsedMinY / TextureBlockSize) * TextureBlockSize,
-				0,
-				OldHeight - 1);
-			const int32 CropMaxX = FMath::Clamp(
-				((UsedMaxX + TextureBlockSize - 1) / TextureBlockSize) * TextureBlockSize,
-				CropMinX + 1,
-				OldWidth);
-			const int32 CropMaxY = FMath::Clamp(
-				((UsedMaxY + TextureBlockSize - 1) / TextureBlockSize) * TextureBlockSize,
-				CropMinY + 1,
-				OldHeight);
-			NewWidth = CropMaxX - CropMinX;
-			NewHeight = CropMaxY - CropMinY;
-		}
-		if (CropMinX == 0 && CropMinY == 0 && NewWidth == OldWidth && NewHeight == OldHeight)
+		if (CopyMinX == 0
+			&& CopyMinY == 0
+			&& NewWidth == OldWidth
+			&& NewHeight == OldHeight
+			&& ContentOffsetX == 0
+			&& ContentOffsetY == 0)
 		{
 			SynchronizeGeometryStats();
 			return true;
 		}
 
-		auto BuildCroppedPixels = [&](const TArray<FColor>& SourcePixels, TArray<FColor>& OutCroppedPixels)
+		auto BuildCroppedPixels = [&](
+			const TArray<FColor>& SourcePixels,
+			const FColor BackgroundColor,
+			TArray<FColor>& OutCroppedPixels)
 		{
 			OutCroppedPixels.Reset();
 			if (SourcePixels.IsEmpty())
@@ -226,15 +233,19 @@ namespace UE::FoliageBaker::Cards::Atlas
 			{
 				return false;
 			}
-			OutCroppedPixels.SetNumUninitialized(NewWidth * NewHeight);
-			for (int32 Y = 0; Y < NewHeight; ++Y)
+			OutCroppedPixels.Init(BackgroundColor, NewWidth * NewHeight);
+			for (int32 Y = 0; Y < CopyHeight; ++Y)
 			{
-				const FColor* SourceRow = SourcePixels.GetData() + (CropMinY + Y) * OldWidth + CropMinX;
-				FColor* DestinationRow = OutCroppedPixels.GetData() + Y * NewWidth;
+				const FColor* SourceRow =
+					SourcePixels.GetData() + (CopyMinY + Y) * OldWidth + CopyMinX;
+				FColor* DestinationRow =
+					OutCroppedPixels.GetData()
+					+ (ContentOffsetY + Y) * NewWidth
+					+ ContentOffsetX;
 				FMemory::Memcpy(
 					DestinationRow,
 					SourceRow,
-					static_cast<SIZE_T>(NewWidth) * sizeof(FColor));
+					static_cast<SIZE_T>(CopyWidth) * sizeof(FColor));
 			}
 			return true;
 		};
@@ -243,11 +254,21 @@ namespace UE::FoliageBaker::Cards::Atlas
 		TArray<FColor> CroppedNormalPixels;
 		TArray<FColor> CroppedMixPixels;
 		TArray<FColor> CroppedSourceTriangleIdAndDepthPixels;
-		if (!BuildCroppedPixels(BaseColorOpacityPixels, CroppedBaseColorOpacityPixels)
-			|| !BuildCroppedPixels(NormalPixels, CroppedNormalPixels)
-			|| !BuildCroppedPixels(MixPixels, CroppedMixPixels)
+		if (!BuildCroppedPixels(
+				BaseColorOpacityPixels,
+				FColor::Transparent,
+				CroppedBaseColorOpacityPixels)
+			|| !BuildCroppedPixels(
+				NormalPixels,
+				FColor(128, 128, 255, 0),
+				CroppedNormalPixels)
+			|| !BuildCroppedPixels(
+				MixPixels,
+				FColor(255, 128, 0, 0),
+				CroppedMixPixels)
 			|| !BuildCroppedPixels(
 				SourceTriangleIdAndDepthPixels,
+				FColor::Black,
 				CroppedSourceTriangleIdAndDepthPixels))
 		{
 			OutError = TEXT("Atlas pixel count did not match the atlas dimensions during outer-space cropping.");
@@ -264,9 +285,13 @@ namespace UE::FoliageBaker::Cards::Atlas
 		auto RemapAtlasUV = [&](const FVector2f& OldUV)
 		{
 			return FVector2f(
-				(static_cast<float>(OldUV.X) * static_cast<float>(OldWidth) - static_cast<float>(CropMinX))
+				(static_cast<float>(OldUV.X) * static_cast<float>(OldWidth)
+					- static_cast<float>(CopyMinX)
+					+ static_cast<float>(ContentOffsetX))
 					/ static_cast<float>(NewWidth),
-				(static_cast<float>(OldUV.Y) * static_cast<float>(OldHeight) - static_cast<float>(CropMinY))
+				(static_cast<float>(OldUV.Y) * static_cast<float>(OldHeight)
+					- static_cast<float>(CopyMinY)
+					+ static_cast<float>(ContentOffsetY))
 					/ static_cast<float>(NewHeight));
 		};
 		for (const FVertexInstanceID VertexInstanceID :
@@ -284,10 +309,12 @@ namespace UE::FoliageBaker::Cards::Atlas
 
 		for (PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : InOutGeometry.PlaneInfos)
 		{
-			PlaneInfo.AtlasPixelMin -= FIntPoint(CropMinX, CropMinY);
+			PlaneInfo.AtlasPixelMin -= FIntPoint(CopyMinX, CopyMinY);
+			PlaneInfo.AtlasPixelMin += FIntPoint(ContentOffsetX, ContentOffsetY);
 			if (PlaneInfo.bHasBackFaceAtlas)
 			{
-				PlaneInfo.BackAtlasPixelMin -= FIntPoint(CropMinX, CropMinY);
+				PlaneInfo.BackAtlasPixelMin -= FIntPoint(CopyMinX, CopyMinY);
+				PlaneInfo.BackAtlasPixelMin += FIntPoint(ContentOffsetX, ContentOffsetY);
 			}
 			for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
 			{

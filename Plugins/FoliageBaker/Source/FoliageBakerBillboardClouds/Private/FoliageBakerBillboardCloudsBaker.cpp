@@ -5,6 +5,7 @@
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerKMeansPlaneCover.h"
+#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedAtlasBake.h"
 #include "FoliageBakerProxyGeometry.h"
@@ -286,7 +287,9 @@ namespace
 	bool BakeBillboardAtlasGPU(
 		const UStaticMesh& SourceStaticMesh,
 		const FBoxSphereBounds& SourceLODBounds,
+		const FBoxSphereBounds& FixedFrameWPOBounds,
 		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& Triangles,
+		const FFoliageBakerBakeMaterialOverrideSet& BakeMaterialOverrides,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		const UE::FoliageBaker::PlaneCover::FPlaneProxyMeshStats& ProxyStats,
 		const UE::FoliageBaker::PlaneCover::FPlaneProxySettings& Settings,
@@ -300,7 +303,9 @@ namespace
 		const UE::FoliageBaker::ProjectedAtlasBake::FInputs Inputs(
 			SourceStaticMesh,
 			SourceLODBounds,
+			FixedFrameWPOBounds,
 			Triangles,
+			BakeMaterialOverrides,
 			PlaneInfos,
 			ProxyStats,
 			Settings);
@@ -328,13 +333,16 @@ namespace
 	MakeBillboardCloudsTextureAssetRequest(
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const FString& OutputPackagePathOverride,
-		const FString& AssetNameSuffix)
+		const FString& AssetNameSuffix,
+		const FFoliageBakerExistingAssetDecision& AssetDecision)
 	{
 		FFoliageBakerPlaneAtlasTextureAssetParams Request;
 		Request.OutputFolderName = EditorSettings.TextureOutputFolderName;
 		Request.OutputPackagePathOverride = OutputPackagePathOverride;
 		Request.AssetNamePrefix = EditorSettings.TextureNamePrefix;
 		Request.AssetNameSuffix = AssetNameSuffix;
+		Request.ExistingAssetPolicy = AssetDecision.ExistingAssetPolicy;
+		Request.AssetNameVersion = AssetDecision.AssetNameVersion;
 		Request.CompressionSettings = TC_BC7;
 		return Request;
 	}
@@ -344,6 +352,7 @@ namespace
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const FString& OutputPackagePathOverride,
+		const FFoliageBakerExistingAssetDecision& AssetDecision,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
@@ -353,7 +362,8 @@ namespace
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.BaseColorOpacityTextureSuffix);
+				EditorSettings.BaseColorOpacityTextureSuffix,
+				AssetDecision);
 		Request.LODGroup = TEXTUREGROUP_World;
 		Request.bSRGB = true;
 		Request.SemanticMaskMipCoverageThreshold =
@@ -379,6 +389,7 @@ namespace
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const FString& OutputPackagePathOverride,
+		const FFoliageBakerExistingAssetDecision& AssetDecision,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
@@ -388,7 +399,8 @@ namespace
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.NormalTextureSuffix);
+				EditorSettings.NormalTextureSuffix,
+				AssetDecision);
 		Request.MipBackgroundColor = FColor(128, 128, 255, 255);
 		Request.LODGroup = TEXTUREGROUP_WorldNormalMap;
 		Request.bSRGB = false;
@@ -409,6 +421,7 @@ namespace
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const FString& OutputPackagePathOverride,
+		const FFoliageBakerExistingAssetDecision& AssetDecision,
 		const TArray<FColor>& Pixels,
 		const FAtlasBakeStats& AtlasStats,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
@@ -418,10 +431,12 @@ namespace
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.MixTextureSuffix);
+				EditorSettings.MixTextureSuffix,
+				AssetDecision);
 		Request.MipBackgroundColor = FColor(255, 128, 0, 0);
 		Request.LODGroup = TEXTUREGROUP_WorldSpecular;
 		Request.bSRGB = false;
+		Request.bFillMipPaddingAlpha = true;
 		Request.EmptyPixelsError = TEXT("No mix atlas pixels were generated.");
 		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
@@ -432,6 +447,102 @@ namespace
 			AtlasStats.Height,
 			PlaneInfos,
 			OutError);
+	}
+
+	bool BuildBillboardCloudsGeneratedAssetPlan(
+		const UStaticMesh& StaticMesh,
+		const UFoliageBakerBillboardCloudsSettings& Settings,
+		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
+		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
+		TArray<FFoliageBakerGeneratedAssetPath>& OutGeneratedAssets,
+		FString& OutError)
+	{
+		OutGeneratedAssets.Reset();
+		auto AddGeneratedAsset = [
+			&StaticMesh,
+			&OutGeneratedAssets,
+			&OutError](
+			const FString& DisplayName,
+			const FString& ConfiguredOutputFolder,
+			const FString& OutputPackagePathOverride,
+			const FString& Prefix,
+			const FString& Suffix)
+		{
+			FFoliageBakerGeneratedAssetPath& AssetPath =
+				OutGeneratedAssets.AddDefaulted_GetRef();
+			if (!FFoliageBakerAssetBuilder::BuildGeneratedAssetPath(
+					StaticMesh,
+					ConfiguredOutputFolder,
+					OutputPackagePathOverride,
+					Prefix,
+					Suffix,
+					AssetPath,
+					OutError))
+			{
+				OutGeneratedAssets.Pop();
+				return false;
+			}
+			AssetPath.DisplayName = DisplayName;
+			return true;
+		};
+
+		if (Settings.bBakeBaseColorOpacityAtlas
+			&& !AddGeneratedAsset(
+				TEXT("Base Color / Opacity"),
+				Settings.TextureOutputFolderName,
+				OutputFolders.TexturePackagePath,
+				Settings.TextureNamePrefix,
+				Settings.BaseColorOpacityTextureSuffix))
+		{
+			return false;
+		}
+		if (Settings.bBakeNormalMaskAtlas
+			&& !AddGeneratedAsset(
+				TEXT("Normal / Mask"),
+				Settings.TextureOutputFolderName,
+				OutputFolders.TexturePackagePath,
+				Settings.TextureNamePrefix,
+				Settings.NormalTextureSuffix))
+		{
+			return false;
+		}
+		if (Settings.bBakeMixAtlas
+			&& !AddGeneratedAsset(
+				TEXT("Mix"),
+				Settings.TextureOutputFolderName,
+				OutputFolders.TexturePackagePath,
+				Settings.TextureNamePrefix,
+				Settings.MixTextureSuffix))
+		{
+			return false;
+		}
+		if (!AddGeneratedAsset(
+				TEXT("Material Instance"),
+				Settings.MaterialOutputFolderName,
+				OutputFolders.MaterialPackagePath,
+				Settings.MaterialInstanceNamePrefix,
+				Settings.MaterialInstanceNameSuffix))
+		{
+			return false;
+		}
+
+		if (MeshOutputSelection.OutputMode
+			== EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
+		{
+			FFoliageBakerGeneratedAssetPath& MeshPath =
+				OutGeneratedAssets.AddDefaulted_GetRef();
+			if (!FFoliageBakerAssetBuilder::BuildGeneratedStaticMeshAssetPath(
+					StaticMesh,
+					TEXT("_BillboardCloudProxy"),
+					MeshPath,
+					OutError))
+			{
+				OutGeneratedAssets.Pop();
+				return false;
+			}
+			MeshPath.DisplayName = TEXT("Static Mesh");
+		}
+		return true;
 	}
 
 	const TCHAR* GetMeshOutputModeText(const EFoliageBakerMeshAssetOutputMode OutputMode)
@@ -519,7 +630,7 @@ namespace
 		FProxyAssetBuildResult Result;
 		Result.bCancelled = true;
 		Result.Report = FString::Printf(
-			TEXT("%s\n  cancelled after bake: no mesh output was selected and no generated assets were committed."),
+			TEXT("%s\n  cancelled after bake: asset output was not confirmed and no generated assets were committed."),
 			*StaticMesh.GetName());
 		return Result;
 	}
@@ -581,16 +692,36 @@ namespace
 		if (!FFoliageBakerSourceMeshReader::Read(
 				StaticMesh,
 				EditorSettings.SourceLODIndex,
+				EditorSettings.bOverrideBakeStaticSwitch,
+				EditorSettings.BakeStaticSwitchOverrides,
 				OutData,
 				OutError))
 		{
 			return false;
 		}
 
-		OutData.Settings = BuildSettingsForMesh(OutData.SourceLODBounds, EditorSettings);
+		OutData.Settings = BuildSettingsForMesh(
+			OutData.FixedFrameWPOBounds,
+			EditorSettings);
 		OutData.KMeansSettings = BuildKMeansSettings(EditorSettings);
 		const int32 RequestedTrunkPlaneCount = FMath::Clamp(EditorSettings.TrunkCardPlaneCount, 2, 8);
-		OutData.TrunkSplit = SplitTrianglesForTrunkCards(StaticMesh, OutData.Triangles, EditorSettings.bEnableTrunkCards, EditorSettings.TrunkCardMaterialKeywords);
+		OutData.TrunkSplit = SplitTrianglesForTrunkCards(
+			StaticMesh,
+			OutData.Triangles,
+			EditorSettings.bEnableTrunkCards,
+			EditorSettings.TrunkCardMaterialKeywords);
+		check(
+			OutData.Triangles.Num()
+				== OutData.FixedFrameWPOTriangles.Num());
+		for (int32 TriangleIndex = 0;
+			TriangleIndex < OutData.Triangles.Num();
+			++TriangleIndex)
+		{
+			OutData.FixedFrameWPOTriangles[TriangleIndex].bIsTrunk =
+				OutData.Triangles[TriangleIndex].bIsTrunk;
+			OutData.FixedFrameWPOTriangles[TriangleIndex].bTrunkCardOnly =
+				OutData.Triangles[TriangleIndex].bTrunkCardOnly;
+		}
 
 		if (!OutData.TrunkSplit.BillboardTriangles.IsEmpty())
 		{
@@ -622,6 +753,7 @@ namespace
 	{
 		return UE::FoliageBaker::PlaneCover::BuildPlaneProxyMeshDescription(
 			CoverData.Triangles,
+			CoverData.FixedFrameWPOTriangles,
 			CoverData.ProxyResult,
 			CoverData.Settings,
 			OutData.MeshDescription,
@@ -637,6 +769,7 @@ namespace
 		const FProxyPlaneCoverBuildData& CoverData,
 		FProxyMeshBuildData& MeshData,
 		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
+		const FFoliageBakerExistingAssetDecision& AssetDecision,
 		FProxyTextureBuildData& OutData,
 		FString& OutError)
 	{
@@ -694,7 +827,9 @@ namespace
 				const UE::FoliageBaker::ProjectedAtlasBake::FInputs CropInputs(
 					StaticMesh,
 					CoverData.SourceLODBounds,
+					CoverData.FixedFrameWPOBounds,
 					CoverData.Triangles,
+					CoverData.BakeMaterialOverrides,
 					MeshData.PlaneInfos,
 					MeshData.Stats,
 					CoverData.Settings);
@@ -736,7 +871,9 @@ namespace
 				if (!BakeBillboardAtlasGPU(
 						StaticMesh,
 						CoverData.SourceLODBounds,
+						CoverData.FixedFrameWPOBounds,
 						CoverData.Triangles,
+						CoverData.BakeMaterialOverrides,
 						MeshData.PlaneInfos,
 						MeshData.Stats,
 						CoverData.Settings,
@@ -778,7 +915,9 @@ namespace
 		if (!BakeBillboardAtlasGPU(
 			StaticMesh,
 			CoverData.SourceLODBounds,
+			CoverData.FixedFrameWPOBounds,
 			CoverData.Triangles,
+			CoverData.BakeMaterialOverrides,
 			MeshData.PlaneInfos,
 			MeshData.Stats,
 			CoverData.Settings,
@@ -803,6 +942,7 @@ namespace
 				AssetTransaction,
 				EditorSettings,
 				OutputFolders.TexturePackagePath,
+				AssetDecision,
 				OutData.AtlasPixels,
 				OutData.AtlasStats,
 				MeshData.PlaneInfos,
@@ -820,6 +960,7 @@ namespace
 				AssetTransaction,
 				EditorSettings,
 				OutputFolders.TexturePackagePath,
+				AssetDecision,
 				OutData.NormalAtlasPixels,
 				OutData.AtlasStats,
 				MeshData.PlaneInfos,
@@ -837,6 +978,7 @@ namespace
 				AssetTransaction,
 				EditorSettings,
 				OutputFolders.TexturePackagePath,
+				AssetDecision,
 				OutData.MixAtlasPixels,
 				OutData.AtlasStats,
 				MeshData.PlaneInfos,
@@ -852,7 +994,9 @@ namespace
 		MaterialParams.OutputPackagePathOverride = OutputFolders.MaterialPackagePath;
 		MaterialParams.AssetNamePrefix = EditorSettings.MaterialInstanceNamePrefix;
 		MaterialParams.AssetNameSuffix = EditorSettings.MaterialInstanceNameSuffix;
-		MaterialParams.ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
+		MaterialParams.ExistingAssetPolicy =
+			AssetDecision.ExistingAssetPolicy;
+		MaterialParams.AssetNameVersion = AssetDecision.AssetNameVersion;
 		MaterialParams.BaseColorOpacityTextureParameterName = EditorSettings.BaseColorOpacityTextureParameterName;
 		MaterialParams.NormalDepthTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
@@ -900,6 +1044,7 @@ namespace
 		const FProxyMeshBuildData& MeshData,
 		const FProxyTextureBuildData& TextureData,
 		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
+		const FFoliageBakerExistingAssetDecision& AssetDecision,
 		FProxyAssetBuildResult& OutResult,
 		FString& OutError)
 	{
@@ -909,7 +1054,9 @@ namespace
 		{
 			FFoliageBakerStaticMeshAssetParams MeshParams;
 			MeshParams.AssetNameSuffix = TEXT("_BillboardCloudProxy");
-			MeshParams.ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
+			MeshParams.ExistingAssetPolicy =
+				AssetDecision.ExistingAssetPolicy;
+			MeshParams.AssetNameVersion = AssetDecision.AssetNameVersion;
 			MeshParams.DesiredUVChannelCount = 3;
 			OutResult.ProxyMesh = FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 				StaticMesh,
@@ -965,7 +1112,7 @@ namespace
 			TEXT("%s\n  source LOD: %d, selected-LOD bounds radius: %.3f cm"),
 			*BuildBillboardCloudsOrTrunkSummary(StaticMesh, CoverData),
 			CoverData.SourceLODIndex,
-			CoverData.SourceLODBounds.SphereRadius);
+			CoverData.FixedFrameWPOBounds.SphereRadius);
 		const FString BaseAtlasPath = TextureData.AtlasTexture ? TextureData.AtlasTexture->GetPathName() : TEXT("disabled");
 		const FString NormalAtlasPath = TextureData.NormalAtlasTexture ? TextureData.NormalAtlasTexture->GetPathName() : TEXT("disabled");
 		const FString MixAtlasPath = TextureData.MixAtlasTexture ? TextureData.MixAtlasTexture->GetPathName() : TEXT("disabled");
@@ -1016,10 +1163,13 @@ namespace
 				: TEXT("packed-atlas prepass before repacking; front/back bounds are conservatively merged when present");
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); WPO disabled during material baking\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: ColorOpacity.A and UV2, trunk alpha=0.5 (128), leaf alpha=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); source WPO uses the same material shader path for capture and formal bake\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: ColorOpacity.A and UV2, trunk alpha=0.5 (128), leaf alpha=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
+			CoverData.WorldPositionOffsetStats.EvaluatedVertexCount,
+			CoverData.WorldPositionOffsetStats.MaximumDisplacement,
+			*CoverData.BakeMaterialOverrides.BuildReportDetails(),
 			MeshData.Stats.PlaneCount,
 			MeshData.Stats.QuadCount,
 			MeshData.Stats.TriangleCount,
@@ -1093,6 +1243,29 @@ namespace
 				MeshOutputSelection->ReplaceLODIndex);
 		}
 
+		TArray<FFoliageBakerGeneratedAssetPath> GeneratedAssets;
+		if (!BuildBillboardCloudsGeneratedAssetPlan(
+				StaticMesh,
+				EditorSettings,
+				MeshOutputSelection.GetValue(),
+				OutputFolders,
+				GeneratedAssets,
+				Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+		const TOptional<FFoliageBakerExistingAssetDecision>
+			ExistingAssetDecision =
+				FFoliageBakerExistingAssetDialog::OpenIfNeeded(
+					GeneratedAssets,
+					Error);
+		if (!ExistingAssetDecision.IsSet())
+		{
+			return Error.IsEmpty()
+				? MakeProxyBuildCancelled(StaticMesh)
+				: MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
 		FProxyTextureBuildData TextureData;
 		FFoliageBakerAssetTransaction AssetTransaction;
 		if (!BuildProxyTextureData(
@@ -1102,6 +1275,7 @@ namespace
 				CoverData,
 				MeshData,
 				OutputFolders,
+				ExistingAssetDecision.GetValue(),
 				TextureData,
 				Error))
 		{
@@ -1116,6 +1290,7 @@ namespace
 				MeshData,
 				TextureData,
 				MeshOutputSelection.GetValue(),
+				ExistingAssetDecision.GetValue(),
 				Result,
 				Error))
 		{

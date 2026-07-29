@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerPlaneCover.h"
 
@@ -43,13 +44,17 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		FInputs(
 			const UStaticMesh& InSourceStaticMesh,
 			const FBoxSphereBounds& InSourceLODBounds,
+			const FBoxSphereBounds& InFixedFrameWPOBounds,
 			const TArray<PlaneCover::FSourceTriangle>& InTriangles,
+			const FFoliageBakerBakeMaterialOverrideSet& InBakeMaterialOverrides,
 			const TArray<PlaneCover::FPlaneProxyPlaneInfo>& InPlaneInfos,
 			const PlaneCover::FPlaneProxyMeshStats& InProxyStats,
 			const PlaneCover::FPlaneProxySettings& InSettings)
 			: SourceStaticMesh(InSourceStaticMesh)
 			, SourceLODBounds(InSourceLODBounds)
+			, FixedFrameWPOBounds(InFixedFrameWPOBounds)
 			, Triangles(InTriangles)
+			, BakeMaterialOverrides(InBakeMaterialOverrides)
 			, PlaneInfos(InPlaneInfos)
 			, ProxyStats(InProxyStats)
 			, Settings(InSettings)
@@ -58,7 +63,9 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 		const UStaticMesh& SourceStaticMesh;
 		FBoxSphereBounds SourceLODBounds;
+		FBoxSphereBounds FixedFrameWPOBounds;
 		const TArray<PlaneCover::FSourceTriangle>& Triangles;
+		const FFoliageBakerBakeMaterialOverrideSet& BakeMaterialOverrides;
 		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos;
 		const PlaneCover::FPlaneProxyMeshStats& ProxyStats;
 		const PlaneCover::FPlaneProxySettings& Settings;

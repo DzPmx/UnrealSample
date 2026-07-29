@@ -2,12 +2,12 @@
 
 #include "AssetCompilingManager.h"
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "AssetToolsModule.h"
 #include "Editor.h"
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
+#include "FoliageBakerAtlasTools.h"
 #include "ImageCore.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
@@ -23,11 +23,18 @@
 #include "StaticMeshResources.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "UObject/MetaData.h"
+#include "UObject/ObjectEditorOptionalSupport.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerAssetBuilder, Log, All);
 
 namespace
 {
-	constexpr EObjectFlags ManagedAssetFlags = RF_Public | RF_Standalone | RF_Transactional | RF_Transient;
+	constexpr EObjectFlags PersistentAssetFlags =
+		RF_Public | RF_Standalone | RF_Transactional;
+	constexpr EObjectFlags ManagedAssetFlags =
+		PersistentAssetFlags | RF_Transient;
 	const FName OwnedTextureParametersMetadataKey(TEXT("FoliageBaker.OwnedTextureParameters"));
 	const FName OwnedScalarParametersMetadataKey(TEXT("FoliageBaker.OwnedScalarParameters"));
 	const FName OwnedVectorParametersMetadataKey(TEXT("FoliageBaker.OwnedVectorParameters"));
@@ -416,33 +423,40 @@ namespace
 		return BestFolder;
 	}
 
-	void ResolveAssetPathForPolicy(
-		const FString& BasePackageName,
-		const FString& BaseAssetName,
+	bool ResolvePlannedAssetPath(
+		const FFoliageBakerGeneratedAssetPath& AssetPath,
 		const EFoliageBakerExistingAssetPolicy ExistingAssetPolicy,
+		const int32 AssetNameVersion,
 		FString& OutPackageName,
-		FString& OutAssetName)
+		FString& OutAssetName,
+		FString& OutError)
 	{
-		if (ExistingAssetPolicy == EFoliageBakerExistingAssetPolicy::CreateUnique)
+		const int32 EffectiveVersion =
+			ExistingAssetPolicy == EFoliageBakerExistingAssetPolicy::CreateUnique
+				? AssetNameVersion
+				: 0;
+		if (ExistingAssetPolicy == EFoliageBakerExistingAssetPolicy::CreateUnique
+			&& EffectiveVersion <= 0)
 		{
-			FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-			AssetToolsModule.Get().CreateUniqueAssetName(BasePackageName, TEXT(""), OutPackageName, OutAssetName);
-			return;
+			OutError = TEXT("Create New requires a positive shared asset version.");
+			return false;
 		}
 
-		OutPackageName = BasePackageName;
-		OutAssetName = BaseAssetName;
+		OutAssetName = AssetPath.BuildAssetName(EffectiveVersion);
+		OutPackageName = AssetPath.BuildPackageName(EffectiveVersion);
+		return true;
 	}
 
-	void FinishCompilationForAssets(const TArray<UObject*>& Assets)
+	void FinishCompilationForAssets(
+		const TArray<TStrongObjectPtr<UObject>>& Assets)
 	{
 		TArray<UObject*> ValidAssets;
 		ValidAssets.Reserve(Assets.Num());
-		for (UObject* Asset : Assets)
+		for (const TStrongObjectPtr<UObject>& Asset : Assets)
 		{
-			if (IsValid(Asset))
+			if (IsValid(Asset.Get()))
 			{
-				ValidAssets.AddUnique(Asset);
+				ValidAssets.AddUnique(Asset.Get());
 			}
 		}
 		if (!ValidAssets.IsEmpty())
@@ -454,6 +468,168 @@ namespace
 	UMaterialInterface* ResolveProxyMaterial(UMaterialInterface* ProxyMaterial)
 	{
 		return ProxyMaterial ? ProxyMaterial : UMaterial::GetDefaultMaterial(MD_Surface);
+	}
+
+	bool EnsureMaterialInstanceEditorOnlyData(
+		UMaterialInstanceConstant& MaterialInstance,
+		FString& OutError)
+	{
+#if WITH_EDITORONLY_DATA
+		FObjectProperty* EditorOnlyDataProperty = FindFProperty<FObjectProperty>(
+			UMaterialInterface::StaticClass(),
+			TEXT("EditorOnlyData"));
+		if (!EditorOnlyDataProperty
+			|| !UMaterialInstanceEditorOnlyData::StaticClass()->IsChildOf(
+				EditorOnlyDataProperty->PropertyClass))
+		{
+			OutError = FString::Printf(
+				TEXT("Could not repair %s because the MaterialInterface EditorOnlyData property is unavailable or incompatible."),
+				*MaterialInstance.GetPathName());
+			return false;
+		}
+
+		const FString EditorOnlyDataName =
+			MaterialInstance.GetName() + TEXT("EditorOnlyData");
+		UMaterialInstanceEditorOnlyData* AttachedEditorOnlyData =
+			MaterialInstance.GetEditorOnlyData();
+		if (AttachedEditorOnlyData
+			&& AttachedEditorOnlyData->GetOuter() == &MaterialInstance
+			&& AttachedEditorOnlyData->GetName() == EditorOnlyDataName)
+		{
+			AttachedEditorOnlyData->ClearFlags(RF_Transient);
+			AttachedEditorOnlyData->SetFlags(
+				PersistentAssetFlags & RF_PropagateToSubObjects);
+			return true;
+		}
+
+		UObject* ExistingObject =
+			StaticFindObject(nullptr, &MaterialInstance, *EditorOnlyDataName);
+		UMaterialInstanceEditorOnlyData* RepairedEditorOnlyData =
+			Cast<UMaterialInstanceEditorOnlyData>(ExistingObject);
+		if (ExistingObject && !RepairedEditorOnlyData)
+		{
+			OutError = FString::Printf(
+				TEXT("Could not repair %s because subobject %s exists with incompatible class %s."),
+				*MaterialInstance.GetPathName(),
+				*EditorOnlyDataName,
+				*ExistingObject->GetClass()->GetPathName());
+			return false;
+		}
+
+		if (!RepairedEditorOnlyData)
+		{
+			RepairedEditorOnlyData =
+				Cast<UMaterialInstanceEditorOnlyData>(
+					UE::EditorOptional::CreateEditorOptionalObject(
+						&MaterialInstance,
+						UMaterialInstanceEditorOnlyData::StaticClass(),
+						*EditorOnlyDataName));
+		}
+		if (!RepairedEditorOnlyData)
+		{
+			OutError = FString::Printf(
+				TEXT("Could not recreate MaterialInstanceEditorOnlyData for %s."),
+				*MaterialInstance.GetPathName());
+			return false;
+		}
+		if (AttachedEditorOnlyData
+			&& AttachedEditorOnlyData != RepairedEditorOnlyData)
+		{
+			RepairedEditorOnlyData->StaticParameters =
+				AttachedEditorOnlyData->StaticParameters;
+		}
+		RepairedEditorOnlyData->ClearFlags(RF_Transient);
+		RepairedEditorOnlyData->SetFlags(
+			PersistentAssetFlags & RF_PropagateToSubObjects);
+
+		EditorOnlyDataProperty->SetObjectPropertyValue_InContainer(
+			&MaterialInstance,
+			RepairedEditorOnlyData);
+		if (!MaterialInstance.IsEditorOnlyDataValid())
+		{
+			OutError = FString::Printf(
+				TEXT("MaterialInstanceEditorOnlyData repair did not attach to %s."),
+				*MaterialInstance.GetPathName());
+			return false;
+		}
+		UE_LOG(
+			LogFoliageBakerAssetBuilder,
+			Warning,
+			TEXT("Recreated missing MaterialInstanceEditorOnlyData for legacy damaged MIC %s."),
+			*MaterialInstance.GetPathName());
+#endif
+		return true;
+	}
+
+	bool RestoreSnapshotProperties(UObject& Backup, UObject& Original)
+	{
+		UEngine::FCopyPropertiesForUnrelatedObjectsParams RestoreParams;
+		RestoreParams.bDoDelta = false;
+
+#if WITH_EDITORONLY_DATA
+		UMaterialInstanceConstant* OriginalMaterialInstance =
+			Cast<UMaterialInstanceConstant>(&Original);
+		UMaterialInstanceConstant* BackupMaterialInstance =
+			Cast<UMaterialInstanceConstant>(&Backup);
+		if (OriginalMaterialInstance && BackupMaterialInstance)
+		{
+			FString RepairError;
+			if (!EnsureMaterialInstanceEditorOnlyData(
+					*OriginalMaterialInstance,
+					RepairError)
+				|| !BackupMaterialInstance->IsEditorOnlyDataValid())
+			{
+				UE_LOG(
+					LogFoliageBakerAssetBuilder,
+					Error,
+					TEXT("Could not safely restore MIC snapshot for %s: %s"),
+					*Original.GetPathName(),
+					RepairError.IsEmpty()
+						? TEXT("the snapshot has no MaterialInstanceEditorOnlyData")
+						: *RepairError);
+				return false;
+			}
+
+			UMaterialInstanceEditorOnlyData* OriginalEditorOnlyData =
+				OriginalMaterialInstance->GetEditorOnlyData();
+			UMaterialInstanceEditorOnlyData* BackupEditorOnlyData =
+				BackupMaterialInstance->GetEditorOnlyData();
+			TMap<UObject*, UObject*> ReplacementMappings;
+			ReplacementMappings.Add(&Backup, &Original);
+			ReplacementMappings.Add(
+				BackupEditorOnlyData,
+				OriginalEditorOnlyData);
+			RestoreParams.OptionalReplacementMappings =
+				&ReplacementMappings;
+			RestoreParams.bReplaceInternalReferenceUponRead = true;
+			UEngine::CopyPropertiesForUnrelatedObjects(
+				&Backup,
+				&Original,
+				RestoreParams);
+
+			if (!EnsureMaterialInstanceEditorOnlyData(
+					*OriginalMaterialInstance,
+					RepairError))
+			{
+				UE_LOG(
+					LogFoliageBakerAssetBuilder,
+					Error,
+					TEXT("MIC snapshot restore detached MaterialInstanceEditorOnlyData for %s: %s"),
+					*Original.GetPathName(),
+					*RepairError);
+				return false;
+			}
+			OriginalMaterialInstance->GetEditorOnlyData()->StaticParameters =
+				BackupEditorOnlyData->StaticParameters;
+			return true;
+		}
+#endif
+
+		UEngine::CopyPropertiesForUnrelatedObjects(
+			&Backup,
+			&Original,
+			RestoreParams);
+		return true;
 	}
 
 	void PrepareMeshDescriptionMaterialSlotNames(
@@ -1197,44 +1373,13 @@ namespace
 		const TArray<FColor>& Pixels,
 		FString& OutError)
 	{
-		Texture.Source.Init2DWithMipChain(Params.Width, Params.Height, TSF_BGRA8);
-		const int32 NumMips = Texture.Source.GetNumMips();
-		if (NumMips <= 0)
+		if (Params.Width <= 0
+			|| Params.Height <= 0
+			|| Pixels.Num() != Params.Width * Params.Height)
 		{
-			OutError = TEXT("Could not allocate the texture source mip chain.");
+			OutError = TEXT("The atlas pixel count does not match the requested texture dimensions.");
 			return false;
 		}
-
-		TArray<FColor*> MipData;
-		MipData.Reserve(NumMips);
-		for (int32 MipIndex = 0; MipIndex < NumMips; ++MipIndex)
-		{
-			FColor* LockedMip = reinterpret_cast<FColor*>(Texture.Source.LockMip(MipIndex));
-			if (!LockedMip)
-			{
-				for (int32 LockedMipIndex = MipData.Num() - 1; LockedMipIndex >= 0; --LockedMipIndex)
-				{
-					Texture.Source.UnlockMip(LockedMipIndex);
-				}
-				OutError = FString::Printf(TEXT("Could not lock generated texture source mip %d."), MipIndex);
-				return false;
-			}
-			MipData.Add(LockedMip);
-
-			const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
-			const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
-			for (int32 PixelIndex = 0; PixelIndex < MipWidth * MipHeight; ++PixelIndex)
-			{
-				LockedMip[PixelIndex] = Params.MipBackgroundColor;
-			}
-		}
-		FMemory::Memcpy(MipData[0], Pixels.GetData(), static_cast<SIZE_T>(Pixels.Num()) * sizeof(FColor));
-
-		const EGammaSpace GammaSpace = Params.bSRGB ? EGammaSpace::sRGB : EGammaSpace::Linear;
-		const float SemanticMaskMipCoverageThreshold =
-			Params.SemanticMaskMipCoverageThreshold > 0.0f
-				? FMath::Clamp(Params.SemanticMaskMipCoverageThreshold, 0.01f, 1.0f)
-				: 0.0f;
 
 		TArray<FIntRect> TileRects;
 		TileRects.Reserve(Params.MipTileRects.Num());
@@ -1253,211 +1398,270 @@ namespace
 			}
 			TileRects.Add(TileRect);
 		}
-
-		auto ProjectTileRectToMip = [&Params](const FIntRect& TileRect, const int32 MipIndex)
+		if (TileRects.IsEmpty())
 		{
-			const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
-			const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
-			const int32 MipScale = 1 << MipIndex;
-			return FIntRect(
-				FIntPoint(
-					FMath::Clamp(TileRect.Min.X >> MipIndex, 0, MipWidth),
-					FMath::Clamp(TileRect.Min.Y >> MipIndex, 0, MipHeight)),
-				FIntPoint(
-					FMath::Clamp(FMath::DivideAndRoundUp(TileRect.Max.X, MipScale), 0, MipWidth),
-					FMath::Clamp(FMath::DivideAndRoundUp(TileRect.Max.Y, MipScale), 0, MipHeight)));
-		};
-		auto RectsOverlap = [](const FIntRect& A, const FIntRect& B)
-		{
-			return A.Min.X < B.Max.X
-				&& A.Max.X > B.Min.X
-				&& A.Min.Y < B.Max.Y
-				&& A.Max.Y > B.Min.Y;
-		};
-
-		int32 IsolatedMipCount = 1;
-		for (int32 MipIndex = 1; MipIndex < NumMips && !TileRects.IsEmpty(); ++MipIndex)
-		{
-			TArray<FIntRect> MipTileRects;
-			MipTileRects.Reserve(TileRects.Num());
-			bool bMipKeepsTilesIsolated = true;
-			for (const FIntRect& TileRect : TileRects)
-			{
-				const FIntRect MipTileRect = ProjectTileRectToMip(TileRect, MipIndex);
-				if (MipTileRect.Width() <= 0 || MipTileRect.Height() <= 0)
-				{
-					bMipKeepsTilesIsolated = false;
-					break;
-				}
-				for (const FIntRect& ExistingRect : MipTileRects)
-				{
-					if (RectsOverlap(MipTileRect, ExistingRect))
-					{
-						bMipKeepsTilesIsolated = false;
-						break;
-					}
-				}
-				if (!bMipKeepsTilesIsolated)
-				{
-					break;
-				}
-				MipTileRects.Add(MipTileRect);
-			}
-			if (!bMipKeepsTilesIsolated)
-			{
-				break;
-			}
-			IsolatedMipCount = MipIndex + 1;
+			OutError = TEXT("No valid atlas tile rectangles were provided for mip generation.");
+			return false;
 		}
 
-		for (const FIntRect& TileRect : TileRects)
+		// Freeze UV-island padding ownership at mip 0. Every atlas pixel and
+		// every lower mip samples exactly one independently filtered tile.
+		TArray<uint16> TileOwners;
+		if (!UE::FoliageBaker::Atlas::BuildTileOwnerMap(
+				Params.Width,
+				Params.Height,
+				TileRects,
+				TileOwners))
 		{
+			OutError = TEXT("The mip-0 atlas tile rectangles overlap or could not be assigned.");
+			return false;
+		}
 
-			FImage CurrentTile(
+		const EGammaSpace GammaSpace =
+			Params.bSRGB ? EGammaSpace::sRGB : EGammaSpace::Linear;
+		const float SemanticMaskMipCoverageThreshold =
+			Params.SemanticMaskMipCoverageThreshold > 0.0f
+				? FMath::Clamp(
+					Params.SemanticMaskMipCoverageThreshold,
+					0.01f,
+					1.0f)
+				: 0.0f;
+
+		Texture.Source.Init2DWithMipChain(
+			Params.Width,
+			Params.Height,
+			TSF_BGRA8);
+		const int32 NumMips = Texture.Source.GetNumMips();
+		if (NumMips <= 0)
+		{
+			OutError = TEXT("Could not allocate the texture source mip chain.");
+			return false;
+		}
+
+		TArray<TArray<uint8>> MipZeroTileAlpha;
+		if (SemanticMaskMipCoverageThreshold > 0.0f)
+		{
+			MipZeroTileAlpha.SetNum(TileRects.Num());
+		}
+		TArray<FImage> CurrentTileMips;
+		CurrentTileMips.Reserve(TileRects.Num());
+		auto ApplyTileMipSemantics = [&](
+			const FImage& SourceTile,
+			FImage& DestinationTile,
+			const int32 TileIndex)
+		{
+			FColor* DestinationPixels =
+				reinterpret_cast<FColor*>(DestinationTile.RawData.GetData());
+			const int32 DestinationPixelCount =
+				static_cast<int32>(DestinationTile.SizeX * DestinationTile.SizeY);
+			if (Params.MipMode == EFoliageBakerTextureMipMode::NormalizeXYZNormal)
+			{
+				NormalizeEncodedNormalPixels(
+					DestinationPixels,
+					DestinationPixelCount);
+			}
+			else if (
+				Params.MipMode
+				== EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth)
+			{
+				GenerateImpostorNormalMaskDepthMip(
+					reinterpret_cast<const FColor*>(
+						SourceTile.RawData.GetData()),
+					static_cast<int32>(SourceTile.SizeX),
+					static_cast<int32>(SourceTile.SizeY),
+					DestinationPixels,
+					static_cast<int32>(DestinationTile.SizeX),
+					static_cast<int32>(DestinationTile.SizeY));
+			}
+			if (SemanticMaskMipCoverageThreshold > 0.0f)
+			{
+				const FIntRect& TileRect = TileRects[TileIndex];
+				GenerateSemanticMaskMipAlpha(
+					MipZeroTileAlpha[TileIndex].GetData(),
+					TileRect.Width(),
+					TileRect.Height(),
+					DestinationPixels,
+					static_cast<int32>(DestinationTile.SizeX),
+					static_cast<int32>(DestinationTile.SizeY),
+					SemanticMaskMipCoverageThreshold);
+			}
+		};
+
+		for (int32 TileIndex = 0; TileIndex < TileRects.Num(); ++TileIndex)
+		{
+			const FIntRect& TileRect = TileRects[TileIndex];
+			FImage TileMipZero(
 				TileRect.Width(),
 				TileRect.Height(),
 				1,
 				ERawImageFormat::BGRA8,
 				GammaSpace);
-			FColor* CurrentTilePixels = reinterpret_cast<FColor*>(CurrentTile.RawData.GetData());
+			FColor* TileMipZeroPixels =
+				reinterpret_cast<FColor*>(TileMipZero.RawData.GetData());
 			for (int32 LocalY = 0; LocalY < TileRect.Height(); ++LocalY)
 			{
 				FMemory::Memcpy(
-					CurrentTilePixels + LocalY * TileRect.Width(),
-					Pixels.GetData() + (TileRect.Min.Y + LocalY) * Params.Width + TileRect.Min.X,
+					TileMipZeroPixels + LocalY * TileRect.Width(),
+					Pixels.GetData()
+						+ (TileRect.Min.Y + LocalY) * Params.Width
+						+ TileRect.Min.X,
 					static_cast<SIZE_T>(TileRect.Width()) * sizeof(FColor));
 			}
-			TArray<uint8> Mip0TileAlpha;
 			if (SemanticMaskMipCoverageThreshold > 0.0f)
 			{
-				Mip0TileAlpha.SetNumUninitialized(TileRect.Width() * TileRect.Height());
-				for (int32 PixelIndex = 0; PixelIndex < Mip0TileAlpha.Num(); ++PixelIndex)
+				TArray<uint8>& TileAlpha = MipZeroTileAlpha[TileIndex];
+				TileAlpha.SetNumUninitialized(
+					TileRect.Width() * TileRect.Height());
+				for (int32 PixelIndex = 0;
+					PixelIndex < TileAlpha.Num();
+					++PixelIndex)
 				{
-					Mip0TileAlpha[PixelIndex] = CurrentTilePixels[PixelIndex].A;
+					TileAlpha[PixelIndex] = TileMipZeroPixels[PixelIndex].A;
 				}
 			}
 
-			for (int32 MipIndex = 1; MipIndex < IsolatedMipCount; ++MipIndex)
+			if (NumMips > 1)
 			{
-				const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
-				const FIntRect MipTileRect = ProjectTileRectToMip(TileRect, MipIndex);
-
-				FImage NextTile(
-					MipTileRect.Width(),
-					MipTileRect.Height(),
+				FImage TileMipOne(
+					FMath::Max(1, TileRect.Width() >> 1),
+					FMath::Max(1, TileRect.Height() >> 1),
 					1,
 					ERawImageFormat::BGRA8,
 					GammaSpace);
-				FImageCore::ResizeImage(CurrentTile, NextTile, FImageCore::EResizeImageFilter::Box);
-				FColor* NextTilePixels = reinterpret_cast<FColor*>(NextTile.RawData.GetData());
-				const int32 NextTilePixelCount = MipTileRect.Width() * MipTileRect.Height();
-				if (Params.MipMode == EFoliageBakerTextureMipMode::NormalizeXYZNormal)
-				{
-					NormalizeEncodedNormalPixels(NextTilePixels, NextTilePixelCount);
-				}
-				else if (Params.MipMode
-					== EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth)
-				{
-					GenerateImpostorNormalMaskDepthMip(
-						reinterpret_cast<const FColor*>(CurrentTile.RawData.GetData()),
-						static_cast<int32>(CurrentTile.SizeX),
-						static_cast<int32>(CurrentTile.SizeY),
-						NextTilePixels,
-						static_cast<int32>(NextTile.SizeX),
-						static_cast<int32>(NextTile.SizeY));
-				}
-				if (SemanticMaskMipCoverageThreshold > 0.0f)
-				{
-					GenerateSemanticMaskMipAlpha(
-						Mip0TileAlpha.GetData(),
-						TileRect.Width(),
-						TileRect.Height(),
-						NextTilePixels,
-						MipTileRect.Width(),
-						MipTileRect.Height(),
-						SemanticMaskMipCoverageThreshold);
-				}
-
-				for (int32 LocalY = 0; LocalY < MipTileRect.Height(); ++LocalY)
-				{
-					FMemory::Memcpy(
-						MipData[MipIndex] + (MipTileRect.Min.Y + LocalY) * MipWidth + MipTileRect.Min.X,
-						NextTilePixels + LocalY * MipTileRect.Width(),
-						static_cast<SIZE_T>(MipTileRect.Width()) * sizeof(FColor));
-				}
-				CurrentTile.Swap(NextTile);
+				FImageCore::ResizeImage(
+					TileMipZero,
+					TileMipOne,
+					FImageCore::EResizeImageFilter::Box);
+				ApplyTileMipSemantics(
+					TileMipZero,
+					TileMipOne,
+					TileIndex);
+				CurrentTileMips.Add(MoveTemp(TileMipOne));
 			}
 		}
 
-		if (IsolatedMipCount < NumMips)
+		TArray<FColor*> MipData;
+		MipData.Reserve(NumMips);
+		for (int32 MipIndex = 0; MipIndex < NumMips; ++MipIndex)
 		{
-			const int32 LastIsolatedMipIndex = IsolatedMipCount - 1;
-			const int32 LastIsolatedMipWidth = FMath::Max(1, Params.Width >> LastIsolatedMipIndex);
-			const int32 LastIsolatedMipHeight = FMath::Max(1, Params.Height >> LastIsolatedMipIndex);
-			FImage CurrentAtlas(
-				LastIsolatedMipWidth,
-				LastIsolatedMipHeight,
-				1,
-				ERawImageFormat::BGRA8,
-				GammaSpace);
-			FMemory::Memcpy(
-				CurrentAtlas.RawData.GetData(),
-				MipData[LastIsolatedMipIndex],
-				static_cast<SIZE_T>(LastIsolatedMipWidth * LastIsolatedMipHeight) * sizeof(FColor));
-			TArray<uint8> Mip0AtlasAlpha;
-			if (SemanticMaskMipCoverageThreshold > 0.0f)
+			FColor* LockedMip =
+				reinterpret_cast<FColor*>(Texture.Source.LockMip(MipIndex));
+			if (!LockedMip)
 			{
-				Mip0AtlasAlpha.SetNumUninitialized(Pixels.Num());
-				for (int32 PixelIndex = 0; PixelIndex < Pixels.Num(); ++PixelIndex)
+				for (int32 LockedMipIndex = MipData.Num() - 1;
+					LockedMipIndex >= 0;
+					--LockedMipIndex)
 				{
-					Mip0AtlasAlpha[PixelIndex] = Pixels[PixelIndex].A;
+					Texture.Source.UnlockMip(LockedMipIndex);
+				}
+				OutError = FString::Printf(
+					TEXT("Could not lock generated texture source mip %d."),
+					MipIndex);
+				return false;
+			}
+			MipData.Add(LockedMip);
+		}
+
+		for (int32 MipIndex = 0; MipIndex < NumMips; ++MipIndex)
+		{
+			if (MipIndex > 1)
+			{
+				for (int32 TileIndex = 0;
+					TileIndex < TileRects.Num();
+					++TileIndex)
+				{
+					const FIntRect& TileRect = TileRects[TileIndex];
+					FImage NextTileMip(
+						FMath::Max(1, TileRect.Width() >> MipIndex),
+						FMath::Max(1, TileRect.Height() >> MipIndex),
+						1,
+						ERawImageFormat::BGRA8,
+						GammaSpace);
+					FImageCore::ResizeImage(
+						CurrentTileMips[TileIndex],
+						NextTileMip,
+						FImageCore::EResizeImageFilter::Box);
+					ApplyTileMipSemantics(
+						CurrentTileMips[TileIndex],
+						NextTileMip,
+						TileIndex);
+					CurrentTileMips[TileIndex].Swap(NextTileMip);
 				}
 			}
 
-			for (int32 MipIndex = IsolatedMipCount; MipIndex < NumMips; ++MipIndex)
+			const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
+			const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
+			const int32 MipScale = 1 << MipIndex;
+			for (int32 Y = 0; Y < MipHeight; ++Y)
 			{
-				const int32 MipWidth = FMath::Max(1, Params.Width >> MipIndex);
-				const int32 MipHeight = FMath::Max(1, Params.Height >> MipIndex);
-				FImage NextAtlas(
-					MipWidth,
-					MipHeight,
-					1,
-					ERawImageFormat::BGRA8,
-					GammaSpace);
-				FImageCore::ResizeImage(CurrentAtlas, NextAtlas, FImageCore::EResizeImageFilter::Box);
-				FColor* NextAtlasPixels = reinterpret_cast<FColor*>(NextAtlas.RawData.GetData());
-				const int32 NextAtlasPixelCount = MipWidth * MipHeight;
-				if (Params.MipMode == EFoliageBakerTextureMipMode::NormalizeXYZNormal)
+				const int32 BaseY = FMath::Min(
+					Params.Height - 1,
+					Y * MipScale + MipScale / 2);
+				for (int32 X = 0; X < MipWidth; ++X)
 				{
-					NormalizeEncodedNormalPixels(NextAtlasPixels, NextAtlasPixelCount);
+					const int32 BaseX = FMath::Min(
+						Params.Width - 1,
+						X * MipScale + MipScale / 2);
+					const int32 TileIndex = static_cast<int32>(
+						TileOwners[BaseY * Params.Width + BaseX]);
+					check(TileRects.IsValidIndex(TileIndex));
+
+					const FIntRect& TileRect = TileRects[TileIndex];
+					const int32 TileSourceX = FMath::Clamp(
+						BaseX,
+						TileRect.Min.X,
+						TileRect.Max.X - 1);
+					const int32 TileSourceY = FMath::Clamp(
+						BaseY,
+						TileRect.Min.Y,
+						TileRect.Max.Y - 1);
+
+					FColor TileColor;
+					if (MipIndex == 0)
+					{
+						TileColor =
+							Pixels[
+								TileSourceY * Params.Width
+								+ TileSourceX];
+					}
+					else
+					{
+						const FImage& TileMip =
+							CurrentTileMips[TileIndex];
+						const FColor* TileMipData =
+							reinterpret_cast<const FColor*>(
+								TileMip.RawData.GetData());
+						const int32 TileMipWidth =
+							static_cast<int32>(TileMip.SizeX);
+						const int32 TileMipHeight =
+							static_cast<int32>(TileMip.SizeY);
+						const int32 TileMipX = FMath::Min(
+							TileMipWidth - 1,
+							(TileSourceX - TileRect.Min.X)
+								* TileMipWidth
+								/ TileRect.Width());
+						const int32 TileMipY = FMath::Min(
+							TileMipHeight - 1,
+							(TileSourceY - TileRect.Min.Y)
+								* TileMipHeight
+								/ TileRect.Height());
+						TileColor =
+							TileMipData[
+								TileMipY * TileMipWidth
+								+ TileMipX];
+					}
+
+					const bool bInsideTile =
+						BaseX >= TileRect.Min.X
+						&& BaseX < TileRect.Max.X
+						&& BaseY >= TileRect.Min.Y
+						&& BaseY < TileRect.Max.Y;
+					if (!bInsideTile && !Params.bFillMipPaddingAlpha)
+					{
+						TileColor.A = Params.MipBackgroundColor.A;
+					}
+					MipData[MipIndex][Y * MipWidth + X] = TileColor;
 				}
-				else if (Params.MipMode
-					== EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth)
-				{
-					GenerateImpostorNormalMaskDepthMip(
-						reinterpret_cast<const FColor*>(CurrentAtlas.RawData.GetData()),
-						static_cast<int32>(CurrentAtlas.SizeX),
-						static_cast<int32>(CurrentAtlas.SizeY),
-						NextAtlasPixels,
-						static_cast<int32>(NextAtlas.SizeX),
-						static_cast<int32>(NextAtlas.SizeY));
-				}
-				if (SemanticMaskMipCoverageThreshold > 0.0f)
-				{
-					GenerateSemanticMaskMipAlpha(
-						Mip0AtlasAlpha.GetData(),
-						Params.Width,
-						Params.Height,
-						NextAtlasPixels,
-						MipWidth,
-						MipHeight,
-						SemanticMaskMipCoverageThreshold);
-				}
-				FMemory::Memcpy(
-					MipData[MipIndex],
-					NextAtlasPixels,
-					static_cast<SIZE_T>(NextAtlasPixelCount) * sizeof(FColor));
-				CurrentAtlas.Swap(NextAtlas);
 			}
 		}
 
@@ -1586,7 +1790,14 @@ void FFoliageBakerAssetTransaction::Track(UObject* Asset)
 {
 	if (!bFinished && Asset)
 	{
-		CreatedAssets.AddUnique(Asset);
+		if (!CreatedAssets.ContainsByPredicate(
+				[Asset](const TStrongObjectPtr<UObject>& CreatedAsset)
+				{
+					return CreatedAsset.Get() == Asset;
+				}))
+		{
+			CreatedAssets.Emplace(Asset);
+		}
 	}
 }
 
@@ -1603,14 +1814,22 @@ bool FFoliageBakerAssetTransaction::Snapshot(UObject* Asset, FString& OutError)
 		OutError = TEXT("Cannot snapshot an invalid asset.");
 		return false;
 	}
-	if (CreatedAssets.Contains(Asset)
-		|| ObjectSnapshots.ContainsByPredicate([Asset](const FObjectSnapshot& Snapshot) { return Snapshot.Original == Asset; }))
+	if (CreatedAssets.ContainsByPredicate(
+			[Asset](const TStrongObjectPtr<UObject>& CreatedAsset)
+			{
+				return CreatedAsset.Get() == Asset;
+			})
+		|| ObjectSnapshots.ContainsByPredicate(
+			[Asset](const FObjectSnapshot& Snapshot)
+			{
+				return Snapshot.Original.Get() == Asset;
+			}))
 	{
 		return true;
 	}
 
-	TArray<UObject*> AssetToFinish;
-	AssetToFinish.Add(Asset);
+	TArray<TStrongObjectPtr<UObject>> AssetToFinish;
+	AssetToFinish.Emplace(Asset);
 	FinishCompilationForAssets(AssetToFinish);
 	const FName BackupName = MakeUniqueObjectName(
 		GetTransientPackage(),
@@ -1626,7 +1845,7 @@ bool FFoliageBakerAssetTransaction::Snapshot(UObject* Asset, FString& OutError)
 	Backup->SetFlags(RF_Transient);
 
 	FObjectSnapshot Snapshot;
-	Snapshot.Original = Asset;
+	Snapshot.Original.Reset(Asset);
 	Snapshot.Backup = TStrongObjectPtr<UObject>(Backup);
 	Snapshot.bPackageWasDirty = Asset->GetOutermost()->IsDirty();
 	Snapshot.ObjectFlags = Asset->GetFlags();
@@ -1639,7 +1858,7 @@ void FFoliageBakerAssetTransaction::SnapshotMetadata(UObject* Asset, const FName
 	if (bFinished || !IsValid(Asset) || Key.IsNone()
 		|| MetadataSnapshots.ContainsByPredicate([Asset, Key](const FMetadataSnapshot& Snapshot)
 		{
-			return Snapshot.Asset == Asset && Snapshot.Key == Key;
+			return Snapshot.Asset.Get() == Asset && Snapshot.Key == Key;
 		}))
 	{
 		return;
@@ -1647,7 +1866,7 @@ void FFoliageBakerAssetTransaction::SnapshotMetadata(UObject* Asset, const FName
 
 	FMetaData& MetaData = Asset->GetPackage()->GetMetaData();
 	FMetadataSnapshot Snapshot;
-	Snapshot.Asset = Asset;
+	Snapshot.Asset.Reset(Asset);
 	Snapshot.Key = Key;
 	Snapshot.bHadValue = MetaData.HasValue(Asset, Key);
 	if (Snapshot.bHadValue)
@@ -1664,19 +1883,19 @@ void FFoliageBakerAssetTransaction::Commit()
 		return;
 	}
 
-	TArray<UObject*> TouchedAssets = CreatedAssets;
+	TArray<TStrongObjectPtr<UObject>> TouchedAssets = CreatedAssets;
 	for (const FObjectSnapshot& Snapshot : ObjectSnapshots)
 	{
 		TouchedAssets.Add(Snapshot.Original);
 	}
 	FinishCompilationForAssets(TouchedAssets);
 
-	for (UObject* Asset : CreatedAssets)
+	for (const TStrongObjectPtr<UObject>& Asset : CreatedAssets)
 	{
-		if (IsValid(Asset))
+		if (IsValid(Asset.Get()))
 		{
 			Asset->MarkPackageDirty();
-			FAssetRegistryModule::AssetCreated(Asset);
+			FAssetRegistryModule::AssetCreated(Asset.Get());
 		}
 	}
 
@@ -1693,7 +1912,7 @@ void FFoliageBakerAssetTransaction::Rollback()
 		return;
 	}
 
-	TArray<UObject*> TouchedAssets = CreatedAssets;
+	TArray<TStrongObjectPtr<UObject>> TouchedAssets = CreatedAssets;
 	for (const FObjectSnapshot& Snapshot : ObjectSnapshots)
 	{
 		TouchedAssets.Add(Snapshot.Original);
@@ -1703,62 +1922,94 @@ void FFoliageBakerAssetTransaction::Rollback()
 	for (int32 SnapshotIndex = ObjectSnapshots.Num() - 1; SnapshotIndex >= 0; --SnapshotIndex)
 	{
 		const FObjectSnapshot& Snapshot = ObjectSnapshots[SnapshotIndex];
-		if (!IsValid(Snapshot.Original) || !Snapshot.Backup.IsValid())
+		if (!IsValid(Snapshot.Original.Get()) || !Snapshot.Backup.IsValid())
 		{
 			continue;
 		}
 
 		Snapshot.Original->PreEditChange(nullptr);
-		UEngine::CopyPropertiesForUnrelatedObjects(Snapshot.Backup.Get(), Snapshot.Original);
-		Snapshot.Original->ClearFlags(ManagedAssetFlags);
-		Snapshot.Original->SetFlags(Snapshot.ObjectFlags & ManagedAssetFlags);
+		if (RestoreSnapshotProperties(
+				*Snapshot.Backup,
+				*Snapshot.Original))
+		{
+			Snapshot.Original->ClearFlags(ManagedAssetFlags);
+			Snapshot.Original->SetFlags(
+				Snapshot.ObjectFlags & ManagedAssetFlags);
+		}
 		Snapshot.Original->PostEditChange();
 	}
 
 	for (int32 SnapshotIndex = MetadataSnapshots.Num() - 1; SnapshotIndex >= 0; --SnapshotIndex)
 	{
 		const FMetadataSnapshot& Snapshot = MetadataSnapshots[SnapshotIndex];
-		if (!IsValid(Snapshot.Asset))
+		if (!IsValid(Snapshot.Asset.Get()))
 		{
 			continue;
 		}
 		FMetaData& MetaData = Snapshot.Asset->GetPackage()->GetMetaData();
 		if (Snapshot.bHadValue)
 		{
-			MetaData.SetValue(Snapshot.Asset, Snapshot.Key, *Snapshot.Value);
+			MetaData.SetValue(
+				Snapshot.Asset.Get(),
+				Snapshot.Key,
+				*Snapshot.Value);
 		}
 		else
 		{
-			MetaData.RemoveValue(Snapshot.Asset, Snapshot.Key);
+			MetaData.RemoveValue(Snapshot.Asset.Get(), Snapshot.Key);
 		}
 	}
 
 	FinishCompilationForAssets(TouchedAssets);
 	for (const FObjectSnapshot& Snapshot : ObjectSnapshots)
 	{
-		if (IsValid(Snapshot.Original))
+		if (IsValid(Snapshot.Original.Get()))
 		{
 			Snapshot.Original->GetOutermost()->SetDirtyFlag(Snapshot.bPackageWasDirty);
 		}
 	}
 
 	TArray<UObject*> AssetsToDelete;
-	for (UObject* Asset : CreatedAssets)
+	for (const TStrongObjectPtr<UObject>& Asset : CreatedAssets)
 	{
-		if (IsValid(Asset))
+		if (IsValid(Asset.Get()))
 		{
-			AssetsToDelete.Add(Asset);
+			AssetsToDelete.Add(Asset.Get());
 		}
 	}
+	CreatedAssets.Reset();
+	TouchedAssets.Reset();
 	if (!AssetsToDelete.IsEmpty())
 	{
 		ObjectTools::DeleteObjectsUnchecked(AssetsToDelete);
 	}
 
-	CreatedAssets.Reset();
 	ObjectSnapshots.Reset();
 	MetadataSnapshots.Reset();
 	bFinished = true;
+}
+
+FString FFoliageBakerGeneratedAssetPath::BuildAssetName(
+	const int32 AssetNameVersion) const
+{
+	const FString VersionToken = AssetNameVersion > 0
+		? FString::Printf(TEXT("%02d"), AssetNameVersion)
+		: FString();
+	return ObjectTools::SanitizeObjectName(
+		AssetNameStem + VersionToken + AssetNameSuffix);
+}
+
+FString FFoliageBakerGeneratedAssetPath::BuildPackageName(
+	const int32 AssetNameVersion) const
+{
+	return PackagePath / BuildAssetName(AssetNameVersion);
+}
+
+FString FFoliageBakerGeneratedAssetPath::BuildObjectPath(
+	const int32 AssetNameVersion) const
+{
+	const FString AssetName = BuildAssetName(AssetNameVersion);
+	return (PackagePath / AssetName) + TEXT(".") + AssetName;
 }
 
 bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
@@ -1791,7 +2042,34 @@ bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
 	FString& OutBaseAssetName,
 	FString& OutError)
 {
+	FFoliageBakerGeneratedAssetPath AssetPath;
+	if (!BuildGeneratedAssetPath(
+			SourceStaticMesh,
+			ConfiguredOutputFolder,
+			OutputPackagePathOverride,
+			AssetNamePrefix,
+			AssetNameSuffix,
+			AssetPath,
+			OutError))
+	{
+		return false;
+	}
+	OutBasePackageName = AssetPath.BuildPackageName();
+	OutBaseAssetName = AssetPath.BuildAssetName();
+	return true;
+}
+
+bool FFoliageBakerAssetBuilder::BuildGeneratedAssetPath(
+	const UStaticMesh& SourceStaticMesh,
+	const FString& ConfiguredOutputFolder,
+	const FString& OutputPackagePathOverride,
+	const FString& AssetNamePrefix,
+	const FString& AssetNameSuffix,
+	FFoliageBakerGeneratedAssetPath& OutAssetPath,
+	FString& OutError)
+{
 	OutError.Reset();
+	OutAssetPath = {};
 	const FString SourceFolderPath = FPackageName::GetLongPackagePath(SourceStaticMesh.GetOutermost()->GetName());
 	FString ParentFolderPath = SourceFolderPath;
 	int32 LastSeparatorIndex = INDEX_NONE;
@@ -1808,19 +2086,56 @@ bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
 		: RelativeOutputFolder.IsEmpty()
 			? ParentFolderPath
 			: ParentFolderPath / RelativeOutputFolder;
-	OutBaseAssetName = ObjectTools::SanitizeObjectName(
-		AssetNamePrefix + GetGeneratedAssetSourceName(SourceStaticMesh) + AssetNameSuffix);
-	OutBasePackageName = OutputFolderPath / OutBaseAssetName;
+	OutAssetPath.PackagePath = OutputFolderPath;
+	OutAssetPath.AssetNameStem =
+		AssetNamePrefix + GetGeneratedAssetSourceName(SourceStaticMesh);
+	OutAssetPath.AssetNameSuffix = AssetNameSuffix;
 
+	const FString BaseAssetName = OutAssetPath.BuildAssetName();
+	const FString BasePackageName = OutAssetPath.BuildPackageName();
 	FText InvalidNameReason;
-	if (OutBaseAssetName.IsEmpty()
-		|| !FName(*OutBaseAssetName).IsValidObjectName(InvalidNameReason)
-		|| !FPackageName::IsValidLongPackageName(OutBasePackageName, false, &InvalidNameReason))
+	if (BaseAssetName.IsEmpty()
+		|| !FName(*BaseAssetName).IsValidObjectName(InvalidNameReason)
+		|| !FPackageName::IsValidLongPackageName(BasePackageName, false, &InvalidNameReason))
 	{
 		OutError = FString::Printf(
 			TEXT("Invalid generated asset path '%s': %s"),
-			*OutBasePackageName,
+			*BasePackageName,
 			*InvalidNameReason.ToString());
+		OutAssetPath = {};
+		return false;
+	}
+	return true;
+}
+
+bool FFoliageBakerAssetBuilder::BuildGeneratedStaticMeshAssetPath(
+	const UStaticMesh& SourceStaticMesh,
+	const FString& AssetNameSuffix,
+	FFoliageBakerGeneratedAssetPath& OutAssetPath,
+	FString& OutError)
+{
+	OutError.Reset();
+	OutAssetPath = {};
+	OutAssetPath.PackagePath = FPackageName::GetLongPackagePath(
+		SourceStaticMesh.GetOutermost()->GetName());
+	OutAssetPath.AssetNameStem = SourceStaticMesh.GetName();
+	OutAssetPath.AssetNameSuffix = AssetNameSuffix;
+
+	const FString BaseAssetName = OutAssetPath.BuildAssetName();
+	const FString BasePackageName = OutAssetPath.BuildPackageName();
+	FText InvalidNameReason;
+	if (BaseAssetName.IsEmpty()
+		|| !FName(*BaseAssetName).IsValidObjectName(InvalidNameReason)
+		|| !FPackageName::IsValidLongPackageName(
+			BasePackageName,
+			false,
+			&InvalidNameReason))
+	{
+		OutError = FString::Printf(
+			TEXT("Invalid generated Static Mesh path '%s': %s"),
+			*BasePackageName,
+			*InvalidNameReason.ToString());
+		OutAssetPath = {};
 		return false;
 	}
 	return true;
@@ -1917,11 +2232,14 @@ UTexture2D* FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 	TextureParams.SemanticMaskMipCoverageThreshold =
 		Params.SemanticMaskMipCoverageThreshold;
 	TextureParams.MipBackgroundColor = Params.MipBackgroundColor;
+	TextureParams.bFillMipPaddingAlpha = Params.bFillMipPaddingAlpha;
 	TextureParams.MipMode =
 		Params.LODGroup == TEXTUREGROUP_WorldNormalMap
 			? EFoliageBakerTextureMipMode::NormalizeXYZNormal
 			: EFoliageBakerTextureMipMode::Default;
 	TextureParams.EmptyPixelsError = Params.EmptyPixelsError;
+	TextureParams.ExistingAssetPolicy = Params.ExistingAssetPolicy;
+	TextureParams.AssetNameVersion = Params.AssetNameVersion;
 
 	TextureParams.MipTileRects.Reserve(PlaneInfos.Num() * 2);
 	for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo :
@@ -1961,44 +2279,77 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 		return nullptr;
 	}
 
-	FString BasePackageName;
-	FString BaseAssetName;
-	if (!BuildGeneratedAssetBasePath(
+	FFoliageBakerGeneratedAssetPath GeneratedAssetPath;
+	if (!BuildGeneratedAssetPath(
 		SourceStaticMesh,
 		Params.OutputFolderName,
 		Params.OutputPackagePathOverride,
 		Params.AssetNamePrefix,
 		Params.AssetNameSuffix,
-		BasePackageName,
-		BaseAssetName,
+		GeneratedAssetPath,
 		OutError))
 	{
 		return nullptr;
 	}
 
-	const FString ObjectPath = BasePackageName + TEXT(".") + BaseAssetName;
-	UObject* ExistingObject = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
-	UTexture2D* Texture = Cast<UTexture2D>(ExistingObject);
-	if (ExistingObject && !Texture)
+	FString PackageName;
+	FString AssetName;
+	if (!ResolvePlannedAssetPath(
+			GeneratedAssetPath,
+			Params.ExistingAssetPolicy,
+			Params.AssetNameVersion,
+			PackageName,
+			AssetName,
+			OutError))
 	{
-		OutError = FString::Printf(TEXT("Cannot rebake %s because that object is not a Texture2D."), *ObjectPath);
 		return nullptr;
 	}
 
-	UPackage* Package = Texture ? Texture->GetOutermost() : CreatePackage(*BasePackageName);
+	const FString ObjectPath = PackageName + TEXT(".") + AssetName;
+	UObject* ExistingObject = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
+	UTexture2D* Texture = nullptr;
+	if (Params.ExistingAssetPolicy
+		== EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
+	{
+		Texture = Cast<UTexture2D>(ExistingObject);
+		if (ExistingObject && !Texture)
+		{
+			OutError = FString::Printf(
+				TEXT("Cannot rebake %s because that object is not a Texture2D."),
+				*ObjectPath);
+			return nullptr;
+		}
+	}
+	else if (ExistingObject)
+	{
+		OutError = FString::Printf(
+			TEXT("Cannot create the new asset set because %s already exists. Please run the bake again."),
+			*ObjectPath);
+		return nullptr;
+	}
+
+	UPackage* Package =
+		Texture ? Texture->GetOutermost() : CreatePackage(*PackageName);
 	if (!Package)
 	{
-		OutError = FString::Printf(TEXT("Could not create package %s."), *BasePackageName);
+		OutError = FString::Printf(
+			TEXT("Could not create package %s."),
+			*PackageName);
 		return nullptr;
 	}
 	Package->FullyLoad();
 
 	if (!Texture)
 	{
-		Texture = NewObject<UTexture2D>(Package, *BaseAssetName, RF_Public | RF_Standalone | RF_Transactional);
+		Texture = NewObject<UTexture2D>(
+			Package,
+			*AssetName,
+			PersistentAssetFlags);
 		if (!Texture)
 		{
-			OutError = FString::Printf(TEXT("Could not create Texture2D %s."), *BaseAssetName);
+			OutError = FString::Printf(
+				TEXT("Could not create Texture2D %s."),
+				*AssetName);
 			return nullptr;
 		}
 		AssetTransaction.Track(Texture);
@@ -2056,16 +2407,14 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		return nullptr;
 	}
 
-	FString BasePackageName;
-	FString BaseAssetName;
-	if (!BuildGeneratedAssetBasePath(
+	FFoliageBakerGeneratedAssetPath GeneratedAssetPath;
+	if (!BuildGeneratedAssetPath(
 		SourceStaticMesh,
 		Params.OutputFolderName,
 		Params.OutputPackagePathOverride,
 		Params.AssetNamePrefix,
 		Params.AssetNameSuffix,
-		BasePackageName,
-		BaseAssetName,
+		GeneratedAssetPath,
 		OutError))
 	{
 		return nullptr;
@@ -2073,13 +2422,24 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 
 	FString PackageName;
 	FString AssetName;
-	ResolveAssetPathForPolicy(BasePackageName, BaseAssetName, Params.ExistingAssetPolicy, PackageName, AssetName);
+	if (!ResolvePlannedAssetPath(
+			GeneratedAssetPath,
+			Params.ExistingAssetPolicy,
+			Params.AssetNameVersion,
+			PackageName,
+			AssetName,
+			OutError))
+	{
+		return nullptr;
+	}
 	const FString ObjectPath = PackageName + TEXT(".") + AssetName;
 
+	UObject* ExistingObject =
+		StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
 	UMaterialInstanceConstant* MaterialInstance = nullptr;
-	if (Params.ExistingAssetPolicy == EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
+	if (Params.ExistingAssetPolicy
+		== EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
 	{
-		UObject* ExistingObject = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
 		MaterialInstance = Cast<UMaterialInstanceConstant>(ExistingObject);
 		if (ExistingObject && !MaterialInstance)
 		{
@@ -2087,10 +2447,19 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 			return nullptr;
 		}
 	}
-	if (MaterialInstance == TemplateMaterialInstance)
+	else if (ExistingObject)
 	{
 		OutError = FString::Printf(
-			TEXT("Cannot use %s as both the generated material instance and its parent."),
+			TEXT("Cannot create the new asset set because %s already exists. Please run the bake again."),
+			*ObjectPath);
+		return nullptr;
+	}
+	if (MaterialInstance
+		&& TemplateMaterialInstance->IsChildOf(MaterialInstance))
+	{
+		OutError = FString::Printf(
+			TEXT("Cannot use %s as the parent template for %s because that would create a material-instance parent cycle."),
+			*TemplateMaterialInstance->GetPathName(),
 			*ObjectPath);
 		return nullptr;
 	}
@@ -2108,16 +2477,28 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		MaterialInstance = NewObject<UMaterialInstanceConstant>(
 			Package,
 			*AssetName,
-			RF_Public | RF_Standalone | RF_Transactional);
+			PersistentAssetFlags);
 		if (!MaterialInstance)
 		{
 			OutError = FString::Printf(TEXT("Could not create Material Instance Constant %s."), *ObjectPath);
 			return nullptr;
 		}
 		AssetTransaction.Track(MaterialInstance);
+		if (!EnsureMaterialInstanceEditorOnlyData(
+				*MaterialInstance,
+				OutError))
+		{
+			return nullptr;
+		}
 	}
 	else
 	{
+		if (!EnsureMaterialInstanceEditorOnlyData(
+				*MaterialInstance,
+				OutError))
+		{
+			return nullptr;
+		}
 		if (!AssetTransaction.Snapshot(MaterialInstance, OutError))
 		{
 			return nullptr;
@@ -2212,26 +2593,49 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 	FString& OutError)
 {
 	OutError.Reset();
-	const FString SourcePackageName = SourceStaticMesh.GetOutermost()->GetName();
-	const FString PackagePath = FPackageName::GetLongPackagePath(SourcePackageName);
-	const FString BaseAssetName = ObjectTools::SanitizeObjectName(SourceStaticMesh.GetName() + Params.AssetNameSuffix);
-	const FString BasePackageName = FString::Printf(TEXT("%s/%s"), *PackagePath, *BaseAssetName);
+	FFoliageBakerGeneratedAssetPath GeneratedAssetPath;
+	if (!BuildGeneratedStaticMeshAssetPath(
+			SourceStaticMesh,
+			Params.AssetNameSuffix,
+			GeneratedAssetPath,
+			OutError))
+	{
+		return nullptr;
+	}
 
 	FString PackageName;
 	FString AssetName;
-	ResolveAssetPathForPolicy(BasePackageName, BaseAssetName, Params.ExistingAssetPolicy, PackageName, AssetName);
+	if (!ResolvePlannedAssetPath(
+			GeneratedAssetPath,
+			Params.ExistingAssetPolicy,
+			Params.AssetNameVersion,
+			PackageName,
+			AssetName,
+			OutError))
+	{
+		return nullptr;
+	}
 	const FString ObjectPath = PackageName + TEXT(".") + AssetName;
 
+	UObject* ExistingObject =
+		StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
 	UStaticMesh* ProxyMesh = nullptr;
-	if (Params.ExistingAssetPolicy == EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
+	if (Params.ExistingAssetPolicy
+		== EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
 	{
-		UObject* ExistingObject = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
 		ProxyMesh = Cast<UStaticMesh>(ExistingObject);
 		if (ExistingObject && !ProxyMesh)
 		{
 			OutError = FString::Printf(TEXT("Cannot rebake %s because that object is not a StaticMesh."), *ObjectPath);
 			return nullptr;
 		}
+	}
+	else if (ExistingObject)
+	{
+		OutError = FString::Printf(
+			TEXT("Cannot create the new asset set because %s already exists. Please run the bake again."),
+			*ObjectPath);
+		return nullptr;
 	}
 
 	UPackage* Package = ProxyMesh ? ProxyMesh->GetOutermost() : CreatePackage(*PackageName);
@@ -2244,7 +2648,10 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 
 	if (!ProxyMesh)
 	{
-		ProxyMesh = NewObject<UStaticMesh>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+		ProxyMesh = NewObject<UStaticMesh>(
+			Package,
+			*AssetName,
+			PersistentAssetFlags);
 		if (!ProxyMesh)
 		{
 			OutError = FString::Printf(TEXT("Could not create StaticMesh %s."), *AssetName);
@@ -2318,6 +2725,8 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 		Params.bRecomputeTangents,
 		Params.BaseLODModel);
 	KeepOnlyUVChannels(*ProxyMesh, 0, Params.DesiredUVChannelCount, true);
+	ProxyMesh->SetNegativeBoundsExtension(FVector::ZeroVector);
+	ProxyMesh->SetPositiveBoundsExtension(FVector::ZeroVector);
 	ProxyMesh->PostEditChange();
 	ProxyMesh->MarkPackageDirty();
 	return ProxyMesh;

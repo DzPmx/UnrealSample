@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "FoliageBakerCardsSettings.h"
+#include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerMeshOutput.h"
 
 class UMaterialInstanceConstant;
@@ -38,6 +39,10 @@ struct FFoliageBakerCardBakeRequest
 	bool bBakeBaseColorOpacity = true;
 	bool bBakeNormalDepth = true;
 	bool bBakeMix = false;
+	bool bOverrideBakeStaticSwitch = false;
+	TArray<FFoliageBakerBakeStaticSwitchOverride> BakeStaticSwitchOverrides = {
+		FFoliageBakerBakeStaticSwitchOverride()
+	};
 	bool bBakeUpperHemisphereL1Visibility = false;
 	int32 UpperHemisphereL1TextureResolution = 512;
 	int32 UpperHemisphereL1SampleCount = 12;

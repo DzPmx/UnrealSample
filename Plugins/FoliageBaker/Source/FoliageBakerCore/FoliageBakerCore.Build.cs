@@ -27,7 +27,6 @@ public class FoliageBakerCore : ModuleRules
 			new string[]
 			{
 				"AssetRegistry",
-				"AssetTools",
 				"ImageCore",
 				"MaterialBaking",
 				"Projects",

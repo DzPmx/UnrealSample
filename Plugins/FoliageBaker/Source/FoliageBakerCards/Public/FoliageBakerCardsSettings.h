@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerTextureResolution.h"
 #include "UObject/Object.h"
 
@@ -116,7 +117,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "bPreserveAlphaMaskValues", EditConditionHides, DisplayName = "Mip Mask Coverage Threshold", ToolTip = "Minimum fraction of covered Mip 0 samples required to keep a destination mip pixel. Lower values preserve fuller foliage silhouettes; higher values remove more thin coverage."))
 	float MipMaskCoverageThreshold = 0.35f;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Optimization", meta = (DisplayName = "Trim Unused Atlas Space", ToolTip = "Enabled: tightly removes unused outer atlas rows and columns using block-aligned dimensions, which may be non-power-of-two. Disabled: still fits the atlas to the used UV tile bounds, but rounds each dimension up to a power of two, allowing rectangular outputs such as 512x1024. In this mode a non-power-of-two maximum resolution is rounded down to the nearest power of two. Per-view alpha bounds are always cropped independently."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Optimization", meta = (DisplayName = "Trim Unused Atlas Space", ToolTip = "Enabled: tightly removes unused outer atlas rows and columns using block-aligned dimensions, which may be non-power-of-two. Disabled: fits the atlas to the used UV tile bounds, rounds each dimension up to a power of two, and balances the remaining block-aligned space around the tiles, allowing rectangular outputs such as 512x1024. UV-island RGB padding fills all remaining atlas pixels and every generated mip. In this mode a non-power-of-two maximum resolution is rounded down to the nearest power of two. Per-view alpha bounds are always cropped independently."))
 	bool bTrimUnusedAtlasSpace = false;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / Opacity", ToolTip = "RGB stores base color. A stores visible source classification: background 0, trunk 0.5, leaf 1."))
@@ -172,6 +173,14 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Standard Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Used by Single Plane Billboard, Cross Cards, or MultiBillboard. Double Planes Billboard uses its dedicated Parent Material Instance slot. Generated proxy materials are new child Material Instance Constants."))
 	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Override Static Switches During Bake", ToolTip = "Creates one transient child Material Instance per unique selected-LOD material and applies every configured Global static switch override that exists on that material. Missing switches emit warnings and the remaining overrides continue. Source material assets are never modified. World Position Offset is evaluated with animation time fixed at zero; Displacement remains disabled."))
+	bool bOverrideBakeStaticSwitch = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Static Switch Overrides", EditCondition = "bOverrideBakeStaticSwitch", EditConditionHides, ToolTip = "Global static switches and their temporary Bake values. Each switch may appear only once. A missing switch warns and is skipped for that material."))
+	TArray<FFoliageBakerBakeStaticSwitchOverride> BakeStaticSwitchOverrides = {
+		FFoliageBakerBakeStaticSwitchOverride()
+	};
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Opacity Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and trunk/leaf opacity classification in A."))
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");

@@ -71,6 +71,10 @@ namespace
 		Request.bBakeBaseColorOpacity = Settings.bBakeBaseColorOpacity;
 		Request.bBakeNormalDepth = Settings.bBakeNormalDepth;
 		Request.bBakeMix = Settings.bBakeMix;
+		Request.bOverrideBakeStaticSwitch =
+			Settings.bOverrideBakeStaticSwitch;
+		Request.BakeStaticSwitchOverrides =
+			Settings.BakeStaticSwitchOverrides;
 		Request.bBakeUpperHemisphereL1Visibility =
 			IsSingleBillboardMode(Settings.Mode)
 			&& Settings.bBakeUpperHemisphereL1Visibility;

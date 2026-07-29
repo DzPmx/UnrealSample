@@ -1820,7 +1820,7 @@ namespace UE::FoliageBaker::PlaneCover
 		return Point - PlaneNormal * SignedDistance;
 	}
 
-	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const FPlaneProxySet& Result, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos)
+	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const TArray<FSourceTriangle>& CaptureBoundsTriangles, const FPlaneProxySet& Result, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos)
 	{
 		OutMeshDescription.Empty();
 		OutStats = FPlaneProxyMeshStats();
@@ -1839,6 +1839,11 @@ namespace UE::FoliageBaker::PlaneCover
 		if (Result.Planes.IsEmpty())
 		{
 			OutError = TEXT("The plane cover did not produce any planes.");
+			return false;
+		}
+		if (CaptureBoundsTriangles.Num() != Triangles.Num())
+		{
+			OutError = TEXT("Capture-bounds triangle count does not match the source triangle count.");
 			return false;
 		}
 
@@ -1942,8 +1947,8 @@ namespace UE::FoliageBaker::PlaneCover
 			double MaxV = -TNumericLimits<double>::Max();
 
 			const bool bComputedRectangle = Plane.bUseFixedPlaneFrame
-				? ComputeFixedFramePlaneRectangle(Triangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, AxisU, AxisV, MinU, MaxU, MinV, MaxV)
-				: ComputeMinimumAreaPlaneRectangle(Triangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, AxisU, AxisV, MinU, MaxU, MinV, MaxV);
+				? ComputeFixedFramePlaneRectangle(CaptureBoundsTriangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, AxisU, AxisV, MinU, MaxU, MinV, MaxV)
+				: ComputeMinimumAreaPlaneRectangle(CaptureBoundsTriangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, AxisU, AxisV, MinU, MaxU, MinV, MaxV);
 			if (!bComputedRectangle)
 			{
 				continue;
@@ -1951,7 +1956,7 @@ namespace UE::FoliageBaker::PlaneCover
 
 			double MinSignedDistance = 0.0;
 			double MaxSignedDistance = 0.0;
-			ComputeSignedDistanceRangeForTriangles(Triangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, MinSignedDistance, MaxSignedDistance);
+			ComputeSignedDistanceRangeForTriangles(CaptureBoundsTriangles, Plane.TriangleIndices, OrientedNormal, OrientedRho, MinSignedDistance, MaxSignedDistance);
 			const double EnvelopeMinU = MinU;
 			const double EnvelopeMaxU = MaxU;
 			const double EnvelopeMinV = MinV;
@@ -2115,6 +2120,26 @@ namespace UE::FoliageBaker::PlaneCover
 		OutStats.AveragePlaneToShadingNormalAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(OutStats.AveragePlaneToShadingNormalDot, -1.0, 1.0)));
 
 		return true;
+	}
+
+	bool BuildPlaneProxyMeshDescription(
+		const TArray<FSourceTriangle>& Triangles,
+		const FPlaneProxySet& Result,
+		const FPlaneProxySettings& Settings,
+		FMeshDescription& OutMeshDescription,
+		FPlaneProxyMeshStats& OutStats,
+		FString& OutError,
+		TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos)
+	{
+		return BuildPlaneProxyMeshDescription(
+			Triangles,
+			Triangles,
+			Result,
+			Settings,
+			OutMeshDescription,
+			OutStats,
+			OutError,
+			OutPlaneInfos);
 	}
 
 	bool RebuildPlaneProxyMeshDescriptionFromPlaneInfos(

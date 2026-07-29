@@ -232,8 +232,11 @@ namespace UE::FoliageBaker::L1Visibility
 			return true;
 		}
 
-		bool BakeShadowDepth(const UStaticMesh& SourceStaticMesh, const FBoxSphereBounds& SourceBounds,
+		bool BakeShadowDepth(const UStaticMesh& SourceStaticMesh,
+							 const FBoxSphereBounds& PrimitiveBounds,
+							 const FBoxSphereBounds& SourceBounds,
 							 const TArray<PlaneCover::FSourceTriangle>& Triangles,
+							 const FFoliageBakerBakeMaterialOverrideSet& BakeMaterialOverrides,
 							 const PlaneCover::EAtlasVConvention AtlasVConvention,
 							 const FUpperHemisphereShadowProjection& Projection,
 							 FFoliageBakerDepthCorrectTileResult& OutResult, FString& OutError)
@@ -251,7 +254,7 @@ namespace UE::FoliageBaker::L1Visibility
 
 			struct FShadowMaterialStorage
 			{
-				UMaterialInterface* MaterialInterface = nullptr;
+				TStrongObjectPtr<UMaterialInterface> MaterialInterface;
 				FMeshDescription MeshDescription;
 				TArray<FVector2D> CustomTileUVs;
 				TArray<int32> RasterSourceTriangleIndices;
@@ -264,7 +267,17 @@ namespace UE::FoliageBaker::L1Visibility
 			FFoliageBakerDepthCorrectTileRequest Request;
 			Request.TextureSize = Projection.TextureSize;
 			Request.CaptureRayDirection = -Projection.PlaneInfo.Normal;
+			Request.ProjectionAxisU = Projection.PlaneInfo.AxisU;
+			Request.ProjectionAxisV = Projection.PlaneInfo.AxisV;
+			Request.ProjectionMinU = Projection.PlaneInfo.MinU;
+			Request.ProjectionMaxU = Projection.PlaneInfo.MaxU;
+			Request.ProjectionMinV = Projection.PlaneInfo.MinV;
+			Request.ProjectionMaxV = Projection.PlaneInfo.MaxV;
 			Request.SourceBounds = SourceBounds;
+			Request.bFlipProjectionV =
+				AtlasVConvention
+				== PlaneCover::EAtlasVConvention::
+					GeometryMinVToTextureMaxV;
 			Request.bBakeBaseColor = false;
 			Request.bBakeObjectSpaceNormal = false;
 			Request.bBakePackedMix = false;
@@ -282,10 +295,18 @@ namespace UE::FoliageBaker::L1Visibility
 				}
 
 				TUniquePtr<FShadowMaterialStorage> Storage = MakeUnique<FShadowMaterialStorage>();
-				Storage->MaterialInterface = SourceMaterials[MaterialIndex].MaterialInterface;
+				Storage->MaterialInterface =
+					BakeMaterialOverrides.ResolveMaterial(MaterialIndex);
 				if (!Storage->MaterialInterface)
 				{
-					Storage->MaterialInterface = UMaterial::GetDefaultMaterial(MD_Surface);
+					Storage->MaterialInterface.Reset(
+						SourceMaterials[MaterialIndex]
+							.MaterialInterface.Get());
+				}
+				if (!Storage->MaterialInterface)
+				{
+					Storage->MaterialInterface.Reset(
+						UMaterial::GetDefaultMaterial(MD_Surface));
 				}
 
 				ProjectedMaterialBake::FPlaneSideBakeParams BakeParams;
@@ -312,7 +333,8 @@ namespace UE::FoliageBaker::L1Visibility
 				Storage->MeshSettings.TextureCoordinateBox = FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
 				Storage->MeshSettings.TextureCoordinateIndex = 0;
 				Storage->MeshSettings.LightMapIndex = 0;
-				Storage->MeshSettings.PrimitiveData = FPrimitiveData(SourceBounds);
+				Storage->MeshSettings.PrimitiveData =
+					FPrimitiveData(PrimitiveBounds);
 				Storage->MeshSettings.CustomTextureCoordinates = MoveTemp(Storage->CustomTileUVs);
 				FShadowMaterialStorage* StoragePtr = Storage.Get();
 				MaterialStorage.Add(MoveTemp(Storage));
@@ -345,7 +367,8 @@ namespace UE::FoliageBaker::L1Visibility
 			const double U = FMath::Lerp(PlaneInfo.MinU, PlaneInfo.MaxU, UFraction);
 			const double V = FMath::Lerp(PlaneInfo.MinV, PlaneInfo.MaxV, PlaneVFraction);
 			const FVector ProjectedPoint = PlaneInfo.Normal * PlaneInfo.Rho + PlaneInfo.AxisU * U + PlaneInfo.AxisV * V;
-			const double LinearDepth = 1.0 - static_cast<double>(EncodedLinearDepth) / 255.0;
+			const double LinearDepth =
+				static_cast<double>(EncodedLinearDepth) / 255.0;
 			const double SignedDepth =
 				(LinearDepth * 2.0 - 1.0) *
 				FMath::Max(static_cast<double>(SourceBounds.SphereRadius), UE_DOUBLE_SMALL_NUMBER);
@@ -518,7 +541,7 @@ namespace UE::FoliageBaker::L1Visibility
 						if (FFoliageBakerMaskedMaterialBaker::DecodeSourceTriangleId(Encoded) != INDEX_NONE)
 						{
 							const double FrontmostLinearDepth =
-								1.0 - static_cast<double>(Encoded.A) / 255.0;
+								static_cast<double>(Encoded.A) / 255.0;
 							TapVisibility =
 								ReceiverLinearDepth <= FrontmostLinearDepth + ShadowDepthQuantizationBias
 									? 1.0
@@ -537,8 +560,12 @@ namespace UE::FoliageBaker::L1Visibility
 
 	} // namespace
 
-	bool BakeUpperHemisphere(const UStaticMesh& SourceStaticMesh, const FBoxSphereBounds& SourceBounds,
+	bool BakeUpperHemisphere(const UStaticMesh& SourceStaticMesh,
+							 const FBoxSphereBounds& PrimitiveBounds,
+							 const FBoxSphereBounds& SourceBounds,
 							 const TArray<PlaneCover::FSourceTriangle>& Triangles,
+							 const TArray<PlaneCover::FSourceTriangle>& BakeTriangles,
+							 const FFoliageBakerBakeMaterialOverrideSet& BakeMaterialOverrides,
 							 const TArray<PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 							 const PlaneCover::FPlaneProxySettings& Settings,
 							 const TArray<FColor>& SourceTriangleIdAndDepthPixels, const int32 AtlasWidth,
@@ -624,7 +651,9 @@ namespace UE::FoliageBaker::L1Visibility
 			}
 
 			FFoliageBakerDepthCorrectTileResult ShadowResult;
-			if (!BakeShadowDepth(SourceStaticMesh, SourceBounds, Triangles, Settings.AtlasVConvention, Projection,
+			if (!BakeShadowDepth(SourceStaticMesh, PrimitiveBounds, SourceBounds,
+								 BakeTriangles, BakeMaterialOverrides,
+								 Settings.AtlasVConvention, Projection,
 								 ShadowResult, OutError))
 			{
 				return false;

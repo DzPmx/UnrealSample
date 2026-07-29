@@ -22,7 +22,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 		struct FMaterialBakeStorage
 		{
-			UMaterialInterface* MaterialInterface = nullptr;
+			TStrongObjectPtr<UMaterialInterface> MaterialInterface;
 			FMeshDescription MeshDescription;
 			TArray<FVector2D> CustomTileUVs;
 			TArray<int32> RasterSourceTriangleIndices;
@@ -206,7 +206,17 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			FFoliageBakerDepthCorrectTileRequest& TileRequest = OutInputs.TileRequest;
 			TileRequest.TextureSize = TileSize;
 			TileRequest.CaptureRayDirection = CaptureRayDirection;
-			TileRequest.SourceBounds = Inputs.SourceLODBounds;
+			TileRequest.ProjectionAxisU = PlaneInfo.AxisU;
+			TileRequest.ProjectionAxisV = PlaneInfo.AxisV;
+			TileRequest.ProjectionMinU = PlaneInfo.MinU;
+			TileRequest.ProjectionMaxU = PlaneInfo.MaxU;
+			TileRequest.ProjectionMinV = PlaneInfo.MinV;
+			TileRequest.ProjectionMaxV = PlaneInfo.MaxV;
+			TileRequest.SourceBounds = Inputs.FixedFrameWPOBounds;
+			TileRequest.bFlipProjectionV =
+				Inputs.Settings.AtlasVConvention
+				== PlaneCover::EAtlasVConvention::
+					GeometryMinVToTextureMaxV;
 			TileRequest.bBakeBaseColor = Policy.OutputSelection.bBaseColorOpacity;
 			TileRequest.bBakeObjectSpaceNormal = Policy.OutputSelection.bNormalMask;
 			TileRequest.bBakePackedMix = Policy.OutputSelection.bMix;
@@ -230,12 +240,21 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 				TUniquePtr<FMaterialBakeStorage> Storage =
 					MakeUnique<FMaterialBakeStorage>();
-				Storage->MaterialInterface = Context.SourceMaterials.IsValidIndex(MaterialIndex)
-					? Context.SourceMaterials[MaterialIndex].MaterialInterface
-					: nullptr;
+				Storage->MaterialInterface =
+					Inputs.BakeMaterialOverrides.ResolveMaterial(
+						MaterialIndex);
 				if (!Storage->MaterialInterface)
 				{
-					Storage->MaterialInterface = UMaterial::GetDefaultMaterial(MD_Surface);
+					Storage->MaterialInterface.Reset(
+						Context.SourceMaterials.IsValidIndex(MaterialIndex)
+							? Context.SourceMaterials[MaterialIndex]
+								.MaterialInterface.Get()
+							: nullptr);
+				}
+				if (!Storage->MaterialInterface)
+				{
+					Storage->MaterialInterface.Reset(
+						UMaterial::GetDefaultMaterial(MD_Surface));
 				}
 
 				ProjectedMaterialBake::FPlaneSideBakeParams ProjectedBakeParams;
@@ -782,7 +801,9 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			const FInputs PrepassInputs(
 				Inputs.SourceStaticMesh,
 				Inputs.SourceLODBounds,
+				Inputs.FixedFrameWPOBounds,
 				Inputs.Triangles,
+				Inputs.BakeMaterialOverrides,
 				PrepassPlaneInfos,
 				PrepassProxyStats,
 				Inputs.Settings);

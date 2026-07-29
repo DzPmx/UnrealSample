@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerTextureResolution.h"
 #include "UObject/Object.h"
 
@@ -143,6 +144,14 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
 	TSoftObjectPtr<UMaterialInstanceConstant> BillboardMaterialTemplate;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Override Static Switches During Bake", ToolTip = "Creates one transient child Material Instance per unique selected-LOD material and applies every configured Global static switch override that exists on that material. Missing switches emit warnings and the remaining overrides continue. Source material assets are never modified. World Position Offset is evaluated with animation time fixed at zero; Displacement remains disabled."))
+	bool bOverrideBakeStaticSwitch = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Static Switch Overrides", EditCondition = "bOverrideBakeStaticSwitch", EditConditionHides, ToolTip = "Global static switches and their temporary Bake values. Each switch may appear only once. A missing switch warns and is skipped for that material."))
+	TArray<FFoliageBakerBakeStaticSwitchOverride> BakeStaticSwitchOverrides = {
+		FFoliageBakerBakeStaticSwitchOverride()
+	};
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Opacity Parameter", ToolTip = "Texture parameter receiving generated BaseColor RGB and trunk/leaf opacity classification in A."))
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
