@@ -27,23 +27,18 @@ namespace
 		if (IsSingleBillboardMode(ToolSettings.Mode)
 			&& ToolSettings.BillboardMode == EFoliageBakerBillboardMode::DoublePlanes)
 		{
-			const UFoliageBakerSingleBillboardSettings* BillboardSettings =
-				Cast<UFoliageBakerSingleBillboardSettings>(&ToolSettings);
-			return BillboardSettings
-				? BillboardSettings->DoublePlanesMaterialInstanceTemplate
-				: TSoftObjectPtr<UMaterialInstanceConstant>();
+			const UFoliageBakerSingleBillboardSettings& BillboardSettings =
+				*CastChecked<UFoliageBakerSingleBillboardSettings>(
+					&ToolSettings);
+			return BillboardSettings.DoublePlanesMaterialInstanceTemplate;
 		}
 		return ToolSettings.MaterialInstanceTemplate;
 	}
 
 	FFoliageBakerCardBakeRequest BuildRequest(
-		UStaticMesh& StaticMesh,
-		UMaterialInstanceConstant& MaterialTemplate,
 		const UFoliageBakerCardsSettings& Settings)
 	{
 		FFoliageBakerCardBakeRequest Request;
-		Request.SourceStaticMesh = &StaticMesh;
-		Request.MaterialTemplate = &MaterialTemplate;
 		Request.SourceLODIndex = Settings.SourceLODIndex;
 		Request.Mode = Settings.Mode;
 		Request.BillboardPlaneMode = Settings.BillboardMode;
@@ -121,19 +116,19 @@ void FFoliageBakerCardsModule::ShutdownModule()
 
 void FFoliageBakerCardsModule::EnsureToolSettings(const EFoliageBakerCardMode Mode)
 {
-	TStrongObjectPtr<UFoliageBakerCardsSettings>* Settings = IsSingleBillboardMode(Mode)
-		? &SingleBillboardSettings
+	TStrongObjectPtr<UFoliageBakerCardsSettings>& Settings = IsSingleBillboardMode(Mode)
+		? SingleBillboardSettings
 		: IsMultiBillboardMode(Mode)
-			? &MultiBillboardSettings
-			: &CrossCardsSettings;
-	if (!Settings->IsValid())
+			? MultiBillboardSettings
+			: CrossCardsSettings;
+	if (!Settings.IsValid())
 	{
 		if (IsSingleBillboardMode(Mode))
 		{
 			FFoliageBakerFeatureTool::EnsureTransientSettings<
 				UFoliageBakerCardsSettings,
 				UFoliageBakerSingleBillboardSettings>(
-					*Settings,
+					Settings,
 					FName(TEXT("FoliageBakerSingleBillboardSettings")));
 		}
 		else if (IsMultiBillboardMode(Mode))
@@ -141,7 +136,7 @@ void FFoliageBakerCardsModule::EnsureToolSettings(const EFoliageBakerCardMode Mo
 			FFoliageBakerFeatureTool::EnsureTransientSettings<
 				UFoliageBakerCardsSettings,
 				UFoliageBakerMultiBillboardSettings>(
-					*Settings,
+					Settings,
 					FName(TEXT("FoliageBakerMultiBillboardSettings")));
 		}
 		else
@@ -149,21 +144,22 @@ void FFoliageBakerCardsModule::EnsureToolSettings(const EFoliageBakerCardMode Mo
 			FFoliageBakerFeatureTool::EnsureTransientSettings<
 				UFoliageBakerCardsSettings,
 				UFoliageBakerCrossCardsSettings>(
-					*Settings,
+					Settings,
 					FName(TEXT("FoliageBakerCrossCardsSettings")));
 		}
-		(*Settings)->SourceStaticMeshes.Reset();
 	}
-	(*Settings)->Mode = Mode;
+	Settings->Mode = Mode;
 }
 
-UFoliageBakerCardsSettings* FFoliageBakerCardsModule::GetToolSettings(const EFoliageBakerCardMode Mode) const
+const TStrongObjectPtr<UFoliageBakerCardsSettings>&
+	FFoliageBakerCardsModule::GetToolSettings(
+		const EFoliageBakerCardMode Mode) const
 {
 	return IsSingleBillboardMode(Mode)
-		? SingleBillboardSettings.Get()
+		? SingleBillboardSettings
 		: IsMultiBillboardMode(Mode)
-			? MultiBillboardSettings.Get()
-			: CrossCardsSettings.Get();
+			? MultiBillboardSettings
+			: CrossCardsSettings;
 }
 
 TSharedPtr<FFoliageBakerFeatureController>& FFoliageBakerCardsModule::GetFeatureController(
@@ -179,11 +175,18 @@ TSharedPtr<FFoliageBakerFeatureController>& FFoliageBakerCardsModule::GetFeature
 TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageBakerCardMode Mode)
 {
 	EnsureToolSettings(Mode);
-	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
+	const TStrongObjectPtr<UFoliageBakerCardsSettings> Settings =
+		GetToolSettings(Mode);
+	check(Settings);
+	Settings->SourceStaticMeshes.Reset();
 
 	FFoliageBakerFeatureControllerArgs ControllerArgs;
-	ControllerArgs.SettingsObject = Settings;
-	ControllerArgs.SourceStaticMeshes = &Settings->SourceStaticMeshes;
+	ControllerArgs.SettingsObject.Reset(Settings.Get());
+	ControllerArgs.GetSourceStaticMeshes =
+		[Settings]() -> TArray<TObjectPtr<UStaticMesh>>&
+		{
+			return Settings->SourceStaticMeshes;
+		};
 	ControllerArgs.BakeButtonText = IsSingleBillboardMode(Mode)
 		? LOCTEXT("BakeBillboardButton", "Bake Billboard")
 		: IsMultiBillboardMode(Mode)
@@ -215,7 +218,8 @@ TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageB
 
 bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 {
-	const UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
+	const TStrongObjectPtr<UFoliageBakerCardsSettings>& Settings =
+		GetToolSettings(Mode);
 	if (!Settings)
 	{
 		return false;
@@ -240,10 +244,13 @@ bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 void FFoliageBakerCardsModule::Bake(const EFoliageBakerCardMode Mode)
 {
 	EnsureToolSettings(Mode);
-	UFoliageBakerCardsSettings* Settings = GetToolSettings(Mode);
+	const TStrongObjectPtr<UFoliageBakerCardsSettings> Settings =
+		GetToolSettings(Mode);
+	check(Settings);
 	TSoftObjectPtr<UMaterialInstanceConstant> ConfiguredMaterialTemplate =
 		GetConfiguredMaterialTemplate(*Settings);
-	UMaterialInstanceConstant* MaterialTemplate = ConfiguredMaterialTemplate.LoadSynchronous();
+	const TStrongObjectPtr<UMaterialInstanceConstant> MaterialTemplate(
+		ConfiguredMaterialTemplate.LoadSynchronous());
 	if (!MaterialTemplate)
 	{
 		FFoliageBakerFeatureTool::ShowMessage(LOCTEXT(
@@ -263,7 +270,9 @@ void FFoliageBakerCardsModule::Bake(const EFoliageBakerCardMode Mode)
 				{
 					const FFoliageBakerCardBakeResult Result =
 						FFoliageBakerCardBaker::Bake(
-							BuildRequest(StaticMesh, *MaterialTemplate, *Settings),
+							StaticMesh,
+							*MaterialTemplate,
+							BuildRequest(*Settings),
 							FFoliageBakerMeshOutputSelector::CreateStatic(
 								&FFoliageBakerMeshOutputDialog::OpenAfterBake));
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);

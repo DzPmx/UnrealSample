@@ -22,16 +22,20 @@ void FFoliageBakerImpostorModule::EnsureToolSettings()
 		FFoliageBakerFeatureTool::EnsureTransientSettings(
 			ToolSettings,
 			FName(TEXT("FoliageBakerImpostorSettings")));
-		ToolSettings->SourceStaticMeshes.Reset();
 	}
 }
 
 TSharedRef<SWidget> FFoliageBakerImpostorModule::CreateFeaturePanel()
 {
 	EnsureToolSettings();
+	ToolSettings->SourceStaticMeshes.Reset();
 	FFoliageBakerFeatureControllerArgs ControllerArgs;
-	ControllerArgs.SettingsObject = ToolSettings.Get();
-	ControllerArgs.SourceStaticMeshes = &ToolSettings->SourceStaticMeshes;
+	ControllerArgs.SettingsObject.Reset(ToolSettings.Get());
+	ControllerArgs.GetSourceStaticMeshes =
+		[Settings = ToolSettings]() -> TArray<TObjectPtr<UStaticMesh>>&
+		{
+			return Settings->SourceStaticMeshes;
+		};
 	ControllerArgs.BakeButtonText = LOCTEXT("BakeImpostorButton", "Bake Impostor");
 	ControllerArgs.BakeButtonTooltip =
 		LOCTEXT("BakeImpostorTooltip", "Bake one Impostor asset for every queued Static Mesh.");
@@ -71,8 +75,8 @@ bool FFoliageBakerImpostorModule::CanBake() const
 void FFoliageBakerImpostorModule::Bake()
 {
 	EnsureToolSettings();
-	UMaterialInstanceConstant* MaterialTemplate =
-		ToolSettings->MaterialInstanceTemplate.LoadSynchronous();
+	const TStrongObjectPtr<UMaterialInstanceConstant> MaterialTemplate(
+		ToolSettings->MaterialInstanceTemplate.LoadSynchronous());
 	if (!MaterialTemplate)
 	{
 		FFoliageBakerFeatureTool::ShowMessage(LOCTEXT(
@@ -88,13 +92,13 @@ void FFoliageBakerImpostorModule::Bake()
 			true,
 			TEXT("\n"),
 			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
-				[this, MaterialTemplate](UStaticMesh& StaticMesh)
+				[MaterialTemplate, Settings = ToolSettings](UStaticMesh& StaticMesh)
 				{
 					const FFoliageBakerImpostorBakeResult Result =
 						FFoliageBakerImpostorBaker::Bake(
 							StaticMesh,
 							*MaterialTemplate,
-							*ToolSettings,
+							*Settings,
 							FFoliageBakerMeshOutputSelector::CreateStatic(
 								&FFoliageBakerMeshOutputDialog::OpenAfterBake));
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);

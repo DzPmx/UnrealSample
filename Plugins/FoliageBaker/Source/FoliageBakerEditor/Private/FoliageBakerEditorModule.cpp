@@ -13,7 +13,9 @@
 #include "ISettingsModule.h"
 #include "PropertyEditorModule.h"
 #include "Styling/AppStyle.h"
+#include "Templates/SubclassOf.h"
 #include "ToolMenus.h"
+#include "UObject/ObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Images/SImage.h"
@@ -131,14 +133,8 @@ namespace
 		FName SectionName;
 		FText DisplayName;
 		FText Description;
-		UObject* (*GetSettingsObject)() = nullptr;
+		TSubclassOf<UObject> SettingsClass;
 	};
-
-	template <typename SettingsType>
-	UObject* GetMutableSettingsObject()
-	{
-		return GetMutableDefault<SettingsType>();
-	}
 
 	class FFoliageBakerEditorPreferenceCustomization final : public IDetailCustomization
 	{
@@ -165,7 +161,7 @@ namespace
 				LOCTEXT(
 					"BillboardSettingsDescription",
 					"Configure Single Plane and Double Planes Billboard preferences, including their default Parent Material Instances."),
-				&GetMutableSettingsObject<UFoliageBakerSingleBillboardSettings>
+				UFoliageBakerSingleBillboardSettings::StaticClass()
 			},
 			{
 				CrossCardsSettingsSectionName,
@@ -173,7 +169,7 @@ namespace
 				LOCTEXT(
 					"CrossCardsSettingsDescription",
 					"Configure Cross Cards preferences, including its default Parent Material Instance."),
-				&GetMutableSettingsObject<UFoliageBakerCrossCardsSettings>
+				UFoliageBakerCrossCardsSettings::StaticClass()
 			},
 			{
 				ImpostorSettingsSectionName,
@@ -181,7 +177,7 @@ namespace
 				LOCTEXT(
 					"ImpostorSettingsDescription",
 					"Configure Impostor preferences, including its default Parent Material Instance."),
-				&GetMutableSettingsObject<UFoliageBakerImpostorSettings>
+				UFoliageBakerImpostorSettings::StaticClass()
 			},
 			{
 				MultiBillboardSettingsSectionName,
@@ -189,7 +185,7 @@ namespace
 				LOCTEXT(
 					"MultiBillboardSettingsDescription",
 					"Configure MultiBillboard preferences, including its default Parent Material Instance."),
-				&GetMutableSettingsObject<UFoliageBakerMultiBillboardSettings>
+				UFoliageBakerMultiBillboardSettings::StaticClass()
 			},
 			{
 				BillboardCloudsSettingsSectionName,
@@ -197,7 +193,7 @@ namespace
 				LOCTEXT(
 					"BillboardCloudsSettingsDescription",
 					"Configure Billboard Clouds preferences, including its default Parent Material Instance."),
-				&GetMutableSettingsObject<UFoliageBakerBillboardCloudsSettings>
+				UFoliageBakerBillboardCloudsSettings::StaticClass()
 			}
 		};
 		return Descriptors;
@@ -245,8 +241,10 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 	for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
 		GetEditorPreferenceDescriptors())
 	{
-		UObject* SettingsObject = Descriptor.GetSettingsObject();
-		const FName SettingsClassName = SettingsObject->GetClass()->GetFName();
+		check(Descriptor.SettingsClass);
+		UObject& SettingsObject =
+			*GetMutableDefault<UObject>(Descriptor.SettingsClass.Get());
+		const FName SettingsClassName = SettingsObject.GetClass()->GetFName();
 		PropertyEditorModule.RegisterCustomClassLayout(
 			SettingsClassName,
 			FOnGetDetailCustomizationInstance::CreateStatic(
@@ -258,7 +256,7 @@ void FFoliageBakerEditorModule::RegisterEditorPreferences()
 			Descriptor.SectionName,
 			Descriptor.DisplayName,
 			Descriptor.Description,
-			TWeakObjectPtr<UObject>(SettingsObject));
+			TWeakObjectPtr<UObject>(&SettingsObject));
 	}
 	PropertyEditorModule.NotifyCustomizationModuleChanged();
 }
@@ -271,25 +269,30 @@ void FFoliageBakerEditorModule::UnregisterEditorPreferences()
 		return;
 	}
 
-	if (ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>(TEXT("Settings")))
+	if (FModuleManager::Get().IsModuleLoaded(TEXT("Settings")))
 	{
+		ISettingsModule& SettingsModule =
+			FModuleManager::GetModuleChecked<ISettingsModule>(
+				TEXT("Settings"));
 		for (const FFoliageBakerEditorPreferenceDescriptor& Descriptor :
 			GetEditorPreferenceDescriptors())
 		{
-			SettingsModule->UnregisterSettings(
+			SettingsModule.UnregisterSettings(
 				EditorSettingsContainerName,
 				PluginsSettingsCategoryName,
 				Descriptor.SectionName);
 		}
 	}
-	if (FPropertyEditorModule* PropertyEditorModule =
-		FModuleManager::GetModulePtr<FPropertyEditorModule>(TEXT("PropertyEditor")))
+	if (FModuleManager::Get().IsModuleLoaded(TEXT("PropertyEditor")))
 	{
+		FPropertyEditorModule& PropertyEditorModule =
+			FModuleManager::GetModuleChecked<FPropertyEditorModule>(
+				TEXT("PropertyEditor"));
 		for (const FName& SettingsClassName : RegisteredPreferenceClassNames)
 		{
-			PropertyEditorModule->UnregisterCustomClassLayout(SettingsClassName);
+			PropertyEditorModule.UnregisterCustomClassLayout(SettingsClassName);
 		}
-		PropertyEditorModule->NotifyCustomizationModuleChanged();
+		PropertyEditorModule.NotifyCustomizationModuleChanged();
 	}
 	RegisteredPreferenceClassNames.Reset();
 }
@@ -297,7 +300,8 @@ void FFoliageBakerEditorModule::UnregisterEditorPreferences()
 void FFoliageBakerEditorModule::RegisterMenus()
 {
 	FToolMenuOwnerScoped OwnerScoped(this);
-	UToolMenu* ToolsMenu = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.MainMenu.Tools"));
+	const TObjectPtr<UToolMenu> ToolsMenu =
+		UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.MainMenu.Tools"));
 	if (!ToolsMenu)
 	{
 		return;

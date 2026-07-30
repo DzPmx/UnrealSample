@@ -2,15 +2,17 @@
 
 #include "CoreMinimal.h"
 #include "FoliageBakerMeshOutput.h"
+#include "UObject/StrongObjectPtr.h"
 
 class UFoliageBakerBillboardCloudsSettings;
+class UMaterialInstanceConstant;
 class UStaticMesh;
 
 struct FFoliageBakerBillboardCloudsBakeResult
 {
 	bool bSucceeded = false;
 	bool bCancelled = false;
-	TArray<UObject*> CreatedAssets;
+	TArray<TStrongObjectPtr<UObject>> CreatedAssets;
 	FString Report;
 };
 
@@ -22,6 +24,7 @@ public:
 
 	static FFoliageBakerBillboardCloudsBakeResult Bake(
 		UStaticMesh& StaticMesh,
+		UMaterialInstanceConstant& MaterialTemplate,
 		const UFoliageBakerBillboardCloudsSettings& Settings,
 		const FFoliageBakerMeshOutputSelector& MeshOutputSelector);
 };

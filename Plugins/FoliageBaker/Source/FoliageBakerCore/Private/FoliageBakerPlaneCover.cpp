@@ -706,7 +706,9 @@ namespace UE::FoliageBaker::PlaneCover
 					FMath::Max(PreparedPlane.MaxU - PreparedPlane.MinU, PreparedPlane.MaxV - PreparedPlane.MinV) * AtlasResolutionScale);
 			}
 
-			auto BuildPackRects = [&](const double PixelsPerUnit, TArray<FAtlasPackRect>& OutPackRects)
+			auto BuildPackRects = [
+				&PreparedPlanes,
+				&Settings](const double PixelsPerUnit, TArray<FAtlasPackRect>& OutPackRects)
 			{
 				OutPackRects.Reset();
 				for (int32 PlaneIndex = 0; PlaneIndex < PreparedPlanes.Num(); ++PlaneIndex)
@@ -841,7 +843,9 @@ namespace UE::FoliageBaker::PlaneCover
 					FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, PlaneInfo.MaxV - PlaneInfo.MinV) * AtlasResolutionScale);
 			}
 
-			auto BuildPackRects = [&](const double PixelsPerUnit, TArray<FAtlasPackRect>& OutPackRects)
+			auto BuildPackRects = [
+				&PlaneInfos,
+				&Settings](const double PixelsPerUnit, TArray<FAtlasPackRect>& OutPackRects)
 			{
 				OutPackRects.Reset();
 				for (int32 PlaneIndex = 0; PlaneIndex < PlaneInfos.Num(); ++PlaneIndex)
@@ -1382,16 +1386,17 @@ namespace UE::FoliageBaker::PlaneCover
 			TTriangleAttributesRef<FVector3f>& TriangleTangents,
 			TTriangleAttributesRef<FVector3f>& TriangleBinormals,
 			TEdgeAttributesRef<bool>& EdgeHardnesses,
-			const FVector Corners[4],
-			const FVector2f CornerUVs[4],
-			const FVector2f BackCornerUVs[4],
+			const FVector (&Corners)[4],
+			const FVector2f (&CornerUVs)[4],
+			const FVector2f (&BackCornerUVs)[4],
 			const FVector2f MaskUV,
 			const FVector& InShadingNormal,
 			const bool bReverseFacing)
 		{
 			static constexpr int32 UnrealFrontFaceOrder[4] = { 0, 3, 2, 1 };
 			static constexpr int32 UnrealBackFaceOrder[4] = { 0, 1, 2, 3 };
-			const int32* VertexOrder = bReverseFacing ? UnrealBackFaceOrder : UnrealFrontFaceOrder;
+			const int32 (&VertexOrder)[4] =
+				bReverseFacing ? UnrealBackFaceOrder : UnrealFrontFaceOrder;
 
 			const FVector TangentU = Corners[1] - Corners[0];
 			const FVector TangentV = Corners[3] - Corners[0];
@@ -1461,15 +1466,20 @@ namespace UE::FoliageBaker::PlaneCover
 			return true;
 		}
 
-		bool ExtractTrianglesFromRenderData(const UStaticMesh* StaticMesh, const int32 LODIndex, TArray<FSourceTriangle>& OutTriangles)
+		bool ExtractTrianglesFromRenderData(
+			const UStaticMesh& StaticMesh,
+			const int32 LODIndex,
+			TArray<FSourceTriangle>& OutTriangles)
 		{
 			OutTriangles.Reset();
-			if (!StaticMesh || !StaticMesh->GetRenderData() || !StaticMesh->GetRenderData()->LODResources.IsValidIndex(LODIndex))
+			if (!StaticMesh.GetRenderData()
+				|| !StaticMesh.GetRenderData()->LODResources.IsValidIndex(LODIndex))
 			{
 				return false;
 			}
 
-			const FStaticMeshLODResources& LODResources = StaticMesh->GetRenderData()->LODResources[LODIndex];
+			const FStaticMeshLODResources& LODResources =
+				StaticMesh.GetRenderData()->LODResources[LODIndex];
 			const FPositionVertexBuffer& PositionBuffer = LODResources.VertexBuffers.PositionVertexBuffer;
 			const FStaticMeshVertexBuffer& StaticMeshVertexBuffer = LODResources.VertexBuffers.StaticMeshVertexBuffer;
 			const FColorVertexBuffer& ColorVertexBuffer = LODResources.VertexBuffers.ColorVertexBuffer;
@@ -1593,23 +1603,22 @@ namespace UE::FoliageBaker::PlaneCover
 		}
 	}
 
-	bool ExtractTrianglesFromStaticMesh(const UStaticMesh* StaticMesh, int32 LODIndex, TArray<FSourceTriangle>& OutTriangles, FString& OutError)
+	bool ExtractTrianglesFromStaticMesh(
+		const UStaticMesh& StaticMesh,
+		int32 LODIndex,
+		TArray<FSourceTriangle>& OutTriangles,
+		FString& OutError)
 	{
 		OutTriangles.Reset();
 		OutError.Reset();
 
-		if (!StaticMesh)
-		{
-			OutError = TEXT("StaticMesh is null.");
-			return false;
-		}
 		if (LODIndex < 0)
 		{
 			OutError = FString::Printf(TEXT("Source LOD index %d is invalid."), LODIndex);
 			return false;
 		}
 
-		const FStaticMeshRenderData* RenderData = StaticMesh->GetRenderData();
+		const FStaticMeshRenderData* RenderData = StaticMesh.GetRenderData();
 		const int32 RenderLODCount = RenderData ? RenderData->LODResources.Num() : 0;
 		const bool bHasRenderLOD = RenderData && RenderData->LODResources.IsValidIndex(LODIndex);
 		if (bHasRenderLOD && ExtractTrianglesFromRenderData(StaticMesh, LODIndex, OutTriangles))
@@ -1617,26 +1626,40 @@ namespace UE::FoliageBaker::PlaneCover
 			return true;
 		}
 
-		const FMeshDescription* MeshDescription = StaticMesh->GetMeshDescription(LODIndex);
-		if (!MeshDescription)
+		if (!StaticMesh.IsMeshDescriptionValid(LODIndex))
 		{
 			OutError = FString::Printf(
 				TEXT("Static Mesh '%s' does not contain usable source LOD %d (render LOD count: %d, source model count: %d)."),
-				*StaticMesh->GetName(),
+				*StaticMesh.GetName(),
 				LODIndex,
 				RenderLODCount,
-				StaticMesh->GetNumSourceModels());
+				StaticMesh.GetNumSourceModels());
 			return false;
 		}
 
-		const TVertexAttributesConstRef<FVector3f> VertexPositions = MeshDescription->GetVertexPositions();
-		const FStaticMeshConstAttributes MeshAttributes(*MeshDescription);
-		const bool bHasVertexInstanceNormals = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Normal);
-		const bool bHasVertexInstanceTangents = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Tangent);
-		const bool bHasVertexInstanceBinormalSigns = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::BinormalSign);
-		const bool bHasVertexInstanceUVs = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::TextureCoordinate);
-		const bool bHasVertexInstanceColors = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Color);
-		const bool bHasPolygonGroupMaterialSlots = MeshDescription->PolygonGroupAttributes().HasAttribute(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
+		const FMeshDescription& MeshDescription =
+			*StaticMesh.GetMeshDescription(LODIndex);
+		const TVertexAttributesConstRef<FVector3f> VertexPositions =
+			MeshDescription.GetVertexPositions();
+		const FStaticMeshConstAttributes MeshAttributes(MeshDescription);
+		const bool bHasVertexInstanceNormals =
+			MeshDescription.VertexInstanceAttributes().HasAttribute(
+				MeshAttribute::VertexInstance::Normal);
+		const bool bHasVertexInstanceTangents =
+			MeshDescription.VertexInstanceAttributes().HasAttribute(
+				MeshAttribute::VertexInstance::Tangent);
+		const bool bHasVertexInstanceBinormalSigns =
+			MeshDescription.VertexInstanceAttributes().HasAttribute(
+				MeshAttribute::VertexInstance::BinormalSign);
+		const bool bHasVertexInstanceUVs =
+			MeshDescription.VertexInstanceAttributes().HasAttribute(
+				MeshAttribute::VertexInstance::TextureCoordinate);
+		const bool bHasVertexInstanceColors =
+			MeshDescription.VertexInstanceAttributes().HasAttribute(
+				MeshAttribute::VertexInstance::Color);
+		const bool bHasPolygonGroupMaterialSlots =
+			MeshDescription.PolygonGroupAttributes().HasAttribute(
+				MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
 		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceNormals;
 		if (bHasVertexInstanceNormals)
 		{
@@ -1667,11 +1690,13 @@ namespace UE::FoliageBaker::PlaneCover
 		{
 			PolygonGroupMaterialSlotNames = MeshAttributes.GetPolygonGroupMaterialSlotNames();
 		}
-		OutTriangles.Reserve(MeshDescription->Triangles().Num());
+		OutTriangles.Reserve(MeshDescription.Triangles().Num());
 
-		for (const FTriangleID TriangleID : MeshDescription->Triangles().GetElementIDs())
+		for (const FTriangleID TriangleID :
+			MeshDescription.Triangles().GetElementIDs())
 		{
-			const TArrayView<const FVertexID> TriangleVertexIDs = MeshDescription->GetTriangleVertices(TriangleID);
+			const TArrayView<const FVertexID> TriangleVertexIDs =
+				MeshDescription.GetTriangleVertices(TriangleID);
 			if (TriangleVertexIDs.Num() != 3)
 			{
 				continue;
@@ -1699,7 +1724,10 @@ namespace UE::FoliageBaker::PlaneCover
 			}
 			if (bHasVertexInstanceNormals)
 			{
-				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				const TArrayView<const FVertexInstanceID>
+					TriangleVertexInstanceIDs =
+						MeshDescription.GetTriangleVertexInstances(
+							TriangleID);
 				FVector AveragedNormal = FVector::ZeroVector;
 				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
@@ -1723,7 +1751,10 @@ namespace UE::FoliageBaker::PlaneCover
 			}
 			if (bHasVertexInstanceTangents)
 			{
-				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				const TArrayView<const FVertexInstanceID>
+					TriangleVertexInstanceIDs =
+						MeshDescription.GetTriangleVertexInstances(
+							TriangleID);
 				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
 					bool bAnyTangentValid = false;
@@ -1754,7 +1785,10 @@ namespace UE::FoliageBaker::PlaneCover
 			}
 			if (bHasVertexInstanceUVs && VertexInstanceUVs.GetNumChannels() > 0)
 			{
-				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				const TArrayView<const FVertexInstanceID>
+					TriangleVertexInstanceIDs =
+						MeshDescription.GetTriangleVertexInstances(
+							TriangleID);
 				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
 					const int32 StoredUVChannelCount = FMath::Min(VertexInstanceUVs.GetNumChannels(), UE::FoliageBaker::PlaneCover::MaxSourceMeshUVChannels);
@@ -1774,7 +1808,10 @@ namespace UE::FoliageBaker::PlaneCover
 			}
 			if (bHasVertexInstanceColors)
 			{
-				const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				const TArrayView<const FVertexInstanceID>
+					TriangleVertexInstanceIDs =
+						MeshDescription.GetTriangleVertexInstances(
+							TriangleID);
 				if (TriangleVertexInstanceIDs.Num() == 3)
 				{
 					for (int32 VertexIndex = 0; VertexIndex < 3; ++VertexIndex)
@@ -1786,14 +1823,18 @@ namespace UE::FoliageBaker::PlaneCover
 			}
 			if (bHasPolygonGroupMaterialSlots)
 			{
-				const FPolygonGroupID PolygonGroupID = MeshDescription->GetTrianglePolygonGroup(TriangleID);
-				if (MeshDescription->IsPolygonGroupValid(PolygonGroupID))
+				const FPolygonGroupID PolygonGroupID =
+					MeshDescription.GetTrianglePolygonGroup(TriangleID);
+				if (MeshDescription.IsPolygonGroupValid(PolygonGroupID))
 				{
 					const FName MaterialSlotName = PolygonGroupMaterialSlotNames[PolygonGroupID];
-					int32 MaterialIndex = StaticMesh->GetMaterialIndex(MaterialSlotName);
+					int32 MaterialIndex =
+						StaticMesh.GetMaterialIndex(MaterialSlotName);
 					if (MaterialIndex == INDEX_NONE)
 					{
-						MaterialIndex = StaticMesh->GetMaterialIndexFromImportedMaterialSlotName(MaterialSlotName);
+						MaterialIndex =
+							StaticMesh.GetMaterialIndexFromImportedMaterialSlotName(
+								MaterialSlotName);
 					}
 					Triangle.MaterialIndex = MaterialIndex;
 				}
@@ -1807,7 +1848,7 @@ namespace UE::FoliageBaker::PlaneCover
 			OutError = FString::Printf(
 				TEXT("No non-degenerate triangles found in source LOD %d on Static Mesh '%s'."),
 				LODIndex,
-				*StaticMesh->GetName());
+				*StaticMesh.GetName());
 			return false;
 		}
 
@@ -1820,15 +1861,20 @@ namespace UE::FoliageBaker::PlaneCover
 		return Point - PlaneNormal * SignedDistance;
 	}
 
-	bool BuildPlaneProxyMeshDescription(const TArray<FSourceTriangle>& Triangles, const TArray<FSourceTriangle>& CaptureBoundsTriangles, const FPlaneProxySet& Result, const FPlaneProxySettings& Settings, FMeshDescription& OutMeshDescription, FPlaneProxyMeshStats& OutStats, FString& OutError, TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos)
+	bool BuildPlaneProxyMeshDescription(
+		const TArray<FSourceTriangle>& Triangles,
+		const TArray<FSourceTriangle>& CaptureBoundsTriangles,
+		const FPlaneProxySet& Result,
+		const FPlaneProxySettings& Settings,
+		FMeshDescription& OutMeshDescription,
+		FPlaneProxyMeshStats& OutStats,
+		FString& OutError,
+		TArray<FPlaneProxyPlaneInfo>& OutPlaneInfos)
 	{
 		OutMeshDescription.Empty();
 		OutStats = FPlaneProxyMeshStats();
 		OutError.Reset();
-		if (OutPlaneInfos)
-		{
-			OutPlaneInfos->Reset();
-		}
+		OutPlaneInfos.Reset();
 
 		if (Triangles.IsEmpty())
 		{
@@ -2049,7 +2095,7 @@ namespace UE::FoliageBaker::PlaneCover
 			const FVector2f MaskUV = PreparedPlane.bIsTrunkCard
 				? FVector2f(0.0f, 0.0f)
 				: FVector2f(1.0f, 0.0f);
-			const FVector2f* FrontBackUVs = Settings.bEmitBackFaceGeometry
+			const FVector2f (&FrontBackUVs)[4] = Settings.bEmitBackFaceGeometry
 				? PreparedPlane.AtlasUVs
 				: PreparedPlane.BackAtlasUVs;
 			if (!AddQuadPolygon(OutMeshDescription, PolygonGroupID, VertexPositions, VertexInstanceUVs, VertexInstanceNormals, VertexInstanceTangents, VertexInstanceBinormalSigns, TriangleNormals, TriangleTangents, TriangleBinormals, EdgeHardnesses, PreparedPlane.Corners, PreparedPlane.AtlasUVs, FrontBackUVs, MaskUV, PreparedPlane.ShadingNormal, false))
@@ -2065,43 +2111,41 @@ namespace UE::FoliageBaker::PlaneCover
 				}
 			}
 
-			if (OutPlaneInfos)
+			FPlaneProxyPlaneInfo& PlaneInfo = OutPlaneInfos.AddDefaulted_GetRef();
+			PlaneInfo.SourcePlaneIndex = PreparedPlane.SourcePlaneIndex;
+			PlaneInfo.bIsTrunkCard = PreparedPlane.bIsTrunkCard;
+			PlaneInfo.Normal = PreparedPlane.OrientedNormal;
+			PlaneInfo.Rho = PreparedPlane.OrientedRho;
+			PlaneInfo.AxisU = PreparedPlane.AxisU;
+			PlaneInfo.AxisV = PreparedPlane.AxisV;
+			PlaneInfo.ShadingNormal = PreparedPlane.ShadingNormal;
+			PlaneInfo.MinU = PreparedPlane.MinU;
+			PlaneInfo.MaxU = PreparedPlane.MaxU;
+			PlaneInfo.MinV = PreparedPlane.MinV;
+			PlaneInfo.MaxV = PreparedPlane.MaxV;
+			PlaneInfo.MinSignedDistance = PreparedPlane.MinSignedDistance;
+			PlaneInfo.MaxSignedDistance = PreparedPlane.MaxSignedDistance;
+			PlaneInfo.EnvelopeMinU = PreparedPlane.EnvelopeMinU;
+			PlaneInfo.EnvelopeMaxU = PreparedPlane.EnvelopeMaxU;
+			PlaneInfo.EnvelopeMinV = PreparedPlane.EnvelopeMinV;
+			PlaneInfo.EnvelopeMaxV = PreparedPlane.EnvelopeMaxV;
+			PlaneInfo.EnvelopeMinSignedDistance = PreparedPlane.EnvelopeMinSignedDistance;
+			PlaneInfo.EnvelopeMaxSignedDistance = PreparedPlane.EnvelopeMaxSignedDistance;
+			PlaneInfo.AtlasPixelMin = PreparedPlane.AtlasPixelMin;
+			PlaneInfo.AtlasTileSize = PreparedPlane.AtlasTileSize;
+			PlaneInfo.BackAtlasPixelMin = PreparedPlane.BackAtlasPixelMin;
+			PlaneInfo.BackAtlasTileSize = PreparedPlane.BackAtlasTileSize;
+			PlaneInfo.AtlasTileResolution =
+				FMath::Min(PreparedPlane.AtlasTileSize.X, PreparedPlane.AtlasTileSize.Y);
+			PlaneInfo.AtlasTilePaddingPixels = PreparedPlane.AtlasTilePaddingPixels;
+			PlaneInfo.bHasBackFaceAtlas = PreparedPlane.bHasBackFaceAtlas;
+			PlaneInfo.TriangleIndices = PreparedPlane.TriangleIndices;
+			PlaneInfo.CrackReductionProjections = PreparedPlane.CrackReductionProjections;
+			for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
 			{
-				FPlaneProxyPlaneInfo& PlaneInfo = OutPlaneInfos->AddDefaulted_GetRef();
-				PlaneInfo.SourcePlaneIndex = PreparedPlane.SourcePlaneIndex;
-				PlaneInfo.bIsTrunkCard = PreparedPlane.bIsTrunkCard;
-				PlaneInfo.Normal = PreparedPlane.OrientedNormal;
-				PlaneInfo.Rho = PreparedPlane.OrientedRho;
-				PlaneInfo.AxisU = PreparedPlane.AxisU;
-				PlaneInfo.AxisV = PreparedPlane.AxisV;
-				PlaneInfo.ShadingNormal = PreparedPlane.ShadingNormal;
-				PlaneInfo.MinU = PreparedPlane.MinU;
-				PlaneInfo.MaxU = PreparedPlane.MaxU;
-				PlaneInfo.MinV = PreparedPlane.MinV;
-				PlaneInfo.MaxV = PreparedPlane.MaxV;
-				PlaneInfo.MinSignedDistance = PreparedPlane.MinSignedDistance;
-				PlaneInfo.MaxSignedDistance = PreparedPlane.MaxSignedDistance;
-				PlaneInfo.EnvelopeMinU = PreparedPlane.EnvelopeMinU;
-				PlaneInfo.EnvelopeMaxU = PreparedPlane.EnvelopeMaxU;
-				PlaneInfo.EnvelopeMinV = PreparedPlane.EnvelopeMinV;
-				PlaneInfo.EnvelopeMaxV = PreparedPlane.EnvelopeMaxV;
-				PlaneInfo.EnvelopeMinSignedDistance = PreparedPlane.EnvelopeMinSignedDistance;
-				PlaneInfo.EnvelopeMaxSignedDistance = PreparedPlane.EnvelopeMaxSignedDistance;
-				PlaneInfo.AtlasPixelMin = PreparedPlane.AtlasPixelMin;
-				PlaneInfo.AtlasTileSize = PreparedPlane.AtlasTileSize;
-				PlaneInfo.BackAtlasPixelMin = PreparedPlane.BackAtlasPixelMin;
-				PlaneInfo.BackAtlasTileSize = PreparedPlane.BackAtlasTileSize;
-				PlaneInfo.AtlasTileResolution = FMath::Min(PreparedPlane.AtlasTileSize.X, PreparedPlane.AtlasTileSize.Y);
-				PlaneInfo.AtlasTilePaddingPixels = PreparedPlane.AtlasTilePaddingPixels;
-				PlaneInfo.bHasBackFaceAtlas = PreparedPlane.bHasBackFaceAtlas;
-				PlaneInfo.TriangleIndices = PreparedPlane.TriangleIndices;
-				PlaneInfo.CrackReductionProjections = PreparedPlane.CrackReductionProjections;
-				for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
-				{
-					PlaneInfo.Corners[CornerIndex] = PreparedPlane.Corners[CornerIndex];
-					PlaneInfo.AtlasUVs[CornerIndex] = PreparedPlane.AtlasUVs[CornerIndex];
-					PlaneInfo.BackAtlasUVs[CornerIndex] = PreparedPlane.BackAtlasUVs[CornerIndex];
-				}
+				PlaneInfo.Corners[CornerIndex] = PreparedPlane.Corners[CornerIndex];
+				PlaneInfo.AtlasUVs[CornerIndex] = PreparedPlane.AtlasUVs[CornerIndex];
+				PlaneInfo.BackAtlasUVs[CornerIndex] = PreparedPlane.BackAtlasUVs[CornerIndex];
 			}
 
 			PlaneToShadingNormalDotSum += PreparedPlane.PlaneToShadingNormalDot;
@@ -2120,26 +2164,6 @@ namespace UE::FoliageBaker::PlaneCover
 		OutStats.AveragePlaneToShadingNormalAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(OutStats.AveragePlaneToShadingNormalDot, -1.0, 1.0)));
 
 		return true;
-	}
-
-	bool BuildPlaneProxyMeshDescription(
-		const TArray<FSourceTriangle>& Triangles,
-		const FPlaneProxySet& Result,
-		const FPlaneProxySettings& Settings,
-		FMeshDescription& OutMeshDescription,
-		FPlaneProxyMeshStats& OutStats,
-		FString& OutError,
-		TArray<FPlaneProxyPlaneInfo>* OutPlaneInfos)
-	{
-		return BuildPlaneProxyMeshDescription(
-			Triangles,
-			Triangles,
-			Result,
-			Settings,
-			OutMeshDescription,
-			OutStats,
-			OutError,
-			OutPlaneInfos);
 	}
 
 	bool RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
@@ -2190,7 +2214,7 @@ namespace UE::FoliageBaker::PlaneCover
 				: PlaneInfo.bIsTrunkCard
 					? FVector2f(0.0f, 0.0f)
 					: FVector2f(1.0f, 0.0f);
-			const FVector2f* FrontBackUVs = Settings.bEmitBackFaceGeometry
+			const FVector2f (&FrontBackUVs)[4] = Settings.bEmitBackFaceGeometry
 				? PlaneInfo.AtlasUVs
 				: PlaneInfo.BackAtlasUVs;
 			if (!AddQuadPolygon(

@@ -334,7 +334,7 @@ namespace
 		return Request;
 	}
 
-	UTexture2D* CreateAtlasTextureAsset(
+	TStrongObjectPtr<UTexture2D> CreateAtlasTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
@@ -368,7 +368,7 @@ namespace
 			OutError);
 	}
 
-	UTexture2D* CreateNormalAtlasTextureAsset(
+	TStrongObjectPtr<UTexture2D> CreateNormalAtlasTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
@@ -404,7 +404,7 @@ namespace
 			OutError);
 	}
 
-	UTexture2D* CreateMixAtlasTextureAsset(
+	TStrongObjectPtr<UTexture2D> CreateMixAtlasTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
@@ -437,7 +437,7 @@ namespace
 			OutError);
 	}
 
-	UTexture2D* CreateUpperHemisphereL1VisibilityTextureAsset(
+	TStrongObjectPtr<UTexture2D> CreateUpperHemisphereL1VisibilityTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
@@ -533,11 +533,11 @@ namespace
 
 	struct FProxyMaterialAssetData
 	{
-		UTexture2D* AtlasTexture = nullptr;
-		UTexture2D* NormalAtlasTexture = nullptr;
-		UTexture2D* MixAtlasTexture = nullptr;
-		UTexture2D* UpperHemisphereL1VisibilityTexture = nullptr;
-		UMaterialInstanceConstant* Material = nullptr;
+		TStrongObjectPtr<UTexture2D> AtlasTexture;
+		TStrongObjectPtr<UTexture2D> NormalAtlasTexture;
+		TStrongObjectPtr<UTexture2D> MixAtlasTexture;
+		TStrongObjectPtr<UTexture2D> UpperHemisphereL1VisibilityTexture;
+		TStrongObjectPtr<UMaterialInstanceConstant> Material;
 	};
 
 	bool ResolveMultiBillboardPlaneGroups(
@@ -579,14 +579,14 @@ namespace
 		bool bSucceeded = false;
 		bool bCancelled = false;
 		FString Report;
-		UStaticMesh* ProxyMesh = nullptr;
+		TStrongObjectPtr<UStaticMesh> ProxyMesh;
 		EFoliageBakerMeshAssetOutputMode MeshOutputMode = EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
 		int32 SourceMeshLODIndex = INDEX_NONE;
-		UTexture2D* AtlasTexture = nullptr;
-		UTexture2D* NormalAtlasTexture = nullptr;
-		UTexture2D* MixAtlasTexture = nullptr;
-		UTexture2D* UpperHemisphereL1VisibilityTexture = nullptr;
-		UMaterialInstanceConstant* Material = nullptr;
+		TStrongObjectPtr<UTexture2D> AtlasTexture;
+		TStrongObjectPtr<UTexture2D> NormalAtlasTexture;
+		TStrongObjectPtr<UTexture2D> MixAtlasTexture;
+		TStrongObjectPtr<UTexture2D> UpperHemisphereL1VisibilityTexture;
+		TStrongObjectPtr<UMaterialInstanceConstant> Material;
 	};
 
 	FProxyAssetBuildResult MakeProxyBuildFailure(const UStaticMesh& StaticMesh, const FString& Error)
@@ -891,14 +891,14 @@ namespace
 			OutData.MeshDescription,
 			OutData.Stats,
 			OutError,
-			&OutData.PlaneInfos);
+			OutData.PlaneInfos);
 	}
 
 	bool AppendReducedMultiBillboardTrunk(
 		const UStaticMesh& StaticMesh,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
 		const FProxyPlaneCoverBuildData& CoverData,
-		UMaterialInterface* ProxyMaterial,
+		UMaterialInterface& ProxyMaterial,
 		FProxyMeshBuildData& MeshData,
 		FString& OutError)
 	{
@@ -1026,7 +1026,12 @@ namespace
 			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Opacity, Normal/TrunkLeafMask, Mix, or Upper Hemisphere L1 Visibility.");
 			return false;
 		}
-		auto BakeFeatureAtlas = [&](const FAtlasOutputSelection& OutputSelection,
+		auto BakeFeatureAtlas = [
+			&CoverData,
+			&EditorSettings,
+			&MeshData,
+			&OutError,
+			&StaticMesh](const FAtlasOutputSelection& OutputSelection,
 			const bool bCaptureSourceDepth,
 			TArray<FColor>& AtlasPixels,
 			TArray<FColor>& NormalPixels,
@@ -1297,6 +1302,7 @@ namespace
 
 	bool CreateProxyMaterialAssets(
 		const UStaticMesh& StaticMesh,
+		UMaterialInstanceConstant& TemplateMaterialInstance,
 		const FFoliageBakerCardBakeRequest& EditorSettings,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyMeshBuildData& MeshData,
@@ -1307,13 +1313,6 @@ namespace
 		FProxyMaterialAssetData& OutAssets,
 		FString& OutError)
 	{
-		UMaterialInstanceConstant* TemplateMaterialInstance = EditorSettings.MaterialTemplate;
-		if (!TemplateMaterialInstance)
-		{
-			OutError = TEXT("A parent Material Instance Constant must be selected in the current tool settings.");
-			return false;
-		}
-
 		if (AtlasData.OutputSelection.bBaseColorOpacity)
 		{
 			OutAssets.AtlasTexture = CreateAtlasTextureAsset(
@@ -1415,7 +1414,7 @@ namespace
 			L1VisibilityParameter.ParameterName =
 				EditorSettings.UpperHemisphereL1VisibilityTextureParameterName;
 			L1VisibilityParameter.Texture =
-				OutAssets.UpperHemisphereL1VisibilityTexture;
+				OutAssets.UpperHemisphereL1VisibilityTexture.Get();
 		}
 		MaterialParams.TwoSidedOverride = MaterialRecipe.TwoSidedOverride;
 		OutAssets.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
@@ -1476,7 +1475,7 @@ namespace
 				AssetTransaction,
 				MeshParams,
 				MeshData.OutputMeshDescription,
-				MaterialAssets.Material,
+				*MaterialAssets.Material,
 				OutError);
 			if (!OutResult.ProxyMesh)
 			{
@@ -1495,14 +1494,14 @@ namespace
 				AssetTransaction,
 				LODParams,
 				MeshData.OutputMeshDescription,
-				MaterialAssets.Material,
+				*MaterialAssets.Material,
 				InstalledLODIndex,
 				OutError))
 			{
 				return false;
 			}
 
-			OutResult.ProxyMesh = &StaticMesh;
+			OutResult.ProxyMesh.Reset(&StaticMesh);
 			OutResult.SourceMeshLODIndex = InstalledLODIndex;
 		}
 
@@ -1517,6 +1516,7 @@ namespace
 
 	FString BuildProxySuccessReport(
 		const UStaticMesh& StaticMesh,
+		const UMaterialInstanceConstant& MaterialTemplate,
 		const FFoliageBakerCardBakeRequest& Request,
 		const FProxyPlaneCoverBuildData& CoverData,
 		const FProxyMeshBuildData& MeshData,
@@ -1642,11 +1642,12 @@ namespace
 			: TEXT("packed-atlas prepass before repacking; front/back and grouped-view bounds are conservatively merged when present");
 
 		FString Report = FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/trunk-leaf atlas: %s, RGB=%s, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  material scalar averages: %s\n  atlas UVs: %s\n  material instance: %s (parent template: %s; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: %s"),
+			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/trunk-leaf atlas: %s, RGB=%s, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  material scalar averages: %s\n  atlas UVs: %s\n  material instance: %s (parent template: %s; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: %s"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
 			CoverData.WorldPositionOffsetStats.EvaluatedVertexCount,
+			CoverData.WorldPositionOffsetStats.NonFiniteCulledTriangleCount,
 			CoverData.WorldPositionOffsetStats.MaximumDisplacement,
 			*CoverData.BakeMaterialOverrides.BuildReportDetails(),
 			MeshData.OutputStats.PlaneCount,
@@ -1684,7 +1685,7 @@ namespace
 			*MaterialScalarDetails,
 			AtlasUVDetails,
 			*MaterialAssets.Material->GetPathName(),
-			*Request.MaterialTemplate->GetPathName(),
+			*MaterialTemplate.GetPathName(),
 			*MaterialParameterDetails,
 			MeshData.OutputStats.SourceShadingNormalTriangleCount,
 			MeshData.OutputStats.SourceTriangleCount,
@@ -1731,9 +1732,11 @@ namespace
 	public:
 		FCardBakePipeline(
 			UStaticMesh& InStaticMesh,
+			UMaterialInstanceConstant& InMaterialTemplate,
 			const FFoliageBakerCardBakeRequest& InSettings,
 			const FFoliageBakerMeshOutputSelector& InMeshOutputSelector)
 			: StaticMesh(InStaticMesh)
+			, MaterialTemplate(InMaterialTemplate)
 			, Settings(InSettings)
 			, MeshOutputSelector(InMeshOutputSelector)
 		{
@@ -1789,6 +1792,7 @@ namespace
 			Result.bSucceeded = true;
 			Result.Report = BuildProxySuccessReport(
 				StaticMesh,
+				MaterialTemplate,
 				Settings,
 				Source,
 				Geometry,
@@ -1898,6 +1902,7 @@ namespace
 			}
 			return CreateProxyMaterialAssets(
 				StaticMesh,
+				MaterialTemplate,
 				Settings,
 				AssetTransaction,
 				Geometry,
@@ -1922,7 +1927,7 @@ namespace
 					StaticMesh,
 					Settings,
 					Source,
-					MaterialAssets.Material,
+					*MaterialAssets.Material,
 					Geometry,
 					Error))
 			{
@@ -1947,6 +1952,7 @@ namespace
 		}
 
 		UStaticMesh& StaticMesh;
+		UMaterialInstanceConstant& MaterialTemplate;
 		const FFoliageBakerCardBakeRequest& Settings;
 		const FFoliageBakerMeshOutputSelector& MeshOutputSelector;
 		FString Error;
@@ -1963,7 +1969,9 @@ namespace
 		FProxyAssetBuildResult Result;
 	};
 
-	void AppendCardCreatedAssets(const FProxyAssetBuildResult& BuildResult, TArray<UObject*>& OutCreatedAssets)
+	void AppendCardCreatedAssets(
+		const FProxyAssetBuildResult& BuildResult,
+		TArray<TStrongObjectPtr<UObject>>& OutCreatedAssets)
 	{
 		if (BuildResult.MeshOutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset && BuildResult.ProxyMesh)
 		{
@@ -1992,21 +2000,16 @@ namespace
 	}
 
 	bool ValidateCardBakeRequest(
+		const UStaticMesh& SourceStaticMesh,
 		const FFoliageBakerCardBakeRequest& Request,
 		const FFoliageBakerMeshOutputSelector& MeshOutputSelector,
 		FString& OutFailureReport)
 	{
-		if (!Request.SourceStaticMesh)
-		{
-			OutFailureReport = TEXT("Foliage Baker failed: source Static Mesh is null.");
-			return false;
-		}
-
-		auto Fail = [&](const FString& Message)
+		auto Fail = [&OutFailureReport, &SourceStaticMesh](const FString& Message)
 		{
 			OutFailureReport = FString::Printf(
 				TEXT("%s\n  failed: %s"),
-				*Request.SourceStaticMesh->GetName(),
+				*SourceStaticMesh.GetName(),
 				*Message);
 			return false;
 		};
@@ -2016,10 +2019,6 @@ namespace
 				TEXT("source LOD index %d is outside the supported range 0-%d."),
 				Request.SourceLODIndex,
 				MAX_STATIC_MESH_LODS - 1));
-		}
-		if (!Request.MaterialTemplate)
-		{
-			return Fail(TEXT("a parent Material Instance Constant must be selected in the current tool settings."));
 		}
 		if (!Request.bBakeBaseColorOpacity
 			&& !Request.bBakeNormalDepth
@@ -2039,7 +2038,7 @@ namespace
 		}
 
 		TSet<FName> UsedTextureParameterNames;
-		auto ValidateTextureParameterName = [&](const bool bEnabled,
+		auto ValidateTextureParameterName = [&Fail, &UsedTextureParameterNames](const bool bEnabled,
 			const FName ParameterName,
 			const TCHAR* OutputLabel) -> bool
 		{
@@ -2177,11 +2176,17 @@ namespace
 
 
 FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(
+	UStaticMesh& SourceStaticMesh,
+	UMaterialInstanceConstant& MaterialTemplate,
 	const FFoliageBakerCardBakeRequest& Request,
 	const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 {
 	FString ValidationFailureReport;
-	if (!ValidateCardBakeRequest(Request, MeshOutputSelector, ValidationFailureReport))
+	if (!ValidateCardBakeRequest(
+			SourceStaticMesh,
+			Request,
+			MeshOutputSelector,
+			ValidationFailureReport))
 	{
 		FFoliageBakerCardBakeResult Result;
 		Result.Report = MoveTemp(ValidationFailureReport);
@@ -2192,7 +2197,8 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(
 	FProxyAssetBuildResult InternalResult;
 	{
 		FCardBakePipeline Pipeline(
-			*Request.SourceStaticMesh,
+			SourceStaticMesh,
+			MaterialTemplate,
 			SanitizedRequest,
 			MeshOutputSelector);
 		InternalResult = Pipeline.Run();

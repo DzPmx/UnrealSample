@@ -4,6 +4,7 @@
 #include "FoliageBakerCardsSettings.h"
 #include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerMeshOutput.h"
+#include "UObject/StrongObjectPtr.h"
 
 class UMaterialInstanceConstant;
 class UStaticMesh;
@@ -11,8 +12,6 @@ class UTexture2D;
 
 struct FFoliageBakerCardBakeRequest
 {
-	UStaticMesh* SourceStaticMesh = nullptr;
-	UMaterialInstanceConstant* MaterialTemplate = nullptr;
 	int32 SourceLODIndex = 0;
 
 	EFoliageBakerCardMode Mode = EFoliageBakerCardMode::SingleBillboard;
@@ -72,14 +71,14 @@ struct FFoliageBakerCardBakeResult
 {
 	bool bSucceeded = false;
 	bool bCancelled = false;
-	UStaticMesh* ProxyMesh = nullptr;
+	TStrongObjectPtr<UStaticMesh> ProxyMesh;
 	int32 SourceMeshLODIndex = INDEX_NONE;
-	UTexture2D* ColorOpacityTexture = nullptr;
-	UTexture2D* NormalDepthTexture = nullptr;
-	UTexture2D* MixTexture = nullptr;
-	UTexture2D* UpperHemisphereL1VisibilityTexture = nullptr;
-	UMaterialInstanceConstant* MaterialInstance = nullptr;
-	TArray<UObject*> CreatedAssets;
+	TStrongObjectPtr<UTexture2D> ColorOpacityTexture;
+	TStrongObjectPtr<UTexture2D> NormalDepthTexture;
+	TStrongObjectPtr<UTexture2D> MixTexture;
+	TStrongObjectPtr<UTexture2D> UpperHemisphereL1VisibilityTexture;
+	TStrongObjectPtr<UMaterialInstanceConstant> MaterialInstance;
+	TArray<TStrongObjectPtr<UObject>> CreatedAssets;
 	FString Report;
 };
 
@@ -88,6 +87,8 @@ class FFoliageBakerCardBaker final
 {
 public:
 	static FFoliageBakerCardBakeResult Bake(
+		UStaticMesh& SourceStaticMesh,
+		UMaterialInstanceConstant& MaterialTemplate,
 		const FFoliageBakerCardBakeRequest& Request,
 		const FFoliageBakerMeshOutputSelector& MeshOutputSelector);
 };

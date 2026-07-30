@@ -25,13 +25,13 @@ public:
 	FFoliageBakerAssetTransaction& operator=(FFoliageBakerAssetTransaction&&) = delete;
 
 
-	void Track(UObject* Asset);
+	void Track(UObject& Asset);
 
 
-	bool Snapshot(UObject* Asset, FString& OutError);
+	bool Snapshot(UObject& Asset, FString& OutError);
 
 
-	void SnapshotMetadata(UObject* Asset, FName Key);
+	void SnapshotMetadata(UObject& Asset, FName Key);
 
 	void Commit();
 	void Rollback();
@@ -140,7 +140,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	struct FTextureParameterValue
 	{
 		FName ParameterName = NAME_None;
-		UTexture2D* Texture = nullptr;
+		TObjectPtr<UTexture2D> Texture;
 	};
 
 	struct FVectorParameterValue
@@ -171,7 +171,6 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	TArray<FName> OwnedTextureParameterNames;
 	TArray<FName> OwnedScalarParameterNames;
 	TOptional<bool> TwoSidedOverride;
-	FString MissingTemplateError = TEXT("A parent Material Instance Constant must be provided.");
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerStaticMeshAssetParams
@@ -251,14 +250,14 @@ public:
 		const UStaticMesh& SourceStaticMesh,
 		int32 LODIndex);
 
-	static UTexture2D* CreateTextureAsset(
+	static TStrongObjectPtr<UTexture2D> CreateTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerTextureAssetParams& Params,
 		const TArray<FColor>& Pixels,
 		FString& OutError);
 
-	static UTexture2D* CreatePlaneAtlasTextureAsset(
+	static TStrongObjectPtr<UTexture2D> CreatePlaneAtlasTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerPlaneAtlasTextureAssetParams& Params,
@@ -268,22 +267,22 @@ public:
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		FString& OutError);
 
-	static UMaterialInstanceConstant* CreateMaterialInstanceAsset(
+	static TStrongObjectPtr<UMaterialInstanceConstant> CreateMaterialInstanceAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerMaterialInstanceAssetParams& Params,
-		UMaterialInstanceConstant* TemplateMaterialInstance,
-		UTexture2D* BaseColorOpacityTexture,
-		UTexture2D* NormalDepthTexture,
-		UTexture2D* MixTexture,
+		UMaterialInstanceConstant& TemplateMaterialInstance,
+		const TStrongObjectPtr<UTexture2D>& BaseColorOpacityTexture,
+		const TStrongObjectPtr<UTexture2D>& NormalDepthTexture,
+		const TStrongObjectPtr<UTexture2D>& MixTexture,
 		FString& OutError);
 
-	static UStaticMesh* CreateStaticMeshAsset(
+	static TStrongObjectPtr<UStaticMesh> CreateStaticMeshAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerStaticMeshAssetParams& Params,
 		const FMeshDescription& MeshDescription,
-		UMaterialInterface* ProxyMaterial,
+		UMaterialInterface& ProxyMaterial,
 		FString& OutError);
 
 	static bool ValidateSourceMeshOutputTarget(
@@ -296,7 +295,7 @@ public:
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerSourceLODAssetParams& Params,
 		const FMeshDescription& MeshDescription,
-		UMaterialInterface* ProxyMaterial,
+		UMaterialInterface& ProxyMaterial,
 		int32& OutLODIndex,
 		FString& OutError);
 };

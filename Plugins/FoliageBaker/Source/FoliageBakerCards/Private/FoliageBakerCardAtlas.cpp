@@ -89,21 +89,26 @@ namespace UE::FoliageBaker::Cards::Atlas
 				TileCrops[PlaneIndex] = PlaneCover::FPlaneProxyTileCrop();
 				continue;
 			}
-			const PlaneCover::FPlaneProxyTileCrop* SharedCrop = SharedCrops.Find(GroupIndex);
-			const bool bValidCrop = SharedCrop
-				&& SharedCrop->bEnabled
-				&& SharedCrop->MaxUFraction > SharedCrop->MinUFraction
-				&& SharedCrop->MaxVFraction > SharedCrop->MinVFraction
-				&& (SharedCrop->MinUFraction > CropEpsilon
-					|| SharedCrop->MaxUFraction < 1.0 - CropEpsilon
-					|| SharedCrop->MinVFraction > CropEpsilon
-					|| SharedCrop->MaxVFraction < 1.0 - CropEpsilon);
+			if (!SharedCrops.Contains(GroupIndex))
+			{
+				TileCrops[PlaneIndex] = PlaneCover::FPlaneProxyTileCrop();
+				continue;
+			}
+			const PlaneCover::FPlaneProxyTileCrop& SharedCrop =
+				SharedCrops.FindChecked(GroupIndex);
+			const bool bValidCrop = SharedCrop.bEnabled
+				&& SharedCrop.MaxUFraction > SharedCrop.MinUFraction
+				&& SharedCrop.MaxVFraction > SharedCrop.MinVFraction
+				&& (SharedCrop.MinUFraction > CropEpsilon
+					|| SharedCrop.MaxUFraction < 1.0 - CropEpsilon
+					|| SharedCrop.MinVFraction > CropEpsilon
+					|| SharedCrop.MaxVFraction < 1.0 - CropEpsilon);
 			if (!bValidCrop)
 			{
 				TileCrops[PlaneIndex] = PlaneCover::FPlaneProxyTileCrop();
 				continue;
 			}
-			TileCrops[PlaneIndex] = *SharedCrop;
+			TileCrops[PlaneIndex] = SharedCrop;
 			++CroppedPlaneCount;
 		}
 		return CroppedPlaneCount;
@@ -121,7 +126,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 	{
 		const int32 OldWidth = InOutStats.Width;
 		const int32 OldHeight = InOutStats.Height;
-		auto SynchronizeGeometryStats = [&]()
+		auto SynchronizeGeometryStats = [&InOutGeometry, &InOutStats]()
 		{
 			InOutGeometry.Stats.AtlasWidth = InOutStats.Width;
 			InOutGeometry.Stats.AtlasHeight = InOutStats.Height;
@@ -136,7 +141,16 @@ namespace UE::FoliageBaker::Cards::Atlas
 		int32 UsedMinY = OldHeight;
 		int32 UsedMaxX = 0;
 		int32 UsedMaxY = 0;
-		auto AccumulateTileBounds = [&](const FIntPoint& PixelMin, const FIntPoint& TileSize, const int32 Padding)
+		auto AccumulateTileBounds = [
+			OldHeight,
+			OldWidth,
+			&UsedMaxX,
+			&UsedMaxY,
+			&UsedMinX,
+			&UsedMinY](
+			const FIntPoint& PixelMin,
+			const FIntPoint& TileSize,
+			const int32 Padding)
 		{
 			if (TileSize.X <= 0 || TileSize.Y <= 0)
 			{
@@ -219,7 +233,17 @@ namespace UE::FoliageBaker::Cards::Atlas
 			return true;
 		}
 
-		auto BuildCroppedPixels = [&](
+		auto BuildCroppedPixels = [
+			ContentOffsetX,
+			ContentOffsetY,
+			CopyHeight,
+			CopyMinX,
+			CopyMinY,
+			CopyWidth,
+			NewHeight,
+			NewWidth,
+			OldHeight,
+			OldWidth](
 			const TArray<FColor>& SourcePixels,
 			const FColor BackgroundColor,
 			TArray<FColor>& OutCroppedPixels)
@@ -282,7 +306,15 @@ namespace UE::FoliageBaker::Cards::Atlas
 			OutError = TEXT("Generated card mesh does not contain UV0 and UV1 for atlas cropping.");
 			return false;
 		}
-		auto RemapAtlasUV = [&](const FVector2f& OldUV)
+		auto RemapAtlasUV = [
+			ContentOffsetX,
+			ContentOffsetY,
+			CopyMinX,
+			CopyMinY,
+			NewHeight,
+			NewWidth,
+			OldHeight,
+			OldWidth](const FVector2f& OldUV)
 		{
 			return FVector2f(
 				(static_cast<float>(OldUV.X) * static_cast<float>(OldWidth)

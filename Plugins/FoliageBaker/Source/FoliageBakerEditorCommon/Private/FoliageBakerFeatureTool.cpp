@@ -43,16 +43,18 @@ namespace
 		}
 	};
 
-	TArray<UStaticMesh*> GetSelectedStaticMeshes()
+	TArray<TStrongObjectPtr<UStaticMesh>> GetSelectedStaticMeshes()
 	{
 		TArray<FAssetData> SelectedAssets;
 		AssetSelectionUtils::GetSelectedAssets(SelectedAssets);
 
-		TArray<UStaticMesh*> StaticMeshes;
+		TArray<TStrongObjectPtr<UStaticMesh>> StaticMeshes;
 		StaticMeshes.Reserve(SelectedAssets.Num());
 		for (const FAssetData& AssetData : SelectedAssets)
 		{
-			if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(AssetData.GetAsset()))
+			const TStrongObjectPtr<UStaticMesh> StaticMesh(
+				Cast<UStaticMesh>(AssetData.GetAsset()));
+			if (StaticMesh)
 			{
 				StaticMeshes.AddUnique(StaticMesh);
 			}
@@ -65,11 +67,12 @@ namespace
 		TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes,
 		const FText& TransactionText)
 	{
-		const TArray<UStaticMesh*> SelectedStaticMeshes = GetSelectedStaticMeshes();
+		const TArray<TStrongObjectPtr<UStaticMesh>> SelectedStaticMeshes =
+			GetSelectedStaticMeshes();
 		const bool bHasNewStaticMesh = SelectedStaticMeshes.ContainsByPredicate(
-			[&SourceStaticMeshes](const UStaticMesh* StaticMesh)
+			[&SourceStaticMeshes](const TStrongObjectPtr<UStaticMesh>& StaticMesh)
 			{
-				return !SourceStaticMeshes.Contains(StaticMesh);
+				return !SourceStaticMeshes.Contains(StaticMesh.Get());
 			});
 		if (!bHasNewStaticMesh)
 		{
@@ -78,9 +81,9 @@ namespace
 
 		const FScopedTransaction Transaction(TransactionText);
 		Settings.Modify();
-		for (UStaticMesh* StaticMesh : SelectedStaticMeshes)
+		for (const TStrongObjectPtr<UStaticMesh>& StaticMesh : SelectedStaticMeshes)
 		{
-			SourceStaticMeshes.AddUnique(StaticMesh);
+			SourceStaticMeshes.AddUnique(StaticMesh.Get());
 		}
 		Settings.PostEditChange();
 		return true;
@@ -103,16 +106,16 @@ namespace
 		return true;
 	}
 
-	TArray<UStaticMesh*> GetUniqueValidStaticMeshes(
+	TArray<TStrongObjectPtr<UStaticMesh>> GetUniqueValidStaticMeshes(
 		const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes)
 	{
-		TArray<UStaticMesh*> StaticMeshes;
+		TArray<TStrongObjectPtr<UStaticMesh>> StaticMeshes;
 		StaticMeshes.Reserve(SourceStaticMeshes.Num());
 		for (const TObjectPtr<UStaticMesh>& StaticMesh : SourceStaticMeshes)
 		{
 			if (StaticMesh)
 			{
-				StaticMeshes.AddUnique(StaticMesh.Get());
+				StaticMeshes.AddUnique(TStrongObjectPtr<UStaticMesh>(StaticMesh.Get()));
 			}
 		}
 		return StaticMeshes;
@@ -129,7 +132,7 @@ namespace
 	struct FFoliageBakerFeatureControllerState
 	{
 		TStrongObjectPtr<UObject> SettingsObject;
-		TArray<TObjectPtr<UStaticMesh>>* SourceStaticMeshes = nullptr;
+		TFunction<TArray<TObjectPtr<UStaticMesh>>&()> GetSourceStaticMeshes;
 		TWeakPtr<IDetailsView> DetailsView;
 		FText AddMeshesTransactionText;
 		FText ClearMeshesTransactionText;
@@ -149,12 +152,12 @@ TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Creat
 	const FFoliageBakerFeatureControllerArgs& Args)
 {
 	check(Args.SettingsObject);
-	check(Args.SourceStaticMeshes);
+	check(Args.GetSourceStaticMeshes);
 
 	TUniquePtr<FImpl> Impl = MakeUnique<FImpl>();
 	Impl->State = MakeShared<FFoliageBakerFeatureControllerState>();
-	Impl->State->SettingsObject.Reset(Args.SettingsObject);
-	Impl->State->SourceStaticMeshes = Args.SourceStaticMeshes;
+	Impl->State->SettingsObject = Args.SettingsObject;
+	Impl->State->GetSourceStaticMeshes = Args.GetSourceStaticMeshes;
 	Impl->State->AddMeshesTransactionText = Args.AddMeshesTransactionText;
 	Impl->State->ClearMeshesTransactionText = Args.ClearMeshesTransactionText;
 	Impl->State->CanBake = Args.CanBake;
@@ -174,7 +177,7 @@ TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Creat
 		Args.SettingsObject->GetClass(),
 		FOnGetDetailCustomizationInstance::CreateStatic(
 			&FFoliageBakerCategoryOrderCustomization::MakeInstance));
-	Impl->DetailsView->SetObject(Args.SettingsObject);
+	Impl->DetailsView->SetObject(Args.SettingsObject.Get());
 	Impl->State->DetailsView = Impl->DetailsView;
 
 	const TWeakPtr<FFoliageBakerFeatureControllerState> WeakState = Impl->State;
@@ -212,12 +215,12 @@ TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Creat
 								WeakState.Pin();
 							if (!State
 								|| !State->SettingsObject.IsValid()
-								|| !State->SourceStaticMeshes)
+								|| !State->GetSourceStaticMeshes)
 							{
 								return FText::GetEmpty();
 							}
 							return FormatQueuedStaticMeshCount(
-								*State->SourceStaticMeshes);
+								State->GetSourceStaticMeshes());
 						})
 					]
 					+ SHorizontalBox::Slot()
@@ -235,10 +238,10 @@ TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Creat
 								WeakState.Pin();
 							if (State
 								&& State->SettingsObject.IsValid()
-								&& State->SourceStaticMeshes
+								&& State->GetSourceStaticMeshes
 								&& AddContentBrowserSelection(
 									*State->SettingsObject.Get(),
-									*State->SourceStaticMeshes,
+									State->GetSourceStaticMeshes(),
 									State->AddMeshesTransactionText))
 							{
 								if (const TSharedPtr<IDetailsView> DetailsView =
@@ -264,10 +267,10 @@ TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Creat
 								WeakState.Pin();
 							if (State
 								&& State->SettingsObject.IsValid()
-								&& State->SourceStaticMeshes
+								&& State->GetSourceStaticMeshes
 								&& ClearSourceStaticMeshes(
 									*State->SettingsObject.Get(),
-									*State->SourceStaticMeshes,
+									State->GetSourceStaticMeshes(),
 									State->ClearMeshesTransactionText))
 							{
 								if (const TSharedPtr<IDetailsView> DetailsView =
@@ -385,7 +388,7 @@ FFoliageBakerFeatureBatchResult FFoliageBakerFeatureTool::RunBakeBatch(
 	const FFoliageBakerBakeStaticMeshDelegate& BakeStaticMesh)
 {
 	FFoliageBakerFeatureBatchResult BatchResult;
-	const TArray<UStaticMesh*> StaticMeshes =
+	const TArray<TStrongObjectPtr<UStaticMesh>> StaticMeshes =
 		GetUniqueValidStaticMeshes(SourceStaticMeshes);
 	BatchResult.TotalCount = StaticMeshes.Num();
 	if (!BakeStaticMesh.IsBound())
@@ -395,7 +398,7 @@ FFoliageBakerFeatureBatchResult FFoliageBakerFeatureTool::RunBakeBatch(
 
 	FScopedSlowTask SlowTask(StaticMeshes.Num(), SlowTaskText);
 	SlowTask.MakeDialog(bAllowCancel);
-	for (UStaticMesh* StaticMesh : StaticMeshes)
+	for (const TStrongObjectPtr<UStaticMesh>& StaticMesh : StaticMeshes)
 	{
 		if (!StaticMesh)
 		{
@@ -423,11 +426,21 @@ FFoliageBakerFeatureBatchResult FFoliageBakerFeatureTool::RunBakeBatch(
 }
 
 void FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(
-	const TArray<UObject*>& CreatedAssets)
+	const TArray<TStrongObjectPtr<UObject>>& CreatedAssets)
 {
 	if (!CreatedAssets.IsEmpty() && GEditor)
 	{
-		GEditor->SyncBrowserToObjects(CreatedAssets);
+		// Unreal's Content Browser boundary requires a raw-pointer array.
+		TArray<UObject*> BrowserAssets;
+		BrowserAssets.Reserve(CreatedAssets.Num());
+		for (const TStrongObjectPtr<UObject>& Asset : CreatedAssets)
+		{
+			if (Asset)
+			{
+				BrowserAssets.Add(Asset.Get());
+			}
+		}
+		GEditor->SyncBrowserToObjects(BrowserAssets);
 	}
 }
 

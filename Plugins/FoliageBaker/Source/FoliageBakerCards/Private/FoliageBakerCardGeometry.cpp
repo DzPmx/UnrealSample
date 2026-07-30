@@ -17,12 +17,12 @@ namespace UE::FoliageBaker::Cards::Geometry
 	namespace
 	{
 		FName MakeUniqueMaterialSlotName(
-			UMaterialInterface* Material,
+			const UMaterialInterface& Material,
 			const int32 SourceMaterialIndex,
 			TSet<FName>& InOutUsedSlotNames)
 		{
-			const FString BaseSlotName = Material && !Material->GetName().IsEmpty()
-				? Material->GetName()
+			const FString BaseSlotName = !Material.GetName().IsEmpty()
+				? Material.GetName()
 				: FString::Printf(TEXT("RetainedMaterial_%d"), SourceMaterialIndex);
 			FName Candidate(*BaseSlotName);
 			for (int32 Suffix = 1; InOutUsedSlotNames.Contains(Candidate); ++Suffix)
@@ -36,7 +36,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 		bool BuildRetainedTrunkMeshDescription(
 			const UStaticMesh& StaticMesh,
 			const TArray<PlaneCover::FSourceTriangle>& TrunkTriangles,
-			UMaterialInterface* ProxyMaterial,
+			UMaterialInterface& ProxyMaterial,
 			FMeshDescription& OutMeshDescription,
 			TArray<FFoliageBakerMeshMaterialSlot>& OutMaterialSlots,
 			FString& OutError)
@@ -79,29 +79,29 @@ namespace UE::FoliageBaker::Cards::Geometry
 			TMap<FVector3f, FVertexID> VertexByPosition;
 			TSet<FName> UsedMaterialSlotNames;
 			UsedMaterialSlotNames.Add(TEXT("BillboardProxy"));
-			if (ProxyMaterial && !ProxyMaterial->GetFName().IsNone())
+			if (!ProxyMaterial.GetFName().IsNone())
 			{
-				UsedMaterialSlotNames.Add(ProxyMaterial->GetFName());
+				UsedMaterialSlotNames.Add(ProxyMaterial.GetFName());
 			}
 
 			for (const PlaneCover::FSourceTriangle& Triangle : TrunkTriangles)
 			{
 				FPolygonGroupID PolygonGroupID = INDEX_NONE;
-				if (const FPolygonGroupID* ExistingGroup = PolygonGroupByMaterialIndex.Find(Triangle.MaterialIndex))
+				if (PolygonGroupByMaterialIndex.Contains(Triangle.MaterialIndex))
 				{
-					PolygonGroupID = *ExistingGroup;
+					PolygonGroupID =
+						PolygonGroupByMaterialIndex.FindChecked(
+							Triangle.MaterialIndex);
 				}
 				else
 				{
-					UMaterialInterface* Material = StaticMaterials.IsValidIndex(Triangle.MaterialIndex)
-						? StaticMaterials[Triangle.MaterialIndex].MaterialInterface
-						: nullptr;
-					if (!Material)
-					{
-						Material = UMaterial::GetDefaultMaterial(MD_Surface);
-					}
+					const TObjectPtr<UMaterialInterface> Material =
+						StaticMaterials.IsValidIndex(Triangle.MaterialIndex)
+							? StaticMaterials[Triangle.MaterialIndex].MaterialInterface
+							: UMaterial::GetDefaultMaterial(MD_Surface);
+					check(Material);
 					const FName MaterialSlotName = MakeUniqueMaterialSlotName(
-						Material,
+						*Material,
 						Triangle.MaterialIndex,
 						UsedMaterialSlotNames);
 					PolygonGroupID = OutMeshDescription.CreatePolygonGroup();
@@ -117,9 +117,9 @@ namespace UE::FoliageBaker::Cards::Geometry
 				{
 					const FVector3f Position(Triangle.Vertices[CornerIndex]);
 					FVertexID VertexID = INDEX_NONE;
-					if (const FVertexID* ExistingVertexID = VertexByPosition.Find(Position))
+					if (VertexByPosition.Contains(Position))
 					{
-						VertexID = *ExistingVertexID;
+						VertexID = VertexByPosition.FindChecked(Position);
 					}
 					else
 					{
@@ -162,7 +162,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 		const UStaticMesh& StaticMesh,
 		const TArray<PlaneCover::FSourceTriangle>& TrunkTriangles,
 		const float TrianglePercentage,
-		UMaterialInterface* ProxyMaterial,
+		UMaterialInterface& ProxyMaterial,
 		FMeshDescription& InOutMeshDescription,
 		FRetainedTrunkResult& OutResult,
 		FString& OutError)

@@ -9,6 +9,7 @@ class UStaticMesh;
 struct FOLIAGEBAKERCORE_API FFoliageBakerWorldPositionOffsetStats
 {
 	int32 EvaluatedVertexCount = 0;
+	int32 NonFiniteCulledTriangleCount = 0;
 	double MaximumDisplacement = 0.0;
 };
 

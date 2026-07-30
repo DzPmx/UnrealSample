@@ -34,8 +34,8 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 		FMeshDescription& OutMeshDescription,
 		TArray<FVector2D>& OutCustomTextureCoordinates,
 		int32& OutMatchingTriangleCount,
-		FString* OutError = nullptr,
-		TArray<int32>* OutRasterSourceTriangleIndices = nullptr);
+		FString& OutError,
+		TArray<int32>& OutRasterSourceTriangleIndices);
 
 	FOLIAGEBAKERCORE_API FColor EncodeObjectSpaceNormalToColor(
 		const FVector& InNormal,

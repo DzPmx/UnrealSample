@@ -182,14 +182,11 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 			FMeshDescription& OutMeshDescription,
 			TArray<FVector2D>& OutCustomTextureCoordinates,
 			int32& OutMatchingTriangleCount,
-			TArray<int32>* OutRasterSourceTriangleIndices)
+			TArray<int32>& OutRasterSourceTriangleIndices)
 		{
 			OutMatchingTriangleCount = 0;
 			OutCustomTextureCoordinates.Reset();
-			if (OutRasterSourceTriangleIndices)
-			{
-				OutRasterSourceTriangleIndices->Reset();
-			}
+			OutRasterSourceTriangleIndices.Reset();
 			OutMeshDescription.Empty();
 			FStaticMeshAttributes(OutMeshDescription).Register();
 
@@ -216,7 +213,24 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 			const double UExtent = FMath::Max(PlaneInfo.MaxU - PlaneInfo.MinU, UE_DOUBLE_SMALL_NUMBER);
 			const double VExtent = FMath::Max(PlaneInfo.MaxV - PlaneInfo.MinV, UE_DOUBLE_SMALL_NUMBER);
 
-			auto AppendTriangleGeometry = [&](
+			auto AppendTriangleGeometry = [
+				bEffectiveReverseWinding,
+				bFlipTextureV,
+				DesiredUVChannels,
+				&OutCustomTextureCoordinates,
+				&OutMeshDescription,
+				&OutRasterSourceTriangleIndices,
+				&Params,
+				&PlaneInfo,
+				PolygonGroupID,
+				UExtent,
+				VExtent,
+				&VertexInstanceBinormalSigns,
+				&VertexInstanceColors,
+				&VertexInstanceNormals,
+				&VertexInstanceTangents,
+				&VertexInstanceUVs,
+				&VertexPositions](
 				const int32 SourceTriangleIndex,
 				const PlaneCover::FSourceTriangle& Triangle,
 				const FVector Positions[3]) -> bool
@@ -308,10 +322,7 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 					OutCustomTextureCoordinates.Add(CustomUVs[2]);
 					OutMeshDescription.CreateTriangle(PolygonGroupID, VertexInstanceIDs);
 				}
-				if (OutRasterSourceTriangleIndices)
-				{
-					OutRasterSourceTriangleIndices->Add(SourceTriangleIndex);
-				}
+				OutRasterSourceTriangleIndices.Add(SourceTriangleIndex);
 				return true;
 			};
 
@@ -385,22 +396,17 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 		FMeshDescription& OutMeshDescription,
 		TArray<FVector2D>& OutCustomTextureCoordinates,
 		int32& OutMatchingTriangleCount,
-		FString* OutError,
-		TArray<int32>* OutRasterSourceTriangleIndices)
+		FString& OutError,
+		TArray<int32>& OutRasterSourceTriangleIndices)
 	{
 		OutMatchingTriangleCount = 0;
 		OutCustomTextureCoordinates.Reset();
-		if (OutRasterSourceTriangleIndices)
-		{
-			OutRasterSourceTriangleIndices->Reset();
-		}
+		OutError.Reset();
+		OutRasterSourceTriangleIndices.Reset();
 		if (FMath::IsNearlyEqual(PlaneInfo.MaxU, PlaneInfo.MinU)
 			|| FMath::IsNearlyEqual(PlaneInfo.MaxV, PlaneInfo.MinV))
 		{
-			if (OutError)
-			{
-				*OutError = TEXT("Projected material bake plane footprint is degenerate.");
-			}
+			OutError = TEXT("Projected material bake plane footprint is degenerate.");
 			return false;
 		}
 
@@ -430,14 +436,11 @@ namespace UE::FoliageBaker::ProjectedMaterialBake
 				OutMatchingTriangleCount,
 				OutRasterSourceTriangleIndices))
 		{
-			if (OutError)
-			{
-				*OutError = FString::Printf(
-					TEXT("Projected material bake found no triangles for material %d."),
-					Params.MaterialIndexFilter.IsSet()
-						? Params.MaterialIndexFilter.GetValue()
-						: INDEX_NONE);
-			}
+			OutError = FString::Printf(
+				TEXT("Projected material bake found no triangles for material %d."),
+				Params.MaterialIndexFilter.IsSet()
+					? Params.MaterialIndexFilter.GetValue()
+					: INDEX_NONE);
 			return false;
 		}
 

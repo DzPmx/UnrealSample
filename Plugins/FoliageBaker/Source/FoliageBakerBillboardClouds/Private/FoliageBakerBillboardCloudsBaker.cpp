@@ -347,7 +347,7 @@ namespace
 		return Request;
 	}
 
-	UTexture2D* CreateAtlasTextureAsset(
+	TStrongObjectPtr<UTexture2D> CreateAtlasTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
@@ -384,7 +384,7 @@ namespace
 			OutError);
 	}
 
-	UTexture2D* CreateNormalAtlasTextureAsset(
+	TStrongObjectPtr<UTexture2D> CreateNormalAtlasTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
@@ -416,7 +416,7 @@ namespace
 			OutError);
 	}
 
-	UTexture2D* CreateMixAtlasTextureAsset(
+	TStrongObjectPtr<UTexture2D> CreateMixAtlasTextureAsset(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
@@ -596,10 +596,10 @@ namespace
 		TArray<FColor> NormalAtlasPixels;
 		TArray<FColor> MixAtlasPixels;
 		FAtlasBakeStats AtlasStats;
-		UTexture2D* AtlasTexture = nullptr;
-		UTexture2D* NormalAtlasTexture = nullptr;
-		UTexture2D* MixAtlasTexture = nullptr;
-		UMaterialInstanceConstant* Material = nullptr;
+		TStrongObjectPtr<UTexture2D> AtlasTexture;
+		TStrongObjectPtr<UTexture2D> NormalAtlasTexture;
+		TStrongObjectPtr<UTexture2D> MixAtlasTexture;
+		TStrongObjectPtr<UMaterialInstanceConstant> Material;
 	};
 
 	struct FProxyAssetBuildResult
@@ -607,13 +607,13 @@ namespace
 		bool bSucceeded = false;
 		bool bCancelled = false;
 		FString Report;
-		UStaticMesh* ProxyMesh = nullptr;
+		TStrongObjectPtr<UStaticMesh> ProxyMesh;
 		EFoliageBakerMeshAssetOutputMode MeshOutputMode = EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset;
 		int32 SourceMeshLODIndex = INDEX_NONE;
-		UTexture2D* AtlasTexture = nullptr;
-		UTexture2D* NormalAtlasTexture = nullptr;
-		UTexture2D* MixAtlasTexture = nullptr;
-		UMaterialInstanceConstant* Material = nullptr;
+		TStrongObjectPtr<UTexture2D> AtlasTexture;
+		TStrongObjectPtr<UTexture2D> NormalAtlasTexture;
+		TStrongObjectPtr<UTexture2D> MixAtlasTexture;
+		TStrongObjectPtr<UMaterialInstanceConstant> Material;
 	};
 
 	FProxyAssetBuildResult MakeProxyBuildFailure(const UStaticMesh& StaticMesh, const FString& Error)
@@ -759,11 +759,12 @@ namespace
 			OutData.MeshDescription,
 			OutData.Stats,
 			OutError,
-			&OutData.PlaneInfos);
+			OutData.PlaneInfos);
 	}
 
 	bool BuildProxyTextureData(
 		const UStaticMesh& StaticMesh,
+		UMaterialInstanceConstant& TemplateMaterialInstance,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyPlaneCoverBuildData& CoverData,
@@ -806,14 +807,6 @@ namespace
 		{
 			return false;
 		}
-		UMaterialInstanceConstant* TemplateMaterialInstance =
-			EditorSettings.BillboardMaterialTemplate.LoadSynchronous();
-		if (!TemplateMaterialInstance)
-		{
-			OutError = TEXT("Billboard Clouds Parent Material Instance is not selected in the current tool settings.");
-			return false;
-		}
-
 		int32 AlphaAwareCroppedPlaneCount = 0;
 		if (CoverData.Settings.bEnableAlphaAwareTileCrop && !MeshData.PlaneInfos.IsEmpty())
 		{
@@ -1024,7 +1017,6 @@ namespace
 				return false;
 			}
 		}
-		MaterialParams.MissingTemplateError = TEXT("Billboard Clouds Parent Material Instance is not selected in the current tool settings.");
 		OutData.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,
 			AssetTransaction,
@@ -1063,7 +1055,7 @@ namespace
 				AssetTransaction,
 				MeshParams,
 				MeshData.MeshDescription,
-				TextureData.Material,
+				*TextureData.Material,
 				OutError);
 			if (!OutResult.ProxyMesh)
 			{
@@ -1078,14 +1070,14 @@ namespace
 				AssetTransaction,
 				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection),
 				MeshData.MeshDescription,
-				TextureData.Material,
+				*TextureData.Material,
 				InstalledLODIndex,
 				OutError))
 			{
 				return false;
 			}
 
-			OutResult.ProxyMesh = &StaticMesh;
+			OutResult.ProxyMesh.Reset(&StaticMesh);
 			OutResult.SourceMeshLODIndex = InstalledLODIndex;
 		}
 
@@ -1163,11 +1155,12 @@ namespace
 				: TEXT("packed-atlas prepass before repacking; front/back bounds are conservatively merged when present");
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); source WPO uses the same material shader path for capture and formal bake\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: ColorOpacity.A and UV2, trunk alpha=0.5 (128), leaf alpha=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); source WPO uses the same material shader path for capture and formal bake\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: ColorOpacity.A and UV2, trunk alpha=0.5 (128), leaf alpha=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
 			CoverData.WorldPositionOffsetStats.EvaluatedVertexCount,
+			CoverData.WorldPositionOffsetStats.NonFiniteCulledTriangleCount,
 			CoverData.WorldPositionOffsetStats.MaximumDisplacement,
 			*CoverData.BakeMaterialOverrides.BuildReportDetails(),
 			MeshData.Stats.PlaneCount,
@@ -1203,6 +1196,7 @@ namespace
 
 	FProxyAssetBuildResult BuildBillboardCloudProxyAsset(
 		UStaticMesh& StaticMesh,
+		UMaterialInstanceConstant& MaterialTemplate,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 	{
@@ -1270,6 +1264,7 @@ namespace
 		FFoliageBakerAssetTransaction AssetTransaction;
 		if (!BuildProxyTextureData(
 				StaticMesh,
+				MaterialTemplate,
 				EditorSettings,
 				AssetTransaction,
 				CoverData,
@@ -1304,7 +1299,9 @@ namespace
 		return Result;
 	}
 
-	void AppendProxyCreatedAssets(const FProxyAssetBuildResult& BuildResult, TArray<UObject*>& OutCreatedAssets)
+	void AppendProxyCreatedAssets(
+		const FProxyAssetBuildResult& BuildResult,
+		TArray<TStrongObjectPtr<UObject>>& OutCreatedAssets)
 	{
 		if (BuildResult.ProxyMesh)
 		{
@@ -1337,6 +1334,7 @@ bool FFoliageBakerBillboardCloudsBaker::HasAnyAtlasOutput(
 
 FFoliageBakerBillboardCloudsBakeResult FFoliageBakerBillboardCloudsBaker::Bake(
 	UStaticMesh& StaticMesh,
+	UMaterialInstanceConstant& MaterialTemplate,
 	const UFoliageBakerBillboardCloudsSettings& Settings,
 	const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 {
@@ -1351,6 +1349,7 @@ FFoliageBakerBillboardCloudsBakeResult FFoliageBakerBillboardCloudsBaker::Bake(
 	const FProxyAssetBuildResult BuildResult =
 		BuildBillboardCloudProxyAsset(
 			StaticMesh,
+			MaterialTemplate,
 			Settings,
 			MeshOutputSelector);
 	FFoliageBakerBillboardCloudsBakeResult Result;

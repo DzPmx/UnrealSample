@@ -234,7 +234,7 @@ namespace
 			const FName Key,
 			const TSet<FName>& Names)
 		{
-			AssetTransaction.SnapshotMetadata(&MaterialInstance, Key);
+			AssetTransaction.SnapshotMetadata(MaterialInstance, Key);
 			const FString SerializedNames = SerializeOwnedParameterNames(Names);
 			if (SerializedNames.IsEmpty())
 			{
@@ -295,14 +295,16 @@ namespace
 			: PackagePath.Left(SecondSlashIndex);
 	}
 
-	bool TryGetAssetPackageFolder(const UObject* Asset, FString& OutPackageFolder)
+	bool TryGetAssetPackageFolder(
+		const UObject& Asset,
+		FString& OutPackageFolder)
 	{
 		OutPackageFolder.Reset();
-		if (!IsValid(Asset))
+		if (!IsValid(&Asset))
 		{
 			return false;
 		}
-		const FString PackageName = Asset->GetOutermost()->GetName();
+		const FString PackageName = Asset.GetOutermost()->GetName();
 		if (!FPackageName::IsValidLongPackageName(PackageName))
 		{
 			return false;
@@ -354,14 +356,15 @@ namespace
 	}
 
 	FString SelectMaterialOutputFolder(
-		const TArray<UMaterialInterface*>& Materials,
+		const TArray<TObjectPtr<UMaterialInterface>>& Materials,
 		const FString& SourcePackageRoot)
 	{
 		TArray<FString> MaterialFolders;
-		for (const UMaterialInterface* Material : Materials)
+		for (const TObjectPtr<UMaterialInterface>& Material : Materials)
 		{
 			FString MaterialFolder;
-			if (TryGetAssetPackageFolder(Material, MaterialFolder)
+			if (Material
+				&& TryGetAssetPackageFolder(*Material, MaterialFolder)
 				&& GetPackageRoot(MaterialFolder) == SourcePackageRoot)
 			{
 				MaterialFolders.AddUnique(MaterialFolder);
@@ -376,12 +379,12 @@ namespace
 	}
 
 	FString SelectTextureOutputFolder(
-		const TArray<UMaterialInterface*>& Materials,
+		const TArray<TObjectPtr<UMaterialInterface>>& Materials,
 		const FString& MaterialFolder,
 		const FString& SourcePackageRoot)
 	{
 		TMap<FString, int32> FolderUseCounts;
-		for (UMaterialInterface* Material : Materials)
+		for (const TObjectPtr<UMaterialInterface>& Material : Materials)
 		{
 			TArray<UTexture*> UsedTextures;
 			Material->GetUsedTextures(UsedTextures);
@@ -389,7 +392,8 @@ namespace
 			for (const UTexture* Texture : UsedTextures)
 			{
 				FString TextureFolder;
-				if (TryGetAssetPackageFolder(Texture, TextureFolder)
+				if (Texture
+					&& TryGetAssetPackageFolder(*Texture, TextureFolder)
 					&& GetPackageRoot(TextureFolder) == SourcePackageRoot)
 				{
 					MaterialTextureFolders.Add(TextureFolder);
@@ -450,6 +454,7 @@ namespace
 	void FinishCompilationForAssets(
 		const TArray<TStrongObjectPtr<UObject>>& Assets)
 	{
+		// FAssetCompilingManager requires a raw-pointer array at this boundary.
 		TArray<UObject*> ValidAssets;
 		ValidAssets.Reserve(Assets.Num());
 		for (const TStrongObjectPtr<UObject>& Asset : Assets)
@@ -463,11 +468,6 @@ namespace
 		{
 			FAssetCompilingManager::Get().FinishCompilationForObjects(ValidAssets);
 		}
-	}
-
-	UMaterialInterface* ResolveProxyMaterial(UMaterialInterface* ProxyMaterial)
-	{
-		return ProxyMaterial ? ProxyMaterial : UMaterial::GetDefaultMaterial(MD_Surface);
 	}
 
 	bool EnsureMaterialInstanceEditorOnlyData(
@@ -502,10 +502,10 @@ namespace
 			return true;
 		}
 
-		UObject* ExistingObject =
+		const TObjectPtr<UObject> ExistingObject =
 			StaticFindObject(nullptr, &MaterialInstance, *EditorOnlyDataName);
-		UMaterialInstanceEditorOnlyData* RepairedEditorOnlyData =
-			Cast<UMaterialInstanceEditorOnlyData>(ExistingObject);
+		TObjectPtr<UMaterialInstanceEditorOnlyData> RepairedEditorOnlyData =
+			Cast<UMaterialInstanceEditorOnlyData>(ExistingObject.Get());
 		if (ExistingObject && !RepairedEditorOnlyData)
 		{
 			OutError = FString::Printf(
@@ -567,9 +567,9 @@ namespace
 		RestoreParams.bDoDelta = false;
 
 #if WITH_EDITORONLY_DATA
-		UMaterialInstanceConstant* OriginalMaterialInstance =
+		const TObjectPtr<UMaterialInstanceConstant> OriginalMaterialInstance =
 			Cast<UMaterialInstanceConstant>(&Original);
-		UMaterialInstanceConstant* BackupMaterialInstance =
+		const TObjectPtr<UMaterialInstanceConstant> BackupMaterialInstance =
 			Cast<UMaterialInstanceConstant>(&Backup);
 		if (OriginalMaterialInstance && BackupMaterialInstance)
 		{
@@ -590,10 +590,11 @@ namespace
 				return false;
 			}
 
-			UMaterialInstanceEditorOnlyData* OriginalEditorOnlyData =
+			const TObjectPtr<UMaterialInstanceEditorOnlyData> OriginalEditorOnlyData =
 				OriginalMaterialInstance->GetEditorOnlyData();
-			UMaterialInstanceEditorOnlyData* BackupEditorOnlyData =
+			const TObjectPtr<UMaterialInstanceEditorOnlyData> BackupEditorOnlyData =
 				BackupMaterialInstance->GetEditorOnlyData();
+			// CopyPropertiesForUnrelatedObjects requires this raw UObject mapping.
 			TMap<UObject*, UObject*> ReplacementMappings;
 			ReplacementMappings.Add(&Backup, &Original);
 			ReplacementMappings.Add(
@@ -668,22 +669,24 @@ namespace
 
 	void AssignMaterialSlot(
 		FStaticMaterial& StaticMaterial,
-		UMaterialInterface* Material,
+		UMaterialInterface& Material,
 		const FName MaterialSlotName)
 	{
-		StaticMaterial.MaterialInterface = Material;
+		StaticMaterial.MaterialInterface = &Material;
 		StaticMaterial.MaterialSlotName = MaterialSlotName;
 		StaticMaterial.ImportedMaterialSlotName = MaterialSlotName;
 	}
 
 	int32 EnsureNamedMaterialSlot(
 		UStaticMesh& StaticMesh,
-		UMaterialInterface* MaterialInterface,
+		const TObjectPtr<UMaterialInterface> MaterialInterface,
 		const FName RequestedSlotName)
 	{
-		UMaterialInterface* Material = ResolveProxyMaterial(MaterialInterface);
+		UMaterialInterface& Material = MaterialInterface
+			? *MaterialInterface
+			: *UMaterial::GetDefaultMaterial(MD_Surface);
 		const FName MaterialSlotName = RequestedSlotName.IsNone()
-			? Material->GetFName()
+			? Material.GetFName()
 			: RequestedSlotName;
 		TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
 		const int32 MaterialIndex = FindMaterialSlotIndex(StaticMaterials, MaterialSlotName);
@@ -693,7 +696,8 @@ namespace
 			return MaterialIndex;
 		}
 
-		return StaticMaterials.Add(FStaticMaterial(Material, MaterialSlotName, MaterialSlotName));
+		return StaticMaterials.Add(
+			FStaticMaterial(&Material, MaterialSlotName, MaterialSlotName));
 	}
 
 	void EnsureAdditionalMaterialSlots(
@@ -709,10 +713,12 @@ namespace
 		}
 	}
 
-	int32 EnsureProxyMaterialSlot(UStaticMesh& StaticMesh, UMaterialInterface* ProxyMaterial, const FName LegacySlotName)
+	int32 EnsureProxyMaterialSlot(
+		UStaticMesh& StaticMesh,
+		UMaterialInterface& Material,
+		const FName LegacySlotName)
 	{
-		UMaterialInterface* Material = ResolveProxyMaterial(ProxyMaterial);
-		const FName MaterialSlotName = Material->GetFName();
+		const FName MaterialSlotName = Material.GetFName();
 		TArray<FStaticMaterial>& StaticMaterials = StaticMesh.GetStaticMaterials();
 		int32 MaterialIndex = FindMaterialSlotIndex(StaticMaterials, MaterialSlotName);
 		if (MaterialIndex == INDEX_NONE && LegacySlotName != MaterialSlotName)
@@ -725,7 +731,8 @@ namespace
 			return MaterialIndex;
 		}
 
-		return StaticMaterials.Add(FStaticMaterial(Material, MaterialSlotName, MaterialSlotName));
+		return StaticMaterials.Add(
+			FStaticMaterial(&Material, MaterialSlotName, MaterialSlotName));
 	}
 
 	void AddMaterialIndexIfValid(
@@ -744,17 +751,22 @@ namespace
 		const int32 LODIndex,
 		TSet<int32>& OutMaterialIndices)
 	{
-		const FMeshDescription* MeshDescription = StaticMesh.GetMeshDescription(LODIndex);
-		if (!MeshDescription
-			|| !MeshDescription->PolygonGroupAttributes().HasAttribute(
+		if (!StaticMesh.IsMeshDescriptionValid(LODIndex))
+		{
+			return;
+		}
+		const FMeshDescription& MeshDescription =
+			*StaticMesh.GetMeshDescription(LODIndex);
+		if (!MeshDescription.PolygonGroupAttributes().HasAttribute(
 				MeshAttribute::PolygonGroup::ImportedMaterialSlotName))
 		{
 			return;
 		}
 
 		const TPolygonGroupAttributesConstRef<FName> MaterialSlotNames =
-			FStaticMeshConstAttributes(*MeshDescription).GetPolygonGroupMaterialSlotNames();
-		for (const FPolygonGroupID PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+			FStaticMeshConstAttributes(MeshDescription).GetPolygonGroupMaterialSlotNames();
+		for (const FPolygonGroupID PolygonGroupID :
+			MeshDescription.PolygonGroups().GetElementIDs())
 		{
 			const FName MaterialSlotName = MaterialSlotNames[PolygonGroupID];
 			int32 MaterialIndex = StaticMesh.GetMaterialIndex(MaterialSlotName);
@@ -781,7 +793,10 @@ namespace
 			}
 		}
 
-		auto AddSectionInfoMapIndices = [&](const FMeshSectionInfoMap& SectionInfoMap)
+		auto AddSectionInfoMapIndices = [
+			&OutMaterialIndices,
+			&StaticMesh,
+			LODIndex](const FMeshSectionInfoMap& SectionInfoMap)
 		{
 			for (const TPair<uint32, FMeshSectionInfo>& Entry : SectionInfoMap.Map)
 			{
@@ -803,7 +818,9 @@ namespace
 		const UStaticMesh& StaticMesh,
 		TSet<int32>& OutMaterialIndices)
 	{
-		auto AddSectionInfoMapIndices = [&](const FMeshSectionInfoMap& SectionInfoMap)
+		auto AddSectionInfoMapIndices = [
+			&OutMaterialIndices,
+			&StaticMesh](const FMeshSectionInfoMap& SectionInfoMap)
 		{
 			for (const TPair<uint32, FMeshSectionInfo>& Entry : SectionInfoMap.Map)
 			{
@@ -942,9 +959,13 @@ namespace
 			SourceModel.BuildSettings.bUseFullPrecisionUVs = false;
 		}
 
-		if (FMeshDescription* MeshDescription = StaticMesh.GetMeshDescription(LODIndex))
+		if (StaticMesh.IsMeshDescriptionValid(LODIndex))
 		{
-			TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = FStaticMeshAttributes(*MeshDescription).GetVertexInstanceUVs();
+			FMeshDescription& MeshDescription =
+				*StaticMesh.GetMeshDescription(LODIndex);
+			TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs =
+				FStaticMeshAttributes(MeshDescription)
+					.GetVertexInstanceUVs();
 			if (VertexInstanceUVs.GetNumChannels() != ClampedDesiredChannelCount)
 			{
 				VertexInstanceUVs.SetNumChannels(ClampedDesiredChannelCount);
@@ -1445,7 +1466,11 @@ namespace
 		}
 		TArray<FImage> CurrentTileMips;
 		CurrentTileMips.Reserve(TileRects.Num());
-		auto ApplyTileMipSemantics = [&](
+		auto ApplyTileMipSemantics = [
+			&MipZeroTileAlpha,
+			&Params,
+			&TileRects,
+			SemanticMaskMipCoverageThreshold](
 			const FImage& SourceTile,
 			FImage& DestinationTile,
 			const int32 TileIndex)
@@ -1786,22 +1811,22 @@ FFoliageBakerAssetTransaction::~FFoliageBakerAssetTransaction()
 	Rollback();
 }
 
-void FFoliageBakerAssetTransaction::Track(UObject* Asset)
+void FFoliageBakerAssetTransaction::Track(UObject& Asset)
 {
-	if (!bFinished && Asset)
+	if (!bFinished)
 	{
 		if (!CreatedAssets.ContainsByPredicate(
-				[Asset](const TStrongObjectPtr<UObject>& CreatedAsset)
+				[&Asset](const TStrongObjectPtr<UObject>& CreatedAsset)
 				{
-					return CreatedAsset.Get() == Asset;
+					return CreatedAsset.Get() == &Asset;
 				}))
 		{
-			CreatedAssets.Emplace(Asset);
+			CreatedAssets.Emplace(&Asset);
 		}
 	}
 }
 
-bool FFoliageBakerAssetTransaction::Snapshot(UObject* Asset, FString& OutError)
+bool FFoliageBakerAssetTransaction::Snapshot(UObject& Asset, FString& OutError)
 {
 	OutError.Reset();
 	if (bFinished)
@@ -1809,69 +1834,74 @@ bool FFoliageBakerAssetTransaction::Snapshot(UObject* Asset, FString& OutError)
 		OutError = TEXT("Cannot snapshot an asset after its bake transaction has finished.");
 		return false;
 	}
-	if (!IsValid(Asset))
+	if (!IsValid(&Asset))
 	{
 		OutError = TEXT("Cannot snapshot an invalid asset.");
 		return false;
 	}
 	if (CreatedAssets.ContainsByPredicate(
-			[Asset](const TStrongObjectPtr<UObject>& CreatedAsset)
+			[&Asset](const TStrongObjectPtr<UObject>& CreatedAsset)
 			{
-				return CreatedAsset.Get() == Asset;
+				return CreatedAsset.Get() == &Asset;
 			})
 		|| ObjectSnapshots.ContainsByPredicate(
-			[Asset](const FObjectSnapshot& Snapshot)
+			[&Asset](const FObjectSnapshot& Snapshot)
 			{
-				return Snapshot.Original.Get() == Asset;
+				return Snapshot.Original.Get() == &Asset;
 			}))
 	{
 		return true;
 	}
 
 	TArray<TStrongObjectPtr<UObject>> AssetToFinish;
-	AssetToFinish.Emplace(Asset);
+	AssetToFinish.Emplace(&Asset);
 	FinishCompilationForAssets(AssetToFinish);
 	const FName BackupName = MakeUniqueObjectName(
 		GetTransientPackage(),
-		Asset->GetClass(),
-		FName(*(Asset->GetName() + TEXT("_FoliageBakerSnapshot"))));
-	UObject* Backup = DuplicateObject<UObject>(Asset, GetTransientPackage(), BackupName);
+		Asset.GetClass(),
+		FName(*(Asset.GetName() + TEXT("_FoliageBakerSnapshot"))));
+	TStrongObjectPtr<UObject> Backup(
+		DuplicateObject<UObject>(&Asset, GetTransientPackage(), BackupName));
 	if (!Backup)
 	{
-		OutError = FString::Printf(TEXT("Could not snapshot %s before rebaking it."), *Asset->GetPathName());
+		OutError = FString::Printf(
+			TEXT("Could not snapshot %s before rebaking it."),
+			*Asset.GetPathName());
 		return false;
 	}
 	Backup->ClearFlags(RF_Public | RF_Standalone);
 	Backup->SetFlags(RF_Transient);
 
 	FObjectSnapshot Snapshot;
-	Snapshot.Original.Reset(Asset);
-	Snapshot.Backup = TStrongObjectPtr<UObject>(Backup);
-	Snapshot.bPackageWasDirty = Asset->GetOutermost()->IsDirty();
-	Snapshot.ObjectFlags = Asset->GetFlags();
+	Snapshot.Original.Reset(&Asset);
+	Snapshot.Backup = MoveTemp(Backup);
+	Snapshot.bPackageWasDirty = Asset.GetOutermost()->IsDirty();
+	Snapshot.ObjectFlags = Asset.GetFlags();
 	ObjectSnapshots.Add(MoveTemp(Snapshot));
 	return true;
 }
 
-void FFoliageBakerAssetTransaction::SnapshotMetadata(UObject* Asset, const FName Key)
+void FFoliageBakerAssetTransaction::SnapshotMetadata(
+	UObject& Asset,
+	const FName Key)
 {
-	if (bFinished || !IsValid(Asset) || Key.IsNone()
-		|| MetadataSnapshots.ContainsByPredicate([Asset, Key](const FMetadataSnapshot& Snapshot)
+	if (bFinished || !IsValid(&Asset) || Key.IsNone()
+		|| MetadataSnapshots.ContainsByPredicate([&Asset, Key](const FMetadataSnapshot& Snapshot)
 		{
-			return Snapshot.Asset.Get() == Asset && Snapshot.Key == Key;
+			return Snapshot.Asset.Get() == &Asset && Snapshot.Key == Key;
 		}))
 	{
 		return;
 	}
 
-	FMetaData& MetaData = Asset->GetPackage()->GetMetaData();
+	FMetaData& MetaData = Asset.GetPackage()->GetMetaData();
 	FMetadataSnapshot Snapshot;
-	Snapshot.Asset.Reset(Asset);
+	Snapshot.Asset.Reset(&Asset);
 	Snapshot.Key = Key;
-	Snapshot.bHadValue = MetaData.HasValue(Asset, Key);
+	Snapshot.bHadValue = MetaData.HasValue(&Asset, Key);
 	if (Snapshot.bHadValue)
 	{
-		Snapshot.Value = MetaData.GetValue(Asset, Key);
+		Snapshot.Value = MetaData.GetValue(&Asset, Key);
 	}
 	MetadataSnapshots.Add(MoveTemp(Snapshot));
 }
@@ -1969,6 +1999,7 @@ void FFoliageBakerAssetTransaction::Rollback()
 		}
 	}
 
+	// ObjectTools requires a raw-pointer array at this boundary.
 	TArray<UObject*> AssetsToDelete;
 	for (const TStrongObjectPtr<UObject>& Asset : CreatedAssets)
 	{
@@ -2159,31 +2190,41 @@ FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
 
 	if (UsedMaterialIndices.IsEmpty())
 	{
-		if (const FMeshDescription* MeshDescription = SourceStaticMesh.GetMeshDescription(LODIndex);
-			MeshDescription
-			&& MeshDescription->PolygonGroupAttributes().HasAttribute(
-				MeshAttribute::PolygonGroup::ImportedMaterialSlotName))
+		if (SourceStaticMesh.IsMeshDescriptionValid(LODIndex))
 		{
-			const TPolygonGroupAttributesConstRef<FName> MaterialSlotNames =
-				FStaticMeshConstAttributes(*MeshDescription).GetPolygonGroupMaterialSlotNames();
-			for (const FPolygonGroupID PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+			const FMeshDescription& MeshDescription =
+				*SourceStaticMesh.GetMeshDescription(LODIndex);
+			if (MeshDescription.PolygonGroupAttributes().HasAttribute(
+					MeshAttribute::PolygonGroup::ImportedMaterialSlotName))
 			{
-				const FName MaterialSlotName = MaterialSlotNames[PolygonGroupID];
-				int32 MaterialIndex = SourceStaticMesh.GetMaterialIndex(MaterialSlotName);
-				if (MaterialIndex == INDEX_NONE)
+				const TPolygonGroupAttributesConstRef<FName>
+					MaterialSlotNames =
+						FStaticMeshConstAttributes(MeshDescription)
+							.GetPolygonGroupMaterialSlotNames();
+				for (const FPolygonGroupID PolygonGroupID :
+					MeshDescription.PolygonGroups().GetElementIDs())
 				{
-					MaterialIndex = SourceStaticMesh.GetMaterialIndexFromImportedMaterialSlotName(
-						MaterialSlotName);
-				}
-				if (MaterialIndex != INDEX_NONE)
-				{
-					UsedMaterialIndices.AddUnique(MaterialIndex);
+					const FName MaterialSlotName =
+						MaterialSlotNames[PolygonGroupID];
+					int32 MaterialIndex =
+						SourceStaticMesh.GetMaterialIndex(
+							MaterialSlotName);
+					if (MaterialIndex == INDEX_NONE)
+					{
+						MaterialIndex =
+							SourceStaticMesh.GetMaterialIndexFromImportedMaterialSlotName(
+								MaterialSlotName);
+					}
+					if (MaterialIndex != INDEX_NONE)
+					{
+						UsedMaterialIndices.AddUnique(MaterialIndex);
+					}
 				}
 			}
 		}
 	}
 
-	TArray<UMaterialInterface*> UsedMaterials;
+	TArray<TObjectPtr<UMaterialInterface>> UsedMaterials;
 	const TArray<FStaticMaterial>& StaticMaterials = SourceStaticMesh.GetStaticMaterials();
 	for (const int32 MaterialIndex : UsedMaterialIndices)
 	{
@@ -2209,7 +2250,8 @@ FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
 	return Result;
 }
 
-UTexture2D* FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
+TStrongObjectPtr<UTexture2D>
+	FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 	const UStaticMesh& SourceStaticMesh,
 	FFoliageBakerAssetTransaction& AssetTransaction,
 	const FFoliageBakerPlaneAtlasTextureAssetParams& Params,
@@ -2264,7 +2306,7 @@ UTexture2D* FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 		OutError);
 }
 
-UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
+TStrongObjectPtr<UTexture2D> FFoliageBakerAssetBuilder::CreateTextureAsset(
 	const UStaticMesh& SourceStaticMesh,
 	FFoliageBakerAssetTransaction& AssetTransaction,
 	const FFoliageBakerTextureAssetParams& Params,
@@ -2306,12 +2348,13 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 	}
 
 	const FString ObjectPath = PackageName + TEXT(".") + AssetName;
-	UObject* ExistingObject = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
-	UTexture2D* Texture = nullptr;
+	const TStrongObjectPtr<UObject> ExistingObject(
+		StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath));
+	TStrongObjectPtr<UTexture2D> Texture;
 	if (Params.ExistingAssetPolicy
 		== EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
 	{
-		Texture = Cast<UTexture2D>(ExistingObject);
+		Texture.Reset(Cast<UTexture2D>(ExistingObject.Get()));
 		if (ExistingObject && !Texture)
 		{
 			OutError = FString::Printf(
@@ -2328,8 +2371,8 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 		return nullptr;
 	}
 
-	UPackage* Package =
-		Texture ? Texture->GetOutermost() : CreatePackage(*PackageName);
+	TStrongObjectPtr<UPackage> Package(
+		Texture ? Texture->GetOutermost() : CreatePackage(*PackageName));
 	if (!Package)
 	{
 		OutError = FString::Printf(
@@ -2341,10 +2384,10 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 
 	if (!Texture)
 	{
-		Texture = NewObject<UTexture2D>(
-			Package,
+		Texture.Reset(NewObject<UTexture2D>(
+			Package.Get(),
 			*AssetName,
-			PersistentAssetFlags);
+			PersistentAssetFlags));
 		if (!Texture)
 		{
 			OutError = FString::Printf(
@@ -2352,11 +2395,11 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 				*AssetName);
 			return nullptr;
 		}
-		AssetTransaction.Track(Texture);
+		AssetTransaction.Track(*Texture);
 	}
 	else
 	{
-		if (!AssetTransaction.Snapshot(Texture, OutError))
+		if (!AssetTransaction.Snapshot(*Texture, OutError))
 		{
 			return nullptr;
 		}
@@ -2390,23 +2433,18 @@ UTexture2D* FFoliageBakerAssetBuilder::CreateTextureAsset(
 	return Texture;
 }
 
-UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
+TStrongObjectPtr<UMaterialInstanceConstant>
+	FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 	const UStaticMesh& SourceStaticMesh,
 	FFoliageBakerAssetTransaction& AssetTransaction,
 	const FFoliageBakerMaterialInstanceAssetParams& Params,
-	UMaterialInstanceConstant* TemplateMaterialInstance,
-	UTexture2D* BaseColorOpacityTexture,
-	UTexture2D* NormalDepthTexture,
-	UTexture2D* MixTexture,
+	UMaterialInstanceConstant& TemplateMaterialInstance,
+	const TStrongObjectPtr<UTexture2D>& BaseColorOpacityTexture,
+	const TStrongObjectPtr<UTexture2D>& NormalDepthTexture,
+	const TStrongObjectPtr<UTexture2D>& MixTexture,
 	FString& OutError)
 {
 	OutError.Reset();
-	if (!TemplateMaterialInstance)
-	{
-		OutError = Params.MissingTemplateError;
-		return nullptr;
-	}
-
 	FFoliageBakerGeneratedAssetPath GeneratedAssetPath;
 	if (!BuildGeneratedAssetPath(
 		SourceStaticMesh,
@@ -2434,13 +2472,14 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 	}
 	const FString ObjectPath = PackageName + TEXT(".") + AssetName;
 
-	UObject* ExistingObject =
-		StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
-	UMaterialInstanceConstant* MaterialInstance = nullptr;
+	const TStrongObjectPtr<UObject> ExistingObject(
+		StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath));
+	TStrongObjectPtr<UMaterialInstanceConstant> MaterialInstance;
 	if (Params.ExistingAssetPolicy
 		== EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
 	{
-		MaterialInstance = Cast<UMaterialInstanceConstant>(ExistingObject);
+		MaterialInstance.Reset(
+			Cast<UMaterialInstanceConstant>(ExistingObject.Get()));
 		if (ExistingObject && !MaterialInstance)
 		{
 			OutError = FString::Printf(TEXT("Cannot rebake %s because that object is not a MaterialInstanceConstant."), *ObjectPath);
@@ -2455,16 +2494,19 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		return nullptr;
 	}
 	if (MaterialInstance
-		&& TemplateMaterialInstance->IsChildOf(MaterialInstance))
+		&& TemplateMaterialInstance.IsChildOf(MaterialInstance.Get()))
 	{
 		OutError = FString::Printf(
 			TEXT("Cannot use %s as the parent template for %s because that would create a material-instance parent cycle."),
-			*TemplateMaterialInstance->GetPathName(),
+			*TemplateMaterialInstance.GetPathName(),
 			*ObjectPath);
 		return nullptr;
 	}
 
-	UPackage* Package = MaterialInstance ? MaterialInstance->GetOutermost() : CreatePackage(*PackageName);
+	TStrongObjectPtr<UPackage> Package(
+		MaterialInstance
+			? MaterialInstance->GetOutermost()
+			: CreatePackage(*PackageName));
 	if (!Package)
 	{
 		OutError = FString::Printf(TEXT("Could not create package %s."), *PackageName);
@@ -2474,16 +2516,16 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 
 	if (!MaterialInstance)
 	{
-		MaterialInstance = NewObject<UMaterialInstanceConstant>(
-			Package,
+		MaterialInstance.Reset(NewObject<UMaterialInstanceConstant>(
+			Package.Get(),
 			*AssetName,
-			PersistentAssetFlags);
+			PersistentAssetFlags));
 		if (!MaterialInstance)
 		{
 			OutError = FString::Printf(TEXT("Could not create Material Instance Constant %s."), *ObjectPath);
 			return nullptr;
 		}
-		AssetTransaction.Track(MaterialInstance);
+		AssetTransaction.Track(*MaterialInstance);
 		if (!EnsureMaterialInstanceEditorOnlyData(
 				*MaterialInstance,
 				OutError))
@@ -2499,7 +2541,7 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		{
 			return nullptr;
 		}
-		if (!AssetTransaction.Snapshot(MaterialInstance, OutError))
+		if (!AssetTransaction.Snapshot(*MaterialInstance, OutError))
 		{
 			return nullptr;
 		}
@@ -2514,7 +2556,7 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 	// Current names clean legacy assets; metadata also finds parameters renamed since the previous bake.
 	ParameterNamesToReplace.Append(CurrentOwnedParameterNames);
 	MaterialInstance->PreEditChange(nullptr);
-	MaterialInstance->SetParentEditorOnly(TemplateMaterialInstance, false);
+	MaterialInstance->SetParentEditorOnly(&TemplateMaterialInstance, false);
 	RemoveOwnedMaterialParameterOverrides(
 		*MaterialInstance,
 		ParameterNamesToReplace);
@@ -2527,26 +2569,27 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		FMaterialInstanceBasePropertyOverrides Overrides = MaterialInstance->BasePropertyOverrides;
 		Overrides.bOverride_TwoSided = true;
 		Overrides.TwoSided = Params.TwoSidedOverride.GetValue();
-		FMaterialInstanceParameterUpdateContext OverrideContext(MaterialInstance);
+		FMaterialInstanceParameterUpdateContext OverrideContext(
+			MaterialInstance.Get());
 		OverrideContext.SetBasePropertyOverrides(Overrides);
 	}
 	if (BaseColorOpacityTexture)
 	{
 		MaterialInstance->SetTextureParameterValueEditorOnly(
 			FMaterialParameterInfo(Params.BaseColorOpacityTextureParameterName),
-			BaseColorOpacityTexture);
+			BaseColorOpacityTexture.Get());
 	}
 	if (NormalDepthTexture)
 	{
 		MaterialInstance->SetTextureParameterValueEditorOnly(
 			FMaterialParameterInfo(Params.NormalDepthTextureParameterName),
-			NormalDepthTexture);
+			NormalDepthTexture.Get());
 	}
 	if (MixTexture)
 	{
 		MaterialInstance->SetTextureParameterValueEditorOnly(
 			FMaterialParameterInfo(Params.MixTextureParameterName),
-			MixTexture);
+			MixTexture.Get());
 	}
 	for (const FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue& TextureParameter
 		: Params.AdditionalTextureParameterValues)
@@ -2555,7 +2598,7 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 		{
 			MaterialInstance->SetTextureParameterValueEditorOnly(
 				FMaterialParameterInfo(TextureParameter.ParameterName),
-				TextureParameter.Texture);
+				TextureParameter.Texture.Get());
 		}
 	}
 	for (const UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue& ScalarParameter
@@ -2584,12 +2627,13 @@ UMaterialInstanceConstant* FFoliageBakerAssetBuilder::CreateMaterialInstanceAsse
 	return MaterialInstance;
 }
 
-UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
+TStrongObjectPtr<UStaticMesh>
+	FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 	const UStaticMesh& SourceStaticMesh,
 	FFoliageBakerAssetTransaction& AssetTransaction,
 	const FFoliageBakerStaticMeshAssetParams& Params,
 	const FMeshDescription& MeshDescription,
-	UMaterialInterface* ProxyMaterial,
+	UMaterialInterface& ProxyMaterial,
 	FString& OutError)
 {
 	OutError.Reset();
@@ -2617,13 +2661,13 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 	}
 	const FString ObjectPath = PackageName + TEXT(".") + AssetName;
 
-	UObject* ExistingObject =
-		StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
-	UStaticMesh* ProxyMesh = nullptr;
+	const TStrongObjectPtr<UObject> ExistingObject(
+		StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath));
+	TStrongObjectPtr<UStaticMesh> ProxyMesh;
 	if (Params.ExistingAssetPolicy
 		== EFoliageBakerExistingAssetPolicy::ReuseOrCreate)
 	{
-		ProxyMesh = Cast<UStaticMesh>(ExistingObject);
+		ProxyMesh.Reset(Cast<UStaticMesh>(ExistingObject.Get()));
 		if (ExistingObject && !ProxyMesh)
 		{
 			OutError = FString::Printf(TEXT("Cannot rebake %s because that object is not a StaticMesh."), *ObjectPath);
@@ -2638,7 +2682,10 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 		return nullptr;
 	}
 
-	UPackage* Package = ProxyMesh ? ProxyMesh->GetOutermost() : CreatePackage(*PackageName);
+	TStrongObjectPtr<UPackage> Package(
+		ProxyMesh
+			? ProxyMesh->GetOutermost()
+			: CreatePackage(*PackageName));
 	if (!Package)
 	{
 		OutError = FString::Printf(TEXT("Could not create package %s."), *PackageName);
@@ -2648,26 +2695,27 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 
 	if (!ProxyMesh)
 	{
-		ProxyMesh = NewObject<UStaticMesh>(
-			Package,
+		ProxyMesh.Reset(NewObject<UStaticMesh>(
+			Package.Get(),
 			*AssetName,
-			PersistentAssetFlags);
+			PersistentAssetFlags));
 		if (!ProxyMesh)
 		{
 			OutError = FString::Printf(TEXT("Could not create StaticMesh %s."), *AssetName);
 			return nullptr;
 		}
-		AssetTransaction.Track(ProxyMesh);
+		AssetTransaction.Track(*ProxyMesh);
 	}
 	else
 	{
-		if (!AssetTransaction.Snapshot(ProxyMesh, OutError))
+		if (!AssetTransaction.Snapshot(*ProxyMesh, OutError))
 		{
 			return nullptr;
 		}
 		ProxyMesh->Modify();
 		ProxyMesh->ModifyAllMeshDescriptions(false);
-		if (UBodySetup* ExistingBodySetup = ProxyMesh->GetBodySetup())
+		if (const TObjectPtr<UBodySetup> ExistingBodySetup =
+				ProxyMesh->GetBodySetup())
 		{
 			ExistingBodySetup->Modify(false);
 		}
@@ -2677,9 +2725,11 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 
 	ProxyMesh->InitResources();
 	ProxyMesh->SetLightingGuid();
-	UMaterialInterface* Material = ResolveProxyMaterial(ProxyMaterial);
-	const FName MaterialSlotName = Material->GetFName();
-	EnsureProxyMaterialSlot(*ProxyMesh, Material, Params.MaterialSlotName);
+	const FName MaterialSlotName = ProxyMaterial.GetFName();
+	EnsureProxyMaterialSlot(
+		*ProxyMesh,
+		ProxyMaterial,
+		Params.MaterialSlotName);
 	EnsureAdditionalMaterialSlots(*ProxyMesh, Params.AdditionalMaterialSlots);
 	ProxyMesh->SetLightMapCoordinateIndex(0);
 	ProxyMesh->SetLightMapResolution(64);
@@ -2696,6 +2746,7 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 		FElementIDRemappings Remappings;
 		MeshDescriptionCopy.Compact(Remappings);
 	}
+	// BuildFromMeshDescriptions requires a raw borrowed-pointer array.
 	TArray<const FMeshDescription*> MeshDescriptions;
 	MeshDescriptions.Add(&MeshDescriptionCopy);
 	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
@@ -2710,7 +2761,7 @@ UStaticMesh* FFoliageBakerAssetBuilder::CreateStaticMeshAsset(
 		return nullptr;
 	}
 
-	if (UBodySetup* BodySetup = ProxyMesh->GetBodySetup())
+	if (const TObjectPtr<UBodySetup> BodySetup = ProxyMesh->GetBodySetup())
 	{
 		BodySetup->Modify(false);
 		BodySetup->CollisionTraceFlag = CTF_UseSimpleAsComplex;
@@ -2747,7 +2798,7 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	FFoliageBakerAssetTransaction& AssetTransaction,
 	const FFoliageBakerSourceLODAssetParams& Params,
 	const FMeshDescription& MeshDescription,
-	UMaterialInterface* ProxyMaterial,
+	UMaterialInterface& ProxyMaterial,
 	int32& OutLODIndex,
 	FString& OutError)
 {
@@ -2756,7 +2807,7 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	{
 		return false;
 	}
-	if (!AssetTransaction.Snapshot(&SourceStaticMesh, OutError))
+	if (!AssetTransaction.Snapshot(SourceStaticMesh, OutError))
 	{
 		OutLODIndex = INDEX_NONE;
 		return false;
@@ -2796,17 +2847,21 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		: TArray<FGeneratedLODMetadataValue>();
 	if (bTrackGeneratedLOD)
 	{
-		AssetTransaction.SnapshotMetadata(&SourceStaticMesh, Params.RebuildLODMetadataKey);
+		AssetTransaction.SnapshotMetadata(
+			SourceStaticMesh,
+			Params.RebuildLODMetadataKey);
 	}
 	for (const FGeneratedLODMetadataValue& MetadataValue : GeneratedLODMetadataToUpdate)
 	{
 		if (bInsertingLOD || MetadataValue.LODIndex == OutLODIndex)
 		{
-			AssetTransaction.SnapshotMetadata(&SourceStaticMesh, MetadataValue.Key);
+			AssetTransaction.SnapshotMetadata(
+				SourceStaticMesh,
+				MetadataValue.Key);
 		}
 	}
 
-	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor
+	TObjectPtr<UAssetEditorSubsystem> AssetEditorSubsystem = GEditor
 		? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()
 		: nullptr;
 	const bool bStaticMeshWasEdited = AssetEditorSubsystem
@@ -2816,14 +2871,16 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		AssetEditorSubsystem->CloseAllEditorsForAsset(&SourceStaticMesh);
 	}
 
-	auto ReopenSourceMeshEditor = [&]()
+	auto ReopenSourceMeshEditor =
+		[AssetEditorSubsystem, bStaticMeshWasEdited, &SourceStaticMesh]()
 	{
 		if (bStaticMeshWasEdited && AssetEditorSubsystem)
 		{
 			AssetEditorSubsystem->OpenEditorForAsset(&SourceStaticMesh);
 		}
 	};
-	auto FailAndRollback = [&]()
+	auto FailAndRollback =
+		[&AssetTransaction, &OutLODIndex, &ReopenSourceMeshEditor]()
 	{
 		OutLODIndex = INDEX_NONE;
 		AssetTransaction.Rollback();
@@ -2833,7 +2890,8 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 
 	SourceStaticMesh.Modify();
 	SourceStaticMesh.ModifyAllMeshDescriptions(false);
-	if (UBodySetup* BodySetup = SourceStaticMesh.GetBodySetup())
+	if (const TObjectPtr<UBodySetup> BodySetup =
+			SourceStaticMesh.GetBodySetup())
 	{
 		BodySetup->Modify(false);
 	}
@@ -2854,8 +2912,7 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		return FailAndRollback();
 	}
 
-	UMaterialInterface* Material = ResolveProxyMaterial(ProxyMaterial);
-	const FName MaterialSlotName = Material->GetFName();
+	const FName MaterialSlotName = ProxyMaterial.GetFName();
 	FMeshDescription MeshDescriptionCopy = MeshDescription;
 	PrepareMeshDescriptionMaterialSlotNames(
 		MeshDescriptionCopy,
@@ -2873,7 +2930,10 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 		return FailAndRollback();
 	}
 
-	const int32 MaterialIndex = EnsureProxyMaterialSlot(SourceStaticMesh, Material, Params.MaterialSlotName);
+	const int32 MaterialIndex = EnsureProxyMaterialSlot(
+		SourceStaticMesh,
+		ProxyMaterial,
+		Params.MaterialSlotName);
 	EnsureAdditionalMaterialSlots(SourceStaticMesh, Params.AdditionalMaterialSlots);
 	ClearSectionInfoForLOD(SourceStaticMesh, OutLODIndex);
 
@@ -2904,12 +2964,14 @@ bool FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 	}
 	KeepOnlyUVChannels(SourceStaticMesh, OutLODIndex, Params.DesiredUVChannelCount, false);
 
-	if (const FMeshDescription* InstalledMeshDescription = SourceStaticMesh.GetMeshDescription(OutLODIndex))
+	if (SourceStaticMesh.IsMeshDescriptionValid(OutLODIndex))
 	{
+		const FMeshDescription& InstalledMeshDescription =
+			*SourceStaticMesh.GetMeshDescription(OutLODIndex);
 		ConfigureSectionMaterialsFromMeshDescription(
 			SourceStaticMesh,
 			OutLODIndex,
-			*InstalledMeshDescription,
+			InstalledMeshDescription,
 			MaterialIndex);
 	}
 	if (bReplacingLOD)

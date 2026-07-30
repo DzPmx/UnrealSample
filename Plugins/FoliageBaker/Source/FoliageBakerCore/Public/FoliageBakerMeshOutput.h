@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/ObjectPtr.h"
 
 class UMaterialInterface;
 class UStaticMesh;
@@ -24,7 +25,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMeshOutputSelection
 struct FOLIAGEBAKERCORE_API FFoliageBakerMeshMaterialSlot
 {
 	FName MaterialSlotName = NAME_None;
-	UMaterialInterface* Material = nullptr;
+	TObjectPtr<UMaterialInterface> Material;
 };
 
 DECLARE_DELEGATE_RetVal_TwoParams(

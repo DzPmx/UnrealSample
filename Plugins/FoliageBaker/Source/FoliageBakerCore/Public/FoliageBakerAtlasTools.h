@@ -34,8 +34,14 @@ namespace UE::FoliageBaker::Atlas
 		TArray<FColor>& Pixels,
 		int32 Width,
 		int32 Height,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos);
+
+	FOLIAGEBAKERCORE_API void FillTransparentRGBInsideTiles(
+		TArray<FColor>& Pixels,
+		int32 Width,
+		int32 Height,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		const TBitArray<>* CoverageMask = nullptr,
+		const TBitArray<>& CoverageMask,
 		bool bFillAlpha = false);
 
 	FOLIAGEBAKERCORE_API void WriteUnionSdfToAlpha(

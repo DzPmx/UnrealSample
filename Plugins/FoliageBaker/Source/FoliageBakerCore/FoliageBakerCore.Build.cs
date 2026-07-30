@@ -19,6 +19,7 @@ public class FoliageBakerCore : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"MaterialBaking",
 				"MeshDescription",
 			}
 		);
@@ -28,7 +29,6 @@ public class FoliageBakerCore : ModuleRules
 			{
 				"AssetRegistry",
 				"ImageCore",
-				"MaterialBaking",
 				"Projects",
 				"RenderCore",
 				"RHI",

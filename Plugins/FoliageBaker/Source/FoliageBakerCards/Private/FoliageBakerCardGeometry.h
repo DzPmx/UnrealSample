@@ -22,7 +22,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 		const UStaticMesh& StaticMesh,
 		const TArray<PlaneCover::FSourceTriangle>& TrunkTriangles,
 		float TrianglePercentage,
-		UMaterialInterface* ProxyMaterial,
+		UMaterialInterface& ProxyMaterial,
 		FMeshDescription& InOutMeshDescription,
 		FRetainedTrunkResult& OutResult,
 		FString& OutError);

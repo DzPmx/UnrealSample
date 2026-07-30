@@ -22,7 +22,7 @@ bool FFoliageBakerSourceMeshReader::Read(
 		return false;
 	}
 	if (!UE::FoliageBaker::PlaneCover::ExtractTrianglesFromStaticMesh(
-			&StaticMesh,
+			StaticMesh,
 			SourceLODIndex,
 			OutData.Triangles,
 			OutError))
@@ -62,14 +62,31 @@ bool FFoliageBakerSourceMeshReader::Read(
 			OutData.Triangles,
 			OutData.BakeMaterialOverrides,
 			FixedFrameWPO,
-			&OutError))
+			OutError))
 	{
 		return false;
 	}
+	const int32 EvaluatedVertexCount = OutData.Triangles.Num() * 3;
+	const int32 NonFiniteCulledTriangleCount =
+		OutData.Triangles.Num() - FixedFrameWPO.Triangles.Num();
+	check(
+		FixedFrameWPO.Triangles.Num()
+			== FixedFrameWPO.RetainedSourceTriangleIndices.Num());
+	TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>
+		RetainedSourceTriangles;
+	RetainedSourceTriangles.Reserve(
+		FixedFrameWPO.RetainedSourceTriangleIndices.Num());
+	for (const int32 SourceTriangleIndex :
+		FixedFrameWPO.RetainedSourceTriangleIndices)
+	{
+		check(OutData.Triangles.IsValidIndex(SourceTriangleIndex));
+		RetainedSourceTriangles.Add(
+			MoveTemp(OutData.Triangles[SourceTriangleIndex]));
+	}
+	OutData.Triangles = MoveTemp(RetainedSourceTriangles);
 	OutData.FixedFrameWPOTriangles = MoveTemp(FixedFrameWPO.Triangles);
 	OutData.FixedFrameWPOBounds = FixedFrameWPO.Bounds;
 
-	const int32 EvaluatedVertexCount = OutData.FixedFrameWPOTriangles.Num() * 3;
 	double MaximumDisplacement = 0.0;
 	for (int32 TriangleIndex = 0;
 		TriangleIndex < OutData.FixedFrameWPOTriangles.Num();
@@ -86,6 +103,8 @@ bool FFoliageBakerSourceMeshReader::Read(
 	}
 	OutData.WorldPositionOffsetStats.EvaluatedVertexCount =
 		EvaluatedVertexCount;
+	OutData.WorldPositionOffsetStats.NonFiniteCulledTriangleCount =
+		NonFiniteCulledTriangleCount;
 	OutData.WorldPositionOffsetStats.MaximumDisplacement =
 		MaximumDisplacement;
 	return true;

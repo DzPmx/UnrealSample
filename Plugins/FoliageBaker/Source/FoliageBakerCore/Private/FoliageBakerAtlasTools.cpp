@@ -108,7 +108,14 @@ namespace UE::FoliageBaker::Atlas
 				return false;
 			}
 
-			auto TryAdoptNearestSource = [&](const int32 TargetX, const int32 TargetY, const int32 CandidateX, const int32 CandidateY)
+			auto TryAdoptNearestSource = [
+				Height,
+				&OutNearestSource,
+				Width](
+				const int32 TargetX,
+				const int32 TargetY,
+				const int32 CandidateX,
+				const int32 CandidateY)
 			{
 				if (CandidateX < 0 || CandidateX >= Width || CandidateY < 0 || CandidateY >= Height)
 				{
@@ -137,7 +144,10 @@ namespace UE::FoliageBaker::Atlas
 				}
 			};
 
-			auto RelaxPass = [&](const bool bTopToBottom, const bool bLeftToRight)
+			auto RelaxPass = [
+				Height,
+				&TryAdoptNearestSource,
+				Width](const bool bTopToBottom, const bool bLeftToRight)
 			{
 				const int32 YStart = bTopToBottom ? 0 : Height - 1;
 				const int32 YEnd = bTopToBottom ? Height : -1;
@@ -371,7 +381,14 @@ namespace UE::FoliageBaker::Atlas
 				FIntPoint(TargetMaxX, TargetMaxY));
 		};
 
-		auto ResizeTile = [&](const FIntPoint& SourcePixelMin,
+		auto ResizeTile = [
+			&OutError,
+			&OutPixels,
+			OutWidth,
+			&ScaleTileRect,
+			&SourcePixels,
+			SourceHeight,
+			SourceWidth](const FIntPoint& SourcePixelMin,
 							  const FIntPoint& SourceTileSize,
 							  FIntPoint& OutPixelMin,
 							  FIntPoint& OutTileSize)
@@ -491,16 +508,23 @@ namespace UE::FoliageBaker::Atlas
 		const int32 Width,
 		const int32 Height,
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		const TBitArray<>* CoverageMask,
+		const TBitArray<>& CoverageMask,
 		const bool bFillAlpha)
 	{
-		if (Width <= 0 || Height <= 0 || Pixels.Num() != Width * Height)
+		if (Width <= 0
+			|| Height <= 0
+			|| Pixels.Num() != Width * Height
+			|| CoverageMask.Num() != Pixels.Num())
 		{
 			return;
 		}
 
-		const bool bUseCoverageMask = CoverageMask && CoverageMask->Num() == Pixels.Num();
-		auto FillTile = [&](const FIntPoint& PixelMin, const FIntPoint& TileSize)
+		auto FillTile = [
+			&CoverageMask,
+			&Pixels,
+			Height,
+			Width,
+			bFillAlpha](const FIntPoint& PixelMin, const FIntPoint& TileSize)
 		{
 			if (TileSize.X <= 0 || TileSize.Y <= 0)
 			{
@@ -529,7 +553,7 @@ namespace UE::FoliageBaker::Atlas
 				for (int32 X = MinX; X <= MaxX; ++X)
 				{
 					const int32 AtlasIndex = Y * Width + X;
-					if (bUseCoverageMask ? (*CoverageMask)[AtlasIndex] : Pixels[AtlasIndex].A > 0)
+					if (CoverageMask[AtlasIndex])
 					{
 						SourceMask[ToLocalIndex(X, Y)] = true;
 					}
@@ -547,7 +571,7 @@ namespace UE::FoliageBaker::Atlas
 				for (int32 X = MinX; X <= MaxX; ++X)
 				{
 					const int32 AtlasIndex = Y * Width + X;
-					if (bUseCoverageMask ? (*CoverageMask)[AtlasIndex] : Pixels[AtlasIndex].A > 0)
+					if (CoverageMask[AtlasIndex])
 					{
 						continue;
 					}
@@ -576,6 +600,27 @@ namespace UE::FoliageBaker::Atlas
 				FillTile(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize);
 			}
 		}
+	}
+
+	void FillTransparentRGBInsideTiles(
+		TArray<FColor>& Pixels,
+		const int32 Width,
+		const int32 Height,
+		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos)
+	{
+		TBitArray<> CoverageMask;
+		CoverageMask.Init(false, Pixels.Num());
+		for (int32 PixelIndex = 0; PixelIndex < Pixels.Num(); ++PixelIndex)
+		{
+			CoverageMask[PixelIndex] = Pixels[PixelIndex].A > 0;
+		}
+		FillTransparentRGBInsideTiles(
+			Pixels,
+			Width,
+			Height,
+			PlaneInfos,
+			CoverageMask,
+			false);
 	}
 
 	bool BuildTileOwnerMap(
@@ -660,7 +705,12 @@ namespace UE::FoliageBaker::Atlas
 		}
 
 		const float SafeRange = static_cast<float>(FMath::Max(1, SdfRangePixels));
-		auto PackTile = [&](const FIntPoint& PixelMin, const FIntPoint& TileSize)
+		auto PackTile = [
+			&CoverageMask,
+			Height,
+			&Pixels,
+			SafeRange,
+			Width](const FIntPoint& PixelMin, const FIntPoint& TileSize)
 		{
 			if (TileSize.X <= 0 || TileSize.Y <= 0)
 			{

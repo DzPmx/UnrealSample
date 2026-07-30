@@ -17,7 +17,8 @@ public:
 
 private:
 	void EnsureToolSettings(EFoliageBakerCardMode Mode);
-	UFoliageBakerCardsSettings* GetToolSettings(EFoliageBakerCardMode Mode) const;
+	const TStrongObjectPtr<UFoliageBakerCardsSettings>& GetToolSettings(
+		EFoliageBakerCardMode Mode) const;
 	TSharedPtr<FFoliageBakerFeatureController>& GetFeatureController(EFoliageBakerCardMode Mode);
 	void Bake(EFoliageBakerCardMode Mode);
 	bool CanBake(EFoliageBakerCardMode Mode) const;

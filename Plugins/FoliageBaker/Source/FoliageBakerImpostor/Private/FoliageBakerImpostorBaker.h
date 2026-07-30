@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "FoliageBakerMeshOutput.h"
+#include "UObject/StrongObjectPtr.h"
 
 class UMaterialInstanceConstant;
 class UStaticMesh;
@@ -12,13 +13,13 @@ struct FFoliageBakerImpostorBakeResult
 {
 	bool bSucceeded = false;
 	bool bCancelled = false;
-	UStaticMesh* ProxyMesh = nullptr;
+	TStrongObjectPtr<UStaticMesh> ProxyMesh;
 	int32 SourceMeshLODIndex = INDEX_NONE;
-	UTexture2D* BaseColorSdfTexture = nullptr;
-	UTexture2D* NormalDepthTexture = nullptr;
-	UTexture2D* MixTexture = nullptr;
-	UMaterialInstanceConstant* MaterialInstance = nullptr;
-	TArray<UObject*> CreatedAssets;
+	TStrongObjectPtr<UTexture2D> BaseColorSdfTexture;
+	TStrongObjectPtr<UTexture2D> NormalDepthTexture;
+	TStrongObjectPtr<UTexture2D> MixTexture;
+	TStrongObjectPtr<UMaterialInstanceConstant> MaterialInstance;
+	TArray<TStrongObjectPtr<UObject>> CreatedAssets;
 	FString Report;
 };
 

@@ -2,13 +2,14 @@
 
 #include "CoreMinimal.h"
 #include "FoliageBakerPlaneCover.h"
+#include "MaterialBakingStructures.h"
+#include "MeshDescription.h"
 #include "UObject/StrongObjectPtr.h"
 
 #include "FoliageBakerMaskedMaterialBaker.generated.h"
 
 class UMaterialInterface;
 class UStaticMesh;
-struct FMeshData;
 
 USTRUCT()
 struct FOLIAGEBAKERCORE_API FFoliageBakerBakeStaticSwitchOverride
@@ -51,13 +52,34 @@ private:
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileMaterialInput
 {
+	FFoliageBakerDepthCorrectTileMaterialInput() = default;
+	FFoliageBakerDepthCorrectTileMaterialInput(
+		const FFoliageBakerDepthCorrectTileMaterialInput&) = delete;
+	FFoliageBakerDepthCorrectTileMaterialInput& operator=(
+		const FFoliageBakerDepthCorrectTileMaterialInput&) = delete;
+	FFoliageBakerDepthCorrectTileMaterialInput(
+		FFoliageBakerDepthCorrectTileMaterialInput&&) = default;
+	FFoliageBakerDepthCorrectTileMaterialInput& operator=(
+		FFoliageBakerDepthCorrectTileMaterialInput&&) = default;
+
 	TStrongObjectPtr<UMaterialInterface> MaterialInterface;
-	const FMeshData* MeshSettings = nullptr;
-	const TArray<int32>* RasterSourceTriangleIndices = nullptr;
+	TUniquePtr<FMeshDescription> MeshDescription;
+	FMeshData MeshSettings;
+	TArray<int32> RasterSourceTriangleIndices;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileRequest
 {
+	FFoliageBakerDepthCorrectTileRequest() = default;
+	FFoliageBakerDepthCorrectTileRequest(
+		const FFoliageBakerDepthCorrectTileRequest&) = delete;
+	FFoliageBakerDepthCorrectTileRequest& operator=(
+		const FFoliageBakerDepthCorrectTileRequest&) = delete;
+	FFoliageBakerDepthCorrectTileRequest(
+		FFoliageBakerDepthCorrectTileRequest&&) = default;
+	FFoliageBakerDepthCorrectTileRequest& operator=(
+		FFoliageBakerDepthCorrectTileRequest&&) = default;
+
 	FIntPoint TextureSize = FIntPoint::ZeroValue;
 	FVector CaptureRayDirection = FVector::ZeroVector;
 	FVector ProjectionAxisU = FVector::ZeroVector;
@@ -89,6 +111,9 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerFixedFrameWPOResult
 {
 	FBoxSphereBounds Bounds = FBoxSphereBounds(ForceInitToZero);
 	TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle> Triangles;
+	// Source triangle indices retained after treating non-finite WPO positions
+	// as triangle-level geometry cuts. Kept parallel with Triangles.
+	TArray<int32> RetainedSourceTriangleIndices;
 };
 
 /**
@@ -109,6 +134,8 @@ public:
 	 * path used by Bake, with GameTime and RealTime fixed at zero. The returned
 	 * triangle positions are for capture bounds/projection only; formal material
 	 * Bake must continue to submit the original positions so WPO is applied once.
+	 * A triangle with any non-finite WPO vertex is omitted from both inputs via
+	 * RetainedSourceTriangleIndices, matching GPU primitive rejection semantics.
 	 */
 	static bool EvaluateFixedFrameWorldPositionOffset(
 		const UStaticMesh& SourceStaticMesh,
@@ -116,12 +143,12 @@ public:
 		const TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>& SourceTriangles,
 		const FFoliageBakerBakeMaterialOverrideSet& BakeMaterialOverrides,
 		FFoliageBakerFixedFrameWPOResult& OutResult,
-		FString* OutError = nullptr);
+		FString& OutError);
 
 	static bool BakeDepthCorrectTile(
 		const FFoliageBakerDepthCorrectTileRequest& Request,
 		FFoliageBakerDepthCorrectTileResult& OutResult,
-		FString* OutError = nullptr);
+		FString& OutError);
 
 	/** Returns INDEX_NONE for the reserved uncovered value or malformed data. */
 	static int32 DecodeSourceTriangleId(const FColor& EncodedTriangleId);

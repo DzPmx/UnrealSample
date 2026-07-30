@@ -20,16 +20,20 @@ void FFoliageBakerBillboardCloudsModule::EnsureToolSettings()
 	if (!ToolSettings.IsValid())
 	{
 		FFoliageBakerFeatureTool::EnsureTransientSettings(ToolSettings);
-		ToolSettings->SourceStaticMeshes.Reset();
 	}
 }
 
 TSharedRef<SWidget> FFoliageBakerBillboardCloudsModule::CreateFeaturePanel()
 {
 	EnsureToolSettings();
+	ToolSettings->SourceStaticMeshes.Reset();
 	FFoliageBakerFeatureControllerArgs ControllerArgs;
-	ControllerArgs.SettingsObject = ToolSettings.Get();
-	ControllerArgs.SourceStaticMeshes = &ToolSettings->SourceStaticMeshes;
+	ControllerArgs.SettingsObject.Reset(ToolSettings.Get());
+	ControllerArgs.GetSourceStaticMeshes =
+		[Settings = ToolSettings]() -> TArray<TObjectPtr<UStaticMesh>>&
+		{
+			return Settings->SourceStaticMeshes;
+		};
 	ControllerArgs.BakeButtonText =
 		LOCTEXT("UnifiedBakeBillboardCloudsButton", "Bake BillboardClouds");
 	ControllerArgs.BakeButtonTooltip = LOCTEXT(
@@ -73,8 +77,9 @@ bool FFoliageBakerBillboardCloudsModule::CanBake() const
 void FFoliageBakerBillboardCloudsModule::Bake()
 {
 	EnsureToolSettings();
-	if (ToolSettings->BillboardMaterialTemplate.IsNull()
-		|| !ToolSettings->BillboardMaterialTemplate.LoadSynchronous())
+	const TStrongObjectPtr<UMaterialInstanceConstant> MaterialTemplate(
+		ToolSettings->BillboardMaterialTemplate.LoadSynchronous());
+	if (!MaterialTemplate)
 	{
 		FFoliageBakerFeatureTool::ShowMessage(
 			LOCTEXT("MissingBillboardCloudsParentMaterial", "Select the Billboard Clouds Parent Material Instance in the current tool before baking."));
@@ -104,12 +109,13 @@ void FFoliageBakerBillboardCloudsModule::Bake()
 			false,
 			TEXT("\n\n"),
 			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
-				[this](UStaticMesh& StaticMesh)
+				[MaterialTemplate, Settings = ToolSettings](UStaticMesh& StaticMesh)
 				{
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(
 						FFoliageBakerBillboardCloudsBaker::Bake(
 							StaticMesh,
-							*ToolSettings,
+							*MaterialTemplate,
+							*Settings,
 							FFoliageBakerMeshOutputSelector::CreateStatic(
 								&FFoliageBakerMeshOutputDialog::OpenAfterBake)));
 				}));

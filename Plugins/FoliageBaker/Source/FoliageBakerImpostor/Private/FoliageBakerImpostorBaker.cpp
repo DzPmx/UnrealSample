@@ -357,14 +357,6 @@ namespace
 		const double SharedCaptureHalfExtent = FMath::Max(InOutData.SharedCaptureHalfExtent, UE_DOUBLE_SMALL_NUMBER);
 		const FVector SharedCenter = InOutData.SourceBounds.Origin;
 		const TArray<UE::FoliageBaker::PlaneCover::FCrackReductionProjection> NoCrackReductionProjections;
-		struct FDepthCorrectMaterialStorage
-		{
-			TStrongObjectPtr<UMaterialInterface> MaterialInterface;
-			FMeshDescription MeshDescription;
-			TArray<FVector2D> CustomTileUVs;
-			TArray<int32> RasterSourceTriangleIndices;
-			FMeshData MeshSettings;
-		};
 		for (int32 ViewIndex = 0; ViewIndex < InOutData.Views.Num(); ++ViewIndex)
 		{
 			const FImpostorCaptureView& View = InOutData.Views[ViewIndex];
@@ -377,8 +369,6 @@ namespace
 				InOutData.TileInfos[ViewIndex];
 			const int32 TilePixelCount = View.TileSize.X * View.TileSize.Y;
 
-			TArray<TUniquePtr<FDepthCorrectMaterialStorage>> MaterialStorage;
-			MaterialStorage.Reserve(ReferencedMaterialIndices.Num());
 			FFoliageBakerDepthCorrectTileRequest DepthCorrectRequest;
 			DepthCorrectRequest.TextureSize = View.TileSize;
 			DepthCorrectRequest.CaptureRayDirection = View.CaptureRayDirection;
@@ -398,22 +388,23 @@ namespace
 
 			for (const int32 MaterialIndex : ReferencedMaterialIndices)
 			{
-				TUniquePtr<FDepthCorrectMaterialStorage> Storage =
-					MakeUnique<FDepthCorrectMaterialStorage>();
-				Storage->MaterialInterface =
+				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput =
+					DepthCorrectRequest.Materials.AddDefaulted_GetRef();
+				MaterialInput.MeshDescription = MakeUnique<FMeshDescription>();
+				MaterialInput.MaterialInterface =
 					InOutData.BakeMaterialOverrides.ResolveMaterial(
 						MaterialIndex);
-				if (!Storage->MaterialInterface)
+				if (!MaterialInput.MaterialInterface)
 				{
-					Storage->MaterialInterface.Reset(
+					MaterialInput.MaterialInterface.Reset(
 						SourceMaterials.IsValidIndex(MaterialIndex)
 							? SourceMaterials[MaterialIndex]
 								.MaterialInterface.Get()
 							: nullptr);
 				}
-				if (!Storage->MaterialInterface)
+				if (!MaterialInput.MaterialInterface)
 				{
-					Storage->MaterialInterface.Reset(
+					MaterialInput.MaterialInterface.Reset(
 						UMaterial::GetDefaultMaterial(MD_Surface));
 				}
 
@@ -433,13 +424,14 @@ namespace
 						NoCrackReductionProjections,
 						PlaneInfo,
 						ProjectedBakeParams,
-						Storage->MeshDescription,
-						Storage->CustomTileUVs,
+						*MaterialInput.MeshDescription,
+						MaterialInput.MeshSettings.CustomTextureCoordinates,
 						MatchingTriangleCount,
-						&ProjectedInputError,
-						&Storage->RasterSourceTriangleIndices);
+						ProjectedInputError,
+						MaterialInput.RasterSourceTriangleIndices);
 				if (MatchingTriangleCount == 0)
 				{
+					DepthCorrectRequest.Materials.Pop();
 					continue;
 				}
 				if (!bBuiltPlaneSideBakeInputs)
@@ -453,30 +445,21 @@ namespace
 				}
 
 				InOutData.Stats.RasterizedTriangleReferences += MatchingTriangleCount;
-				if (Storage->MaterialInterface->GetBlendMode() == BLEND_Masked)
+				if (MaterialInput.MaterialInterface->GetBlendMode() == BLEND_Masked)
 				{
 					InOutData.Stats.MaskedTriangleReferences += MatchingTriangleCount;
 				}
 
-				Storage->MeshSettings.MeshDescription = &Storage->MeshDescription;
-				Storage->MeshSettings.Mesh = &SourceStaticMesh;
-				Storage->MeshSettings.MaterialIndices.Add(0);
-				Storage->MeshSettings.TextureCoordinateBox =
+				MaterialInput.MeshSettings.MeshDescription =
+					MaterialInput.MeshDescription.Get();
+				MaterialInput.MeshSettings.Mesh = &SourceStaticMesh;
+				MaterialInput.MeshSettings.MaterialIndices.Add(0);
+				MaterialInput.MeshSettings.TextureCoordinateBox =
 					FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
-				Storage->MeshSettings.TextureCoordinateIndex = 0;
-				Storage->MeshSettings.LightMapIndex = 0;
-				Storage->MeshSettings.PrimitiveData =
+				MaterialInput.MeshSettings.TextureCoordinateIndex = 0;
+				MaterialInput.MeshSettings.LightMapIndex = 0;
+				MaterialInput.MeshSettings.PrimitiveData =
 					FPrimitiveData(InOutData.PrimitiveBounds);
-				Storage->MeshSettings.CustomTextureCoordinates = MoveTemp(Storage->CustomTileUVs);
-				FDepthCorrectMaterialStorage* StoragePtr = Storage.Get();
-				MaterialStorage.Add(MoveTemp(Storage));
-
-				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput =
-					DepthCorrectRequest.Materials.AddDefaulted_GetRef();
-				MaterialInput.MaterialInterface = StoragePtr->MaterialInterface;
-				MaterialInput.MeshSettings = &StoragePtr->MeshSettings;
-				MaterialInput.RasterSourceTriangleIndices =
-					&StoragePtr->RasterSourceTriangleIndices;
 			}
 
 			if (DepthCorrectRequest.Materials.IsEmpty())
@@ -489,7 +472,7 @@ namespace
 			if (!FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 					DepthCorrectRequest,
 					DepthCorrectResult,
-					&DepthCorrectError))
+					DepthCorrectError))
 			{
 				OutError = FString::Printf(
 					TEXT("Impostor depth-correct tile bake failed for frame %d: %s"),
@@ -658,7 +641,7 @@ namespace
 				InOutData.Stats.AtlasWidth,
 				InOutData.Stats.AtlasHeight,
 				InOutData.TileInfos,
-				&NormalCoverage,
+				NormalCoverage,
 				false);
 			for (int32 PixelIndex = 0; PixelIndex < InOutData.NormalDepthPixels.Num(); ++PixelIndex)
 			{
@@ -680,7 +663,7 @@ namespace
 				InOutData.Stats.AtlasWidth,
 				InOutData.Stats.AtlasHeight,
 				InOutData.TileInfos,
-				&CoverageMask,
+				CoverageMask,
 				true);
 		}
 		if (InOutData.Stats.PaintedPixels <= 0)
@@ -1179,7 +1162,7 @@ namespace
 		return true;
 	}
 
-	UTexture2D* CreateTexture(
+	TStrongObjectPtr<UTexture2D> CreateTexture(
 		const UStaticMesh& SourceStaticMesh,
 		FFoliageBakerAssetTransaction& Transaction,
 		const UFoliageBakerImpostorSettings& Settings,
@@ -1228,7 +1211,10 @@ namespace
 	bool ValidateParameterNames(const UFoliageBakerImpostorSettings& Settings, FString& OutError)
 	{
 		TSet<FName> TextureParameterNames;
-		auto ValidateTextureName = [&](const bool bEnabled, const FName Name, const TCHAR* Label)
+		auto ValidateTextureName = [&OutError, &TextureParameterNames](
+			const bool bEnabled,
+			const FName Name,
+			const TCHAR* Label)
 		{
 			if (!bEnabled)
 			{
@@ -1256,11 +1242,14 @@ namespace
 			&& !Settings.UpperHemisphereStaticSwitchParameterName.IsNone();
 	}
 
-	void AppendCreatedAsset(UObject* Asset, TArray<UObject*>& OutAssets)
+	template <typename AssetType>
+	void AppendCreatedAsset(
+		const TStrongObjectPtr<AssetType>& Asset,
+		TArray<TStrongObjectPtr<UObject>>& OutAssets)
 	{
 		if (Asset)
 		{
-			OutAssets.AddUnique(Asset);
+			OutAssets.AddUnique(TStrongObjectPtr<UObject>(Asset.Get()));
 		}
 	}
 }
@@ -1592,7 +1581,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		SourceStaticMesh,
 		Transaction,
 		MaterialParams,
-		&MaterialTemplate,
+		MaterialTemplate,
 		Result.BaseColorSdfTexture,
 		Result.NormalDepthTexture,
 		Result.MixTexture,
@@ -1621,7 +1610,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			Transaction,
 			MeshParams,
 			MeshDescription,
-			Result.MaterialInstance,
+			*Result.MaterialInstance,
 			Error);
 		if (!Result.ProxyMesh)
 		{
@@ -1657,14 +1646,14 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 				Transaction,
 				BuildSourceLODAssetParams(Settings, MeshOutputSelection.GetValue()),
 				MeshDescription,
-				Result.MaterialInstance,
+				*Result.MaterialInstance,
 				InstalledLODIndex,
 				Error))
 		{
 			Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), *Error);
 			return Result;
 		}
-		Result.ProxyMesh = &SourceStaticMesh;
+		Result.ProxyMesh.Reset(&SourceStaticMesh);
 		Result.SourceMeshLODIndex = InstalledLODIndex;
 	}
 
@@ -1713,10 +1702,11 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			BakeData.Stats.MaterialAverages,
 			MaterialScalarParameterNames);
 	Result.Report = FString::Printf(
-		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  resolution: %s\n  projection: fixed-frame WPO vertex sphere for continuous runtime views, %d px capture guard\n  channels: ColorOpacity RGB + SDF A, NormalMask octahedral object/local Normal RG + trunk 0.5/leaf 1 Mask B + Depth A (near 1, far 0, empty 0.5)%s\n  material scalar averages: %s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal, material properties and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  texel area-density scale versus unguarded WPO sphere: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  source WPO uses the same material shader path for capture and formal bake\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
+		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  resolution: %s\n  projection: fixed-frame WPO vertex sphere for continuous runtime views, %d px capture guard\n  channels: ColorOpacity RGB + SDF A, NormalMask octahedral object/local Normal RG + trunk 0.5/leaf 1 Mask B + Depth A (near 1, far 0, empty 0.5)%s\n  material scalar averages: %s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal, material properties and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  texel area-density scale versus unguarded WPO sphere: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  source WPO uses the same material shader path for capture and formal bake\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
 		*SourceStaticMesh.GetName(),
 		Settings.SourceLODIndex,
 		BakeData.WorldPositionOffsetStats.EvaluatedVertexCount,
+		BakeData.WorldPositionOffsetStats.NonFiniteCulledTriangleCount,
 		BakeData.WorldPositionOffsetStats.MaximumDisplacement,
 		*BakeData.BakeMaterialOverrides.BuildReportDetails(),
 		Settings.Coverage == EFoliageBakerImpostorCoverage::FullSphere ? TEXT("full sphere") : TEXT("upper hemisphere"),

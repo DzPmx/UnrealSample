@@ -6,6 +6,7 @@
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
 #include "Styling/CoreStyle.h"
+#include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Input/SButton.h"
@@ -269,7 +270,7 @@ namespace
 
 		void Construct(const FArguments& InArgs)
 		{
-			SourceStaticMesh = InArgs._SourceStaticMesh;
+			SourceStaticMesh.Reset(InArgs._SourceStaticMesh);
 			SourceLODIndex = InArgs._SourceLODIndex;
 			ParentWindow = InArgs._ParentWindow;
 			const int32 LastLODIndex = GetLastLODIndex();
@@ -597,7 +598,7 @@ namespace
 			return Cancel();
 		}
 
-		const UStaticMesh* SourceStaticMesh = nullptr;
+		TStrongObjectPtr<const UStaticMesh> SourceStaticMesh;
 		int32 SourceLODIndex = 0;
 		int32 ReplaceLODIndex = 0;
 		int32 InsertAfterLODIndex = 0;
@@ -662,12 +663,13 @@ FFoliageBakerExistingAssetDialog::OpenIfNeeded(
 			? ObjectPath
 			: Asset.DisplayName;
 		const FName ObjectPathName(*ObjectPath);
-		if (const FString* ExistingLabel =
-			PlannedAssetLabels.Find(ObjectPathName))
+		if (PlannedAssetLabels.Contains(ObjectPathName))
 		{
+			const FString& ExistingLabel =
+				PlannedAssetLabels.FindChecked(ObjectPathName);
 			OutError = FString::Printf(
 				TEXT("Generated outputs '%s' and '%s' resolve to the same asset path: %s. Use distinct prefixes or suffixes."),
-				*(*ExistingLabel),
+				*ExistingLabel,
 				*DisplayLabel,
 				*ObjectPath);
 			return TOptional<FFoliageBakerExistingAssetDecision>();

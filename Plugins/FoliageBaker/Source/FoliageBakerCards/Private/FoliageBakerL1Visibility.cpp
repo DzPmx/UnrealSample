@@ -252,18 +252,7 @@ namespace UE::FoliageBaker::L1Visibility
 			TArray<int32> ReferencedMaterialIndices = ReferencedMaterialSet.Array();
 			ReferencedMaterialIndices.Sort();
 
-			struct FShadowMaterialStorage
-			{
-				TStrongObjectPtr<UMaterialInterface> MaterialInterface;
-				FMeshDescription MeshDescription;
-				TArray<FVector2D> CustomTileUVs;
-				TArray<int32> RasterSourceTriangleIndices;
-				FMeshData MeshSettings;
-			};
-
 			const TArray<FStaticMaterial>& SourceMaterials = SourceStaticMesh.GetStaticMaterials();
-			TArray<TUniquePtr<FShadowMaterialStorage>> MaterialStorage;
-			MaterialStorage.Reserve(ReferencedMaterialIndices.Num());
 			FFoliageBakerDepthCorrectTileRequest Request;
 			Request.TextureSize = Projection.TextureSize;
 			Request.CaptureRayDirection = -Projection.PlaneInfo.Normal;
@@ -294,18 +283,20 @@ namespace UE::FoliageBaker::L1Visibility
 					return false;
 				}
 
-				TUniquePtr<FShadowMaterialStorage> Storage = MakeUnique<FShadowMaterialStorage>();
-				Storage->MaterialInterface =
+				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput =
+					Request.Materials.AddDefaulted_GetRef();
+				MaterialInput.MeshDescription = MakeUnique<FMeshDescription>();
+				MaterialInput.MaterialInterface =
 					BakeMaterialOverrides.ResolveMaterial(MaterialIndex);
-				if (!Storage->MaterialInterface)
+				if (!MaterialInput.MaterialInterface)
 				{
-					Storage->MaterialInterface.Reset(
+					MaterialInput.MaterialInterface.Reset(
 						SourceMaterials[MaterialIndex]
 							.MaterialInterface.Get());
 				}
-				if (!Storage->MaterialInterface)
+				if (!MaterialInput.MaterialInterface)
 				{
-					Storage->MaterialInterface.Reset(
+					MaterialInput.MaterialInterface.Reset(
 						UMaterial::GetDefaultMaterial(MD_Surface));
 				}
 
@@ -318,8 +309,11 @@ namespace UE::FoliageBaker::L1Visibility
 				FString InputError;
 				if (!ProjectedMaterialBake::BuildPlaneSideBakeInputs(
 						Triangles, AllTriangleIndices, NoCrackReduction, Projection.PlaneInfo, BakeParams,
-						Storage->MeshDescription, Storage->CustomTileUVs, MatchingTriangleCount, &InputError,
-						&Storage->RasterSourceTriangleIndices))
+						*MaterialInput.MeshDescription,
+						MaterialInput.MeshSettings.CustomTextureCoordinates,
+						MatchingTriangleCount,
+						InputError,
+						MaterialInput.RasterSourceTriangleIndices))
 				{
 					OutError = FString::Printf(TEXT("Upper-hemisphere L1 visibility could "
 													"not build material %d shadow input: %s"),
@@ -327,26 +321,23 @@ namespace UE::FoliageBaker::L1Visibility
 					return false;
 				}
 
-				Storage->MeshSettings.MeshDescription = &Storage->MeshDescription;
-				Storage->MeshSettings.Mesh = &SourceStaticMesh;
-				Storage->MeshSettings.MaterialIndices.Add(0);
-				Storage->MeshSettings.TextureCoordinateBox = FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
-				Storage->MeshSettings.TextureCoordinateIndex = 0;
-				Storage->MeshSettings.LightMapIndex = 0;
-				Storage->MeshSettings.PrimitiveData =
+				MaterialInput.MeshSettings.MeshDescription =
+					MaterialInput.MeshDescription.Get();
+				MaterialInput.MeshSettings.Mesh = &SourceStaticMesh;
+				MaterialInput.MeshSettings.MaterialIndices.Add(0);
+				MaterialInput.MeshSettings.TextureCoordinateBox =
+					FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
+				MaterialInput.MeshSettings.TextureCoordinateIndex = 0;
+				MaterialInput.MeshSettings.LightMapIndex = 0;
+				MaterialInput.MeshSettings.PrimitiveData =
 					FPrimitiveData(PrimitiveBounds);
-				Storage->MeshSettings.CustomTextureCoordinates = MoveTemp(Storage->CustomTileUVs);
-				FShadowMaterialStorage* StoragePtr = Storage.Get();
-				MaterialStorage.Add(MoveTemp(Storage));
-
-				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput = Request.Materials.AddDefaulted_GetRef();
-				MaterialInput.MaterialInterface = StoragePtr->MaterialInterface;
-				MaterialInput.MeshSettings = &StoragePtr->MeshSettings;
-				MaterialInput.RasterSourceTriangleIndices = &StoragePtr->RasterSourceTriangleIndices;
 			}
 
 			FString BakeError;
-			if (!FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(Request, OutResult, &BakeError))
+			if (!FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
+					Request,
+					OutResult,
+					BakeError))
 			{
 				OutError = FString::Printf(TEXT("Upper-hemisphere L1 visibility shadow bake failed: %s"), *BakeError);
 				return false;
@@ -690,7 +681,13 @@ namespace UE::FoliageBaker::L1Visibility
 					Fitter.EncodePixelInCaptureFrame(PixelIndex, PlaneInfos[PlaneIndex]);
 			}
 		}
-		Atlas::FillTransparentRGBInsideTiles(OutPixels, AtlasWidth, AtlasHeight, PlaneInfos, &ReceiverCoverage, true);
+		Atlas::FillTransparentRGBInsideTiles(
+			OutPixels,
+			AtlasWidth,
+			AtlasHeight,
+			PlaneInfos,
+			ReceiverCoverage,
+			true);
 		return true;
 	}
 } // namespace UE::FoliageBaker::L1Visibility

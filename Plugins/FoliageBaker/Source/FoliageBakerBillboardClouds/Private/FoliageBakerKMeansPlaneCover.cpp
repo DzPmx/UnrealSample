@@ -492,7 +492,9 @@ namespace UE::FoliageBaker::BillboardClouds
 		return Radius;
 	}
 
-	double ComputeClusterRadiusVariance(const TArray<FSourceTriangle>& Triangles, const TArray<FKMeansCluster>& Clusters, TArray<FVector>* OutCentroids = nullptr, TArray<double>* OutRadii = nullptr)
+	double ComputeClusterRadiusVariance(
+		const TArray<FSourceTriangle>& Triangles,
+		const TArray<FKMeansCluster>& Clusters)
 	{
 		TArray<FVector> Centroids;
 		ComputeCoverageCentroids(Triangles, Clusters, Centroids);
@@ -516,14 +518,6 @@ namespace UE::FoliageBaker::BillboardClouds
 
 		if (ValidClusterCount <= 0)
 		{
-			if (OutCentroids)
-			{
-				*OutCentroids = MoveTemp(Centroids);
-			}
-			if (OutRadii)
-			{
-				*OutRadii = MoveTemp(Radii);
-			}
 			return 0.0;
 		}
 
@@ -541,14 +535,6 @@ namespace UE::FoliageBaker::BillboardClouds
 		}
 		Variance /= static_cast<double>(ValidClusterCount);
 
-		if (OutCentroids)
-		{
-			*OutCentroids = MoveTemp(Centroids);
-		}
-		if (OutRadii)
-		{
-			*OutRadii = MoveTemp(Radii);
-		}
 		return Variance;
 	}
 

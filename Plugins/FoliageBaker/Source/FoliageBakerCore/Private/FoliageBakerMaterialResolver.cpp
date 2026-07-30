@@ -3,6 +3,7 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInterface.h"
+#include "UObject/StrongObjectPtr.h"
 
 namespace UE::FoliageBaker::MaterialResolver
 {
@@ -37,23 +38,25 @@ namespace UE::FoliageBaker::MaterialResolver
 		}
 
 		bool DoesMaterialOrParentNameMatchKeywords(
-			const UMaterialInterface* MaterialInterface,
+			const UMaterialInterface& MaterialInterface,
 			const TArray<FString>& Keywords)
 		{
-			if (!MaterialInterface || Keywords.IsEmpty())
+			if (Keywords.IsEmpty())
 			{
 				return false;
 			}
 
-			if (DoesAnyKeywordMatchName(Keywords, MaterialInterface->GetName()))
+			if (DoesAnyKeywordMatchName(Keywords, MaterialInterface.GetName()))
 			{
 				return true;
 			}
 
-			const UMaterialInterface* Parent = nullptr;
-			if (const UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(MaterialInterface))
+			TStrongObjectPtr<const UMaterialInterface> Parent;
+			const TStrongObjectPtr<const UMaterialInstance> MaterialInstance(
+				Cast<UMaterialInstance>(&MaterialInterface));
+			if (MaterialInstance)
 			{
-				Parent = MaterialInstance->Parent;
+				Parent.Reset(MaterialInstance->Parent.Get());
 			}
 
 			while (Parent)
@@ -63,8 +66,12 @@ namespace UE::FoliageBaker::MaterialResolver
 					return true;
 				}
 
-				const UMaterialInstance* ParentInstance = Cast<UMaterialInstance>(Parent);
-				Parent = ParentInstance ? ParentInstance->Parent : nullptr;
+				const TStrongObjectPtr<const UMaterialInstance> ParentInstance(
+					Cast<UMaterialInstance>(Parent.Get()));
+				Parent.Reset(
+					ParentInstance
+						? ParentInstance->Parent.Get()
+						: nullptr);
 			}
 
 			return false;
@@ -260,10 +267,14 @@ namespace UE::FoliageBaker::MaterialResolver
 
 		for (int32 MaterialIndex = 0; MaterialIndex < Result.MatchingMaterialFlags.Num(); ++MaterialIndex)
 		{
-			const UMaterialInterface* MaterialInterface = SourceMaterials.IsValidIndex(MaterialIndex)
-				? SourceMaterials[MaterialIndex].MaterialInterface
-				: nullptr;
-			if (DoesMaterialOrParentNameMatchKeywords(MaterialInterface, Keywords))
+			const TStrongObjectPtr<UMaterialInterface> MaterialInterface(
+				SourceMaterials.IsValidIndex(MaterialIndex)
+					? SourceMaterials[MaterialIndex].MaterialInterface.Get()
+					: nullptr);
+			if (MaterialInterface
+				&& DoesMaterialOrParentNameMatchKeywords(
+					*MaterialInterface,
+					Keywords))
 			{
 				Result.MatchingMaterialFlags[MaterialIndex] = 1;
 				++Result.MatchedMaterialCount;

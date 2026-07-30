@@ -20,15 +20,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			TArray<PlaneCover::FCrackReductionProjection> CrackReductionProjections;
 		};
 
-		struct FMaterialBakeStorage
-		{
-			TStrongObjectPtr<UMaterialInterface> MaterialInterface;
-			FMeshDescription MeshDescription;
-			TArray<FVector2D> CustomTileUVs;
-			TArray<int32> RasterSourceTriangleIndices;
-			FMeshData MeshSettings;
-		};
-
 		FString GetDiagnosticName(const FPolicy& Policy)
 		{
 			return Policy.DiagnosticName.IsEmpty()
@@ -183,7 +174,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 		struct FPlaneSideTileInputs
 		{
-			TArray<TUniquePtr<FMaterialBakeStorage>> MaterialStorage;
 			FFoliageBakerDepthCorrectTileRequest TileRequest;
 		};
 
@@ -202,7 +192,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			const TArray<int32> MaterialIndices =
 				CollectMaterialIndices(Triangles, Fragments);
 
-			OutInputs.MaterialStorage.Reserve(MaterialIndices.Num());
 			FFoliageBakerDepthCorrectTileRequest& TileRequest = OutInputs.TileRequest;
 			TileRequest.TextureSize = TileSize;
 			TileRequest.CaptureRayDirection = CaptureRayDirection;
@@ -238,22 +227,23 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					return false;
 				}
 
-				TUniquePtr<FMaterialBakeStorage> Storage =
-					MakeUnique<FMaterialBakeStorage>();
-				Storage->MaterialInterface =
+				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput =
+					TileRequest.Materials.AddDefaulted_GetRef();
+				MaterialInput.MeshDescription = MakeUnique<FMeshDescription>();
+				MaterialInput.MaterialInterface =
 					Inputs.BakeMaterialOverrides.ResolveMaterial(
 						MaterialIndex);
-				if (!Storage->MaterialInterface)
+				if (!MaterialInput.MaterialInterface)
 				{
-					Storage->MaterialInterface.Reset(
+					MaterialInput.MaterialInterface.Reset(
 						Context.SourceMaterials.IsValidIndex(MaterialIndex)
 							? Context.SourceMaterials[MaterialIndex]
 								.MaterialInterface.Get()
 							: nullptr);
 				}
-				if (!Storage->MaterialInterface)
+				if (!MaterialInput.MaterialInterface)
 				{
-					Storage->MaterialInterface.Reset(
+					MaterialInput.MaterialInterface.Reset(
 						UMaterial::GetDefaultMaterial(MD_Surface));
 				}
 
@@ -272,13 +262,14 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 						Fragments.CrackReductionProjections,
 						PlaneInfo,
 						ProjectedBakeParams,
-						Storage->MeshDescription,
-						Storage->CustomTileUVs,
+						*MaterialInput.MeshDescription,
+						MaterialInput.MeshSettings.CustomTextureCoordinates,
 						MatchingTriangleCount,
-						&ProjectedInputError,
-						&Storage->RasterSourceTriangleIndices);
+						ProjectedInputError,
+						MaterialInput.RasterSourceTriangleIndices);
 				if (MatchingTriangleCount == 0)
 				{
+					TileRequest.Materials.Pop();
 					continue;
 				}
 				if (!bBuiltInput)
@@ -294,31 +285,21 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				}
 
 				Context.Stats.RasterizedTriangleReferences += MatchingTriangleCount;
-				if (Storage->MaterialInterface->GetBlendMode() == BLEND_Masked)
+				if (MaterialInput.MaterialInterface->GetBlendMode() == BLEND_Masked)
 				{
 					Context.Stats.MaskedMaterialBakeReferences += MatchingTriangleCount;
 				}
 
-				Storage->MeshSettings.MeshDescription = &Storage->MeshDescription;
-				Storage->MeshSettings.Mesh = &Inputs.SourceStaticMesh;
-				Storage->MeshSettings.MaterialIndices.Add(0);
-				Storage->MeshSettings.TextureCoordinateBox =
+				MaterialInput.MeshSettings.MeshDescription =
+					MaterialInput.MeshDescription.Get();
+				MaterialInput.MeshSettings.Mesh = &Inputs.SourceStaticMesh;
+				MaterialInput.MeshSettings.MaterialIndices.Add(0);
+				MaterialInput.MeshSettings.TextureCoordinateBox =
 					FBox2D(FVector2D(0.0, 0.0), FVector2D(1.0, 1.0));
-				Storage->MeshSettings.TextureCoordinateIndex = 0;
-				Storage->MeshSettings.LightMapIndex = 0;
-				Storage->MeshSettings.PrimitiveData =
+				MaterialInput.MeshSettings.TextureCoordinateIndex = 0;
+				MaterialInput.MeshSettings.LightMapIndex = 0;
+				MaterialInput.MeshSettings.PrimitiveData =
 					FPrimitiveData(Inputs.SourceLODBounds);
-				Storage->MeshSettings.CustomTextureCoordinates =
-					MoveTemp(Storage->CustomTileUVs);
-
-				FMaterialBakeStorage* StoragePtr = Storage.Get();
-				OutInputs.MaterialStorage.Add(MoveTemp(Storage));
-				FFoliageBakerDepthCorrectTileMaterialInput& MaterialInput =
-					TileRequest.Materials.AddDefaulted_GetRef();
-				MaterialInput.MaterialInterface = StoragePtr->MaterialInterface;
-				MaterialInput.MeshSettings = &StoragePtr->MeshSettings;
-				MaterialInput.RasterSourceTriangleIndices =
-					&StoragePtr->RasterSourceTriangleIndices;
 			}
 			return true;
 		}
@@ -334,7 +315,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			if (!FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 					Inputs.TileRequest,
 					OutResult,
-					&TileError))
+					TileError))
 			{
 				Context.OutError = FString::Printf(
 					TEXT("%s tile bake failed for plane %d (%s): %s"),
@@ -674,7 +655,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				Stats.Width,
 				Stats.Height,
 				PlaneInfos,
-				&NormalCoverage,
+				NormalCoverage,
 				false);
 			const uint8 UncoveredAlpha = Policy.NormalAlphaMode
 				== ENormalAlphaMode::TrunkLeafClassification
@@ -696,7 +677,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				Stats.Width,
 				Stats.Height,
 				PlaneInfos,
-				&AtlasCoverage,
+				AtlasCoverage,
 				true);
 		}
 		return true;

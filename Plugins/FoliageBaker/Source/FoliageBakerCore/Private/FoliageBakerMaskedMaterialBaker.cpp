@@ -142,8 +142,8 @@ bool FFoliageBakerBakeMaterialOverrideSet::Build(
 		for (const FFoliageBakerBakeStaticSwitchOverride& StaticSwitchOverride :
 			StaticSwitchOverrides)
 		{
-			const FMaterialParameterInfo* MatchedParameterInfo =
-				StaticSwitchParameterInfos.FindByPredicate(
+			const int32 MatchedParameterIndex =
+				StaticSwitchParameterInfos.IndexOfByPredicate(
 					[&StaticSwitchOverride](
 						const FMaterialParameterInfo& ParameterInfo)
 					{
@@ -152,12 +152,12 @@ bool FFoliageBakerBakeMaterialOverrideSet::Build(
 							&& ParameterInfo.Association
 								== EMaterialParameterAssociation::GlobalParameter;
 					});
-			if (MatchedParameterInfo)
+			if (MatchedParameterIndex != INDEX_NONE)
 			{
 				FResolvedStaticSwitchOverride& ResolvedStaticSwitchOverride =
 					ResolvedStaticSwitchOverrides.AddDefaulted_GetRef();
 				ResolvedStaticSwitchOverride.ParameterInfo =
-					*MatchedParameterInfo;
+					StaticSwitchParameterInfos[MatchedParameterIndex];
 				ResolvedStaticSwitchOverride.bValue =
 					StaticSwitchOverride.bValue;
 			}
@@ -204,18 +204,20 @@ bool FFoliageBakerBakeMaterialOverrideSet::Build(
 	for (const FFoliageBakerBakeStaticSwitchOverride& StaticSwitchOverride :
 		StaticSwitchOverrides)
 	{
-		TArray<FString>* MissingMaterialNames =
-			MissingParameterMaterialNames.Find(StaticSwitchOverride.ParameterName);
-		if (MissingMaterialNames)
+		if (MissingParameterMaterialNames.Contains(
+				StaticSwitchOverride.ParameterName))
 		{
-			MissingMaterialNames->Sort();
+			TArray<FString>& MissingMaterialNames =
+				MissingParameterMaterialNames.FindChecked(
+					StaticSwitchOverride.ParameterName);
+			MissingMaterialNames.Sort();
 			UE_LOG(
 				LogFoliageBakerMaterialOverride,
 				Warning,
 				TEXT("Bake static switch '%s' is missing on %d selected-LOD material(s); that switch remains unchanged while any other configured overrides still apply: %s"),
 				*StaticSwitchOverride.ParameterName.ToString(),
-				MissingMaterialNames->Num(),
-				*FString::Join(*MissingMaterialNames, TEXT(", ")));
+				MissingMaterialNames.Num(),
+				*FString::Join(MissingMaterialNames, TEXT(", ")));
 		}
 	}
 	if (ReferencedMaterialCount == 0)
@@ -257,14 +259,16 @@ FString FFoliageBakerBakeMaterialOverrideSet::BuildReportDetails() const
 			*StaticSwitchOverride.ParameterName.ToString(),
 			StaticSwitchOverride.bValue ? TEXT("true") : TEXT("false")));
 
-		if (const TArray<FString>* MissingMaterialNames =
-			MissingParameterMaterialNames.Find(
+		if (MissingParameterMaterialNames.Contains(
 				StaticSwitchOverride.ParameterName))
 		{
+			const TArray<FString>& MissingMaterialNames =
+				MissingParameterMaterialNames.FindChecked(
+					StaticSwitchOverride.ParameterName);
 			MissingDetails.Add(FString::Printf(
 				TEXT("%s missing on: %s"),
 				*StaticSwitchOverride.ParameterName.ToString(),
-				*FString::Join(*MissingMaterialNames, TEXT(", "))));
+				*FString::Join(MissingMaterialNames, TEXT(", "))));
 		}
 	}
 	if (ReferencedMaterialCount == 0)
@@ -1541,32 +1545,65 @@ namespace
 		bool bMeshElementInitialized = false;
 	};
 
-	void SetMaskedBakeError(FString* OutError, const TCHAR* Message)
+	void SetMaskedBakeError(FString& OutError, const FString& Message)
 	{
-		if (OutError)
-		{
-			*OutError = Message;
-		}
+		OutError = Message;
 	}
+
+	struct FFoliageBakerMaskedMaterialProxyDeleter
+	{
+		// TUniquePtr's deleter contract is the boundary that supplies this pointer.
+		void operator()(FFoliageBakerMaskedMaterialProxy* MaterialProxy) const
+		{
+			if (MaterialProxy)
+			{
+				FMaterial::DeferredDelete(MaterialProxy);
+			}
+		}
+	};
+
+	using FFoliageBakerMaskedMaterialProxyOwner =
+		TUniquePtr<
+			FFoliageBakerMaskedMaterialProxy,
+			FFoliageBakerMaskedMaterialProxyDeleter>;
 
 	struct FFoliageBakerDepthCorrectTileMaterialResources
 	{
 		TUniquePtr<FFoliageBakerDepthCorrectTileMesh> Mesh;
-		FFoliageBakerMaskedMaterialProxy* SourceTriangleIdProxy = nullptr;
-		FFoliageBakerMaskedMaterialProxy* BaseColorProxy = nullptr;
-		FFoliageBakerMaskedMaterialProxy* ObjectSpaceNormalProxy = nullptr;
-		FFoliageBakerMaskedMaterialProxy* AmbientOcclusionProxy = nullptr;
-		FFoliageBakerMaskedMaterialProxy* RoughnessProxy = nullptr;
-		FFoliageBakerMaskedMaterialProxy* SpecularProxy = nullptr;
-		FFoliageBakerMaskedMaterialProxy* MetallicProxy = nullptr;
-		FFoliageBakerMaskedMaterialProxy* EmissionProxy = nullptr;
+		FFoliageBakerMaskedMaterialProxyOwner SourceTriangleIdProxy;
+		FFoliageBakerMaskedMaterialProxyOwner BaseColorProxy;
+		FFoliageBakerMaskedMaterialProxyOwner ObjectSpaceNormalProxy;
+		FFoliageBakerMaskedMaterialProxyOwner AmbientOcclusionProxy;
+		FFoliageBakerMaskedMaterialProxyOwner RoughnessProxy;
+		FFoliageBakerMaskedMaterialProxyOwner SpecularProxy;
+		FFoliageBakerMaskedMaterialProxyOwner MetallicProxy;
+		FFoliageBakerMaskedMaterialProxyOwner EmissionProxy;
 	};
 
 	struct FFoliageBakerFixedFrameWPOMaterialResources
 	{
 		TUniquePtr<FFoliageBakerFixedFrameWPOMesh> Mesh;
-		FFoliageBakerMaskedMaterialProxy* MaterialProxy = nullptr;
+		FFoliageBakerMaskedMaterialProxyOwner MaterialProxy;
 		int32 VertexIndexOffset = 0;
+	};
+
+	struct FFixedFrameWPORenderCommandPayload
+	{
+		TStrongObjectPtr<UTextureRenderTarget2D> PositionTarget;
+		TArray<FFoliageBakerFixedFrameWPOMaterialResources> Resources;
+	};
+
+	struct FDepthCorrectTileRenderCommandPayload
+	{
+		TStrongObjectPtr<UTextureRenderTarget2D> SourceTriangleIdTarget;
+		TStrongObjectPtr<UTextureRenderTarget2D> BaseColorTarget;
+		TStrongObjectPtr<UTextureRenderTarget2D> ObjectSpaceNormalTarget;
+		TStrongObjectPtr<UTextureRenderTarget2D> AmbientOcclusionTarget;
+		TStrongObjectPtr<UTextureRenderTarget2D> RoughnessTarget;
+		TStrongObjectPtr<UTextureRenderTarget2D> SpecularTarget;
+		TStrongObjectPtr<UTextureRenderTarget2D> MetallicTarget;
+		TStrongObjectPtr<UTextureRenderTarget2D> EmissionTarget;
+		TArray<FFoliageBakerDepthCorrectTileMaterialResources> Resources;
 	};
 
 	TStrongObjectPtr<UTextureRenderTarget2D> CreateFixedFrameWPOPositionTarget(
@@ -1790,14 +1827,11 @@ bool FFoliageBakerMaskedMaterialBaker::
 			SourceTriangles,
 		const FFoliageBakerBakeMaterialOverrideSet& BakeMaterialOverrides,
 		FFoliageBakerFixedFrameWPOResult& OutResult,
-		FString* OutError)
+		FString& OutError)
 {
 	using UE::FoliageBaker::PlaneCover::FSourceTriangle;
 	OutResult = FFoliageBakerFixedFrameWPOResult();
-	if (OutError)
-	{
-		OutError->Reset();
-	}
+	OutError.Reset();
 	if (!IsInGameThread())
 	{
 		SetMaskedBakeError(
@@ -1838,7 +1872,7 @@ bool FFoliageBakerMaskedMaterialBaker::
 			const FString Message = FString::Printf(
 				TEXT("Fixed-frame WPO bounds evaluation references invalid material index %d."),
 				MaterialIndex);
-			SetMaskedBakeError(OutError, *Message);
+			SetMaskedBakeError(OutError, Message);
 			return false;
 		}
 
@@ -1874,21 +1908,7 @@ bool FFoliageBakerMaskedMaterialBaker::
 	OutputToSourceVertexIndex.Reserve(
 		static_cast<int32>(SourceVertexCount64));
 
-	auto ReleaseResources = [&Resources]()
-	{
-		for (FFoliageBakerFixedFrameWPOMaterialResources& Resource :
-			Resources)
-		{
-			if (Resource.MaterialProxy)
-			{
-				FMaterial::DeferredDelete(Resource.MaterialProxy);
-				Resource.MaterialProxy = nullptr;
-			}
-			Resource.Mesh.Reset();
-		}
-		Resources.Reset();
-	};
-	auto FinishProxy = [OutError](
+	auto FinishProxy = [&OutError](
 		FFoliageBakerMaskedMaterialProxy& Proxy) -> bool
 	{
 		Proxy.FinishCompilation();
@@ -1910,7 +1930,7 @@ bool FFoliageBakerMaskedMaterialBaker::
 		const FString Message = FString::Printf(
 			TEXT("Fixed-frame WPO bounds shader compilation failed.%s"),
 			*CompileErrorDetails);
-		SetMaskedBakeError(OutError, *Message);
+		SetMaskedBakeError(OutError, Message);
 		return false;
 	};
 
@@ -1929,14 +1949,13 @@ bool FFoliageBakerMaskedMaterialBaker::
 		Resource.VertexIndexOffset = OutputToSourceVertexIndex.Num();
 		OutputToSourceVertexIndex.Append(
 			Resource.Mesh->GetSourceVertexIndices());
-		Resource.MaterialProxy =
+		Resource.MaterialProxy = FFoliageBakerMaskedMaterialProxyOwner(
 			new FFoliageBakerMaskedMaterialProxy(
 				*ResolvedMaterial.MaterialInterface,
-				EFoliageBakerMaskedOutput::SourceTriangleId);
+				EFoliageBakerMaskedOutput::SourceTriangleId));
 		if (!FinishProxy(*Resource.MaterialProxy))
 		{
 			FlushRenderingCommands();
-			ReleaseResources();
 			return false;
 		}
 	}
@@ -1948,7 +1967,6 @@ bool FFoliageBakerMaskedMaterialBaker::
 		|| OutputVertexCount > MaxExactFloatOutputIndex)
 	{
 		FlushRenderingCommands();
-		ReleaseResources();
 		SetMaskedBakeError(
 			OutError,
 			TEXT("Fixed-frame WPO bounds could not map every source vertex to an exact GPU output index."));
@@ -1968,7 +1986,6 @@ bool FFoliageBakerMaskedMaterialBaker::
 	if (TextureHeight <= 0 || TextureHeight > MaxTextureDimension)
 	{
 		FlushRenderingCommands();
-		ReleaseResources();
 		SetMaskedBakeError(
 			OutError,
 			TEXT("Fixed-frame WPO bounds output exceeds the maximum 2D texture size."));
@@ -1981,7 +1998,6 @@ bool FFoliageBakerMaskedMaterialBaker::
 	if (!PositionTarget.IsValid())
 	{
 		FlushRenderingCommands();
-		ReleaseResources();
 		SetMaskedBakeError(
 			OutError,
 			TEXT("Fixed-frame WPO bounds could not allocate its RGBA32F render target."));
@@ -2018,22 +2034,23 @@ bool FFoliageBakerMaskedMaterialBaker::
 	const FMatrix ProjectionMatrix =
 		BuildDepthCorrectTileProjectionMatrix(ViewRequest, ViewOrigin);
 
-	UTextureRenderTarget2D* PositionTargetPtr = PositionTarget.Get();
-	TArray<FFoliageBakerFixedFrameWPOMaterialResources>* ResourcesPtr =
-		&Resources;
+	const TSharedRef<FFixedFrameWPORenderCommandPayload, ESPMode::ThreadSafe>
+		RenderPayload =
+			MakeShared<FFixedFrameWPORenderCommandPayload, ESPMode::ThreadSafe>();
+	RenderPayload->PositionTarget = PositionTarget;
+	RenderPayload->Resources = MoveTemp(Resources);
 	ENQUEUE_RENDER_COMMAND(RenderFoliageBakerFixedFrameWPOBounds)(
-		[PositionTargetPtr,
-		 ResourcesPtr,
+		[RenderPayload,
 		 TextureSize,
 		 ViewOrigin,
 		 ViewRotationMatrix,
 		 ProjectionMatrix](FRHICommandListImmediate& RHICmdList)
 		{
-			FTextureRenderTargetResource* PositionResource =
-				PositionTargetPtr->GetRenderTargetResource();
+			FTextureRenderTargetResource& PositionResource =
+				*RenderPayload->PositionTarget->GetRenderTargetResource();
 			FSceneViewFamilyContext ViewFamily(
 				FSceneViewFamily::ConstructionValues(
-					PositionResource,
+					&PositionResource,
 					nullptr,
 					FEngineShowFlags(ESFIM_Game))
 				.SetTime(
@@ -2057,9 +2074,9 @@ bool FFoliageBakerMaskedMaterialBaker::
 			const FSceneView& View = *ViewFamily.Views[0];
 
 			TArray<FMeshBatch> MeshBatches;
-			MeshBatches.Reserve(ResourcesPtr->Num());
+			MeshBatches.Reserve(RenderPayload->Resources.Num());
 			for (FFoliageBakerFixedFrameWPOMaterialResources& Resource :
-				*ResourcesPtr)
+				RenderPayload->Resources)
 			{
 				if (!Resource.MaterialProxy
 					|| !Resource.Mesh
@@ -2082,18 +2099,18 @@ bool FFoliageBakerMaskedMaterialBaker::
 			GetRendererModule().InitializeSystemTextures(RHICmdList);
 			FRDGSystemTextures::Create(GraphBuilder);
 			FRDGTextureRef PositionTexture =
-				PositionResource->GetRenderTargetTexture(GraphBuilder);
+				PositionResource.GetRenderTargetTexture(GraphBuilder);
 			if (!MeshBatches.IsEmpty())
 			{
-				FSceneUniformBuffer* SceneUniforms =
-					GetRendererModule()
+				FSceneUniformBuffer& SceneUniforms =
+					*GetRendererModule()
 						.CreateSinglePrimitiveSceneUniformBuffer(
 							GraphBuilder,
 							View.GetFeatureLevel(),
 							MeshBatches[0]);
 				const TRDGUniformBufferRef<FSceneUniformParameters>
 					SceneUniformBuffer =
-						SceneUniforms->GetBuffer(GraphBuilder);
+						SceneUniforms.GetBuffer(GraphBuilder);
 				const TRDGUniformBufferRef<FInstanceCullingGlobalUniforms>
 					InstanceCullingUniformBuffer =
 						FInstanceCullingContext::
@@ -2128,7 +2145,7 @@ bool FFoliageBakerMaskedMaterialBaker::
 			->GameThread_GetRenderTargetResource()
 			->ReadLinearColorPixels(PositionPixels, ReadFlags)
 		&& PositionPixels.Num() == ExpectedPixelCount;
-	ReleaseResources();
+	RenderPayload->Resources.Reset();
 	if (!bReadSucceeded)
 	{
 		SetMaskedBakeError(
@@ -2140,7 +2157,8 @@ bool FFoliageBakerMaskedMaterialBaker::
 	OutResult.Triangles = SourceTriangles;
 	TBitArray<> SeenOutputVertices;
 	SeenOutputVertices.Init(false, OutputVertexCount);
-	FBox FixedFrameBounds(ForceInit);
+	TBitArray<> NonFiniteSourceTriangles;
+	NonFiniteSourceTriangles.Init(false, SourceTriangles.Num());
 	for (const FLinearColor& PositionPixel : PositionPixels)
 	{
 		if (PositionPixel.A < 0.5f)
@@ -2167,11 +2185,13 @@ bool FFoliageBakerMaskedMaterialBaker::
 			|| !FMath::IsFinite(Position.Y)
 			|| !FMath::IsFinite(Position.Z))
 		{
-			OutResult = FFoliageBakerFixedFrameWPOResult();
-			SetMaskedBakeError(
-				OutError,
-				TEXT("Fixed-frame WPO produced a non-finite vertex position."));
-			return false;
+			const int32 SourceVertexIndex =
+				OutputToSourceVertexIndex[OutputIndex];
+			const int32 SourceTriangleIndex = SourceVertexIndex / 3;
+			check(NonFiniteSourceTriangles.IsValidIndex(SourceTriangleIndex));
+			NonFiniteSourceTriangles[SourceTriangleIndex] = true;
+			SeenOutputVertices[OutputIndex] = true;
+			continue;
 		}
 
 		const int32 SourceVertexIndex =
@@ -2188,17 +2208,51 @@ bool FFoliageBakerMaskedMaterialBaker::
 		}
 		OutResult.Triangles[SourceTriangleIndex].Vertices[SourceCorner] =
 			Position;
-		FixedFrameBounds += Position;
 		SeenOutputVertices[OutputIndex] = true;
 	}
 
-	if (SeenOutputVertices.CountSetBits() != OutputVertexCount
-		|| !FixedFrameBounds.IsValid)
+	if (SeenOutputVertices.CountSetBits() != OutputVertexCount)
 	{
 		OutResult = FFoliageBakerFixedFrameWPOResult();
 		SetMaskedBakeError(
 			OutError,
 			TEXT("Fixed-frame WPO bounds did not receive every source vertex."));
+		return false;
+	}
+
+	TArray<UE::FoliageBaker::PlaneCover::FSourceTriangle>
+		RetainedTriangles;
+	const int32 RetainedTriangleCount =
+		SourceTriangles.Num() - NonFiniteSourceTriangles.CountSetBits();
+	RetainedTriangles.Reserve(RetainedTriangleCount);
+	OutResult.RetainedSourceTriangleIndices.Reserve(
+		RetainedTriangleCount);
+	FBox FixedFrameBounds(ForceInit);
+	for (int32 SourceTriangleIndex = 0;
+		SourceTriangleIndex < OutResult.Triangles.Num();
+		++SourceTriangleIndex)
+	{
+		if (NonFiniteSourceTriangles[SourceTriangleIndex])
+		{
+			continue;
+		}
+
+		UE::FoliageBaker::PlaneCover::FSourceTriangle& Triangle =
+			OutResult.Triangles[SourceTriangleIndex];
+		for (const FVector& Position : Triangle.Vertices)
+		{
+			FixedFrameBounds += Position;
+		}
+		RetainedTriangles.Add(MoveTemp(Triangle));
+		OutResult.RetainedSourceTriangleIndices.Add(SourceTriangleIndex);
+	}
+	OutResult.Triangles = MoveTemp(RetainedTriangles);
+	if (OutResult.Triangles.IsEmpty() || !FixedFrameBounds.IsValid)
+	{
+		OutResult = FFoliageBakerFixedFrameWPOResult();
+		SetMaskedBakeError(
+			OutError,
+			TEXT("Fixed-frame WPO culled every source triangle with non-finite vertex positions."));
 		return false;
 	}
 	OutResult.Bounds = FBoxSphereBounds(FixedFrameBounds);
@@ -2216,13 +2270,10 @@ bool FFoliageBakerMaskedMaterialBaker::
 bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	const FFoliageBakerDepthCorrectTileRequest& Request,
 	FFoliageBakerDepthCorrectTileResult& OutResult,
-	FString* OutError)
+	FString& OutError)
 {
 	OutResult = FFoliageBakerDepthCorrectTileResult();
-	if (OutError)
-	{
-		OutError->Reset();
-	}
+	OutError.Reset();
 	if (!IsInGameThread())
 	{
 		SetMaskedBakeError(OutError, TEXT("Depth-correct tile bake must run on the game thread."));
@@ -2252,16 +2303,15 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	for (const FFoliageBakerDepthCorrectTileMaterialInput& Input : Request.Materials)
 	{
 		if (!Input.MaterialInterface
-			|| !Input.MeshSettings
-			|| !Input.MeshSettings->MeshDescription
-			|| !Input.RasterSourceTriangleIndices
-			|| Input.RasterSourceTriangleIndices->Num()
-				!= Input.MeshSettings->MeshDescription->Triangles().Num())
+			|| !Input.MeshDescription
+			|| Input.MeshSettings.MeshDescription != Input.MeshDescription.Get()
+			|| Input.RasterSourceTriangleIndices.Num()
+				!= Input.MeshDescription->Triangles().Num())
 		{
 			SetMaskedBakeError(OutError, TEXT("Depth-correct tile bake received invalid material geometry."));
 			return false;
 		}
-		for (const int32 SourceTriangleIndex : *Input.RasterSourceTriangleIndices)
+		for (const int32 SourceTriangleIndex : Input.RasterSourceTriangleIndices)
 		{
 			if (SourceTriangleIndex < 0 || SourceTriangleIndex > 0xFFFFFE)
 			{
@@ -2319,55 +2369,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 
 	TArray<FFoliageBakerDepthCorrectTileMaterialResources> Resources;
 	Resources.Reserve(Request.Materials.Num());
-	auto ReleaseResources = [&Resources]()
-	{
-		for (FFoliageBakerDepthCorrectTileMaterialResources& Resource : Resources)
-		{
-			if (Resource.SourceTriangleIdProxy)
-			{
-				FMaterial::DeferredDelete(Resource.SourceTriangleIdProxy);
-				Resource.SourceTriangleIdProxy = nullptr;
-			}
-			if (Resource.BaseColorProxy)
-			{
-				FMaterial::DeferredDelete(Resource.BaseColorProxy);
-				Resource.BaseColorProxy = nullptr;
-			}
-			if (Resource.ObjectSpaceNormalProxy)
-			{
-				FMaterial::DeferredDelete(Resource.ObjectSpaceNormalProxy);
-				Resource.ObjectSpaceNormalProxy = nullptr;
-			}
-			if (Resource.AmbientOcclusionProxy)
-			{
-				FMaterial::DeferredDelete(Resource.AmbientOcclusionProxy);
-				Resource.AmbientOcclusionProxy = nullptr;
-			}
-			if (Resource.RoughnessProxy)
-			{
-				FMaterial::DeferredDelete(Resource.RoughnessProxy);
-				Resource.RoughnessProxy = nullptr;
-			}
-			if (Resource.SpecularProxy)
-			{
-				FMaterial::DeferredDelete(Resource.SpecularProxy);
-				Resource.SpecularProxy = nullptr;
-			}
-			if (Resource.MetallicProxy)
-			{
-				FMaterial::DeferredDelete(Resource.MetallicProxy);
-				Resource.MetallicProxy = nullptr;
-			}
-			if (Resource.EmissionProxy)
-			{
-				FMaterial::DeferredDelete(Resource.EmissionProxy);
-				Resource.EmissionProxy = nullptr;
-			}
-			Resource.Mesh.Reset();
-		}
-		Resources.Reset();
-	};
-	auto FinishProxy = [OutError](
+	auto FinishProxy = [&OutError](
 		FFoliageBakerMaskedMaterialProxy& Proxy,
 		const TCHAR* OutputName) -> bool
 	{
@@ -2390,7 +2392,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 			TEXT("Depth-correct %s shader compilation failed.%s"),
 			OutputName,
 			*CompileErrorDetails);
-		SetMaskedBakeError(OutError, *Message);
+		SetMaskedBakeError(OutError, Message);
 		return false;
 	};
 
@@ -2398,96 +2400,109 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	{
 		FFoliageBakerDepthCorrectTileMaterialResources& Resource = Resources.AddDefaulted_GetRef();
 		Resource.Mesh = MakeUnique<FFoliageBakerDepthCorrectTileMesh>(
-			*Input.MeshSettings,
-			*Input.RasterSourceTriangleIndices);
-		Resource.SourceTriangleIdProxy = new FFoliageBakerMaskedMaterialProxy(
-			*Input.MaterialInterface,
-			EFoliageBakerMaskedOutput::SourceTriangleId);
+			Input.MeshSettings,
+			Input.RasterSourceTriangleIndices);
+		Resource.SourceTriangleIdProxy =
+			FFoliageBakerMaskedMaterialProxyOwner(
+				new FFoliageBakerMaskedMaterialProxy(
+					*Input.MaterialInterface,
+					EFoliageBakerMaskedOutput::SourceTriangleId));
 		if (!FinishProxy(*Resource.SourceTriangleIdProxy, TEXT("source-triangle-id")))
 		{
 			FlushRenderingCommands();
-			ReleaseResources();
 			return false;
 		}
 		if (Request.bBakeBaseColor)
 		{
-			Resource.BaseColorProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::BaseColor);
+			Resource.BaseColorProxy =
+				FFoliageBakerMaskedMaterialProxyOwner(
+					new FFoliageBakerMaskedMaterialProxy(
+						*Input.MaterialInterface,
+						EFoliageBakerMaskedOutput::BaseColor));
 			if (!FinishProxy(*Resource.BaseColorProxy, TEXT("BaseColor")))
 			{
 				FlushRenderingCommands();
-				ReleaseResources();
 				return false;
 			}
 		}
 		if (Request.bBakeObjectSpaceNormal)
 		{
-			Resource.ObjectSpaceNormalProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::ObjectSpaceNormal);
+			Resource.ObjectSpaceNormalProxy =
+				FFoliageBakerMaskedMaterialProxyOwner(
+					new FFoliageBakerMaskedMaterialProxy(
+						*Input.MaterialInterface,
+						EFoliageBakerMaskedOutput::ObjectSpaceNormal));
 			if (!FinishProxy(*Resource.ObjectSpaceNormalProxy, TEXT("object-space-normal")))
 			{
 				FlushRenderingCommands();
-				ReleaseResources();
 				return false;
 			}
 		}
 		if (Request.bBakePackedMix)
 		{
-			Resource.AmbientOcclusionProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::AmbientOcclusion);
-			Resource.MetallicProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::Metallic);
-			Resource.EmissionProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::Emission);
+			Resource.AmbientOcclusionProxy =
+				FFoliageBakerMaskedMaterialProxyOwner(
+					new FFoliageBakerMaskedMaterialProxy(
+						*Input.MaterialInterface,
+						EFoliageBakerMaskedOutput::AmbientOcclusion));
+			Resource.MetallicProxy =
+				FFoliageBakerMaskedMaterialProxyOwner(
+					new FFoliageBakerMaskedMaterialProxy(
+						*Input.MaterialInterface,
+						EFoliageBakerMaskedOutput::Metallic));
+			Resource.EmissionProxy =
+				FFoliageBakerMaskedMaterialProxyOwner(
+					new FFoliageBakerMaskedMaterialProxy(
+						*Input.MaterialInterface,
+						EFoliageBakerMaskedOutput::Emission));
 			if (!FinishProxy(*Resource.AmbientOcclusionProxy, TEXT("ambient-occlusion"))
 				|| !FinishProxy(*Resource.MetallicProxy, TEXT("metallic"))
 				|| !FinishProxy(*Resource.EmissionProxy, TEXT("emission")))
 			{
 				FlushRenderingCommands();
-				ReleaseResources();
 				return false;
 			}
 		}
 		if (bBakeRoughness)
 		{
-			Resource.RoughnessProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::Roughness);
+			Resource.RoughnessProxy =
+				FFoliageBakerMaskedMaterialProxyOwner(
+					new FFoliageBakerMaskedMaterialProxy(
+						*Input.MaterialInterface,
+						EFoliageBakerMaskedOutput::Roughness));
 			if (!FinishProxy(*Resource.RoughnessProxy, TEXT("roughness")))
 			{
 				FlushRenderingCommands();
-				ReleaseResources();
 				return false;
 			}
 		}
 		if (Request.bBakeRoughnessSpecular)
 		{
-			Resource.SpecularProxy = new FFoliageBakerMaskedMaterialProxy(
-				*Input.MaterialInterface,
-				EFoliageBakerMaskedOutput::Specular);
+			Resource.SpecularProxy =
+				FFoliageBakerMaskedMaterialProxyOwner(
+					new FFoliageBakerMaskedMaterialProxy(
+						*Input.MaterialInterface,
+						EFoliageBakerMaskedOutput::Specular));
 			if (!FinishProxy(*Resource.SpecularProxy, TEXT("specular")))
 			{
 				FlushRenderingCommands();
-				ReleaseResources();
 				return false;
 			}
 		}
 	}
 
-	UTextureRenderTarget2D* SourceTriangleIdTargetPtr = SourceTriangleIdTarget.Get();
-	UTextureRenderTarget2D* BaseColorTargetPtr = BaseColorTarget.Get();
-	UTextureRenderTarget2D* ObjectSpaceNormalTargetPtr = ObjectSpaceNormalTarget.Get();
-	UTextureRenderTarget2D* AmbientOcclusionTargetPtr = AmbientOcclusionTarget.Get();
-	UTextureRenderTarget2D* RoughnessTargetPtr = RoughnessTarget.Get();
-	UTextureRenderTarget2D* SpecularTargetPtr = SpecularTarget.Get();
-	UTextureRenderTarget2D* MetallicTargetPtr = MetallicTarget.Get();
-	UTextureRenderTarget2D* EmissionTargetPtr = EmissionTarget.Get();
-	TArray<FFoliageBakerDepthCorrectTileMaterialResources>* ResourcesPtr = &Resources;
+	const TSharedRef<FDepthCorrectTileRenderCommandPayload, ESPMode::ThreadSafe>
+		RenderPayload =
+			MakeShared<FDepthCorrectTileRenderCommandPayload, ESPMode::ThreadSafe>();
+	RenderPayload->SourceTriangleIdTarget = SourceTriangleIdTarget;
+	RenderPayload->BaseColorTarget = BaseColorTarget;
+	RenderPayload->ObjectSpaceNormalTarget = ObjectSpaceNormalTarget;
+	RenderPayload->AmbientOcclusionTarget = AmbientOcclusionTarget;
+	RenderPayload->RoughnessTarget = RoughnessTarget;
+	RenderPayload->SpecularTarget = SpecularTarget;
+	RenderPayload->MetallicTarget = MetallicTarget;
+	RenderPayload->EmissionTarget = EmissionTarget;
+	RenderPayload->Resources = MoveTemp(Resources);
 	const FIntPoint TextureSize = Request.TextureSize;
 	const FVector ViewOrigin =
 		BuildDepthCorrectTileViewOrigin(Request);
@@ -2496,25 +2511,19 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 	const FMatrix ProjectionMatrix =
 		BuildDepthCorrectTileProjectionMatrix(Request, ViewOrigin);
 	ENQUEUE_RENDER_COMMAND(RenderFoliageBakerDepthCorrectTile)(
-		[SourceTriangleIdTargetPtr,
-		 BaseColorTargetPtr,
-		 ObjectSpaceNormalTargetPtr,
-		 AmbientOcclusionTargetPtr,
-		 RoughnessTargetPtr,
-		 SpecularTargetPtr,
-		 MetallicTargetPtr,
-		 EmissionTargetPtr,
-		 ResourcesPtr,
+		[RenderPayload,
 		 TextureSize,
 		 ViewOrigin,
 		 ViewRotationMatrix,
 		 ProjectionMatrix](FRHICommandListImmediate& RHICmdList)
 		{
-			FTextureRenderTargetResource* SourceTriangleIdResource =
-				SourceTriangleIdTargetPtr->GetRenderTargetResource();
+			FTextureRenderTargetResource& SourceTriangleIdResource =
+				*RenderPayload
+					->SourceTriangleIdTarget
+					->GetRenderTargetResource();
 			FSceneViewFamilyContext ViewFamily(
 				FSceneViewFamily::ConstructionValues(
-					SourceTriangleIdResource,
+					&SourceTriangleIdResource,
 					nullptr,
 					FEngineShowFlags(ESFIM_Game))
 				.SetTime(
@@ -2537,7 +2546,8 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 				&ViewInitOptions);
 			const FSceneView& View = *ViewFamily.Views[0];
 
-			for (FFoliageBakerDepthCorrectTileMaterialResources& Resource : *ResourcesPtr)
+			for (FFoliageBakerDepthCorrectTileMaterialResources& Resource :
+				RenderPayload->Resources)
 			{
 				Resource.SourceTriangleIdProxy->UpdateUniformExpressionCacheIfNeeded(
 					RHICmdList,
@@ -2592,17 +2602,20 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 			TArray<FMeshBatch> SpecularBatches;
 			TArray<FMeshBatch> MetallicBatches;
 			TArray<FMeshBatch> EmissionBatches;
-			SourceTriangleIdBatches.Reserve(ResourcesPtr->Num());
-			BaseColorBatches.Reserve(ResourcesPtr->Num());
-			ObjectSpaceNormalBatches.Reserve(ResourcesPtr->Num());
-			AmbientOcclusionBatches.Reserve(ResourcesPtr->Num());
-			RoughnessBatches.Reserve(ResourcesPtr->Num());
-			SpecularBatches.Reserve(ResourcesPtr->Num());
-			MetallicBatches.Reserve(ResourcesPtr->Num());
-			EmissionBatches.Reserve(ResourcesPtr->Num());
-			for (int32 ResourceIndex = 0; ResourceIndex < ResourcesPtr->Num(); ++ResourceIndex)
+			SourceTriangleIdBatches.Reserve(RenderPayload->Resources.Num());
+			BaseColorBatches.Reserve(RenderPayload->Resources.Num());
+			ObjectSpaceNormalBatches.Reserve(RenderPayload->Resources.Num());
+			AmbientOcclusionBatches.Reserve(RenderPayload->Resources.Num());
+			RoughnessBatches.Reserve(RenderPayload->Resources.Num());
+			SpecularBatches.Reserve(RenderPayload->Resources.Num());
+			MetallicBatches.Reserve(RenderPayload->Resources.Num());
+			EmissionBatches.Reserve(RenderPayload->Resources.Num());
+			for (int32 ResourceIndex = 0;
+				ResourceIndex < RenderPayload->Resources.Num();
+				++ResourceIndex)
 			{
-				FFoliageBakerDepthCorrectTileMaterialResources& Resource = (*ResourcesPtr)[ResourceIndex];
+				FFoliageBakerDepthCorrectTileMaterialResources& Resource =
+					RenderPayload->Resources[ResourceIndex];
 				if (!Resource.Mesh->HasGeometry())
 				{
 					continue;
@@ -2656,27 +2669,27 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 			GetRendererModule().InitializeSystemTextures(RHICmdList);
 			FRDGSystemTextures::Create(GraphBuilder);
 			FRDGTextureRef SourceTriangleIdTexture =
-				SourceTriangleIdResource->GetRenderTargetTexture(GraphBuilder);
-			FRDGTextureRef BaseColorTexture = BaseColorTargetPtr
-				? BaseColorTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+				SourceTriangleIdResource.GetRenderTargetTexture(GraphBuilder);
+			FRDGTextureRef BaseColorTexture = RenderPayload->BaseColorTarget
+				? RenderPayload->BaseColorTarget->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
-			FRDGTextureRef ObjectSpaceNormalTexture = ObjectSpaceNormalTargetPtr
-				? ObjectSpaceNormalTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+			FRDGTextureRef ObjectSpaceNormalTexture = RenderPayload->ObjectSpaceNormalTarget
+				? RenderPayload->ObjectSpaceNormalTarget->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
-			FRDGTextureRef AmbientOcclusionTexture = AmbientOcclusionTargetPtr
-				? AmbientOcclusionTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+			FRDGTextureRef AmbientOcclusionTexture = RenderPayload->AmbientOcclusionTarget
+				? RenderPayload->AmbientOcclusionTarget->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
-			FRDGTextureRef RoughnessTexture = RoughnessTargetPtr
-				? RoughnessTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+			FRDGTextureRef RoughnessTexture = RenderPayload->RoughnessTarget
+				? RenderPayload->RoughnessTarget->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
-			FRDGTextureRef SpecularTexture = SpecularTargetPtr
-				? SpecularTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+			FRDGTextureRef SpecularTexture = RenderPayload->SpecularTarget
+				? RenderPayload->SpecularTarget->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
-			FRDGTextureRef MetallicTexture = MetallicTargetPtr
-				? MetallicTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+			FRDGTextureRef MetallicTexture = RenderPayload->MetallicTarget
+				? RenderPayload->MetallicTarget->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
-			FRDGTextureRef EmissionTexture = EmissionTargetPtr
-				? EmissionTargetPtr->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
+			FRDGTextureRef EmissionTexture = RenderPayload->EmissionTarget
+				? RenderPayload->EmissionTarget->GetRenderTargetResource()->GetRenderTargetTexture(GraphBuilder)
 				: nullptr;
 			FRDGTextureRef DepthTexture = GraphBuilder.CreateTexture(
 				FRDGTextureDesc::Create2D(
@@ -2688,13 +2701,13 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 
 			if (!SourceTriangleIdBatches.IsEmpty())
 			{
-				FSceneUniformBuffer* SceneUniforms =
-					GetRendererModule().CreateSinglePrimitiveSceneUniformBuffer(
+				FSceneUniformBuffer& SceneUniforms =
+					*GetRendererModule().CreateSinglePrimitiveSceneUniformBuffer(
 						GraphBuilder,
 						View.GetFeatureLevel(),
 						SourceTriangleIdBatches[0]);
 				const TRDGUniformBufferRef<FSceneUniformParameters> SceneUniformBuffer =
-					SceneUniforms->GetBuffer(GraphBuilder);
+					SceneUniforms.GetBuffer(GraphBuilder);
 				const TRDGUniformBufferRef<FInstanceCullingGlobalUniforms> InstanceCullingUniformBuffer =
 					FInstanceCullingContext::CreateDummyInstanceCullingUniformBuffer(GraphBuilder);
 
@@ -2756,7 +2769,17 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 						ViewRect,
 						ObjectSpaceNormalBatches);
 				}
-				auto AddAttributePass = [&](const TCHAR* PassName, FRDGTextureRef Target, const TArray<FMeshBatch>& Batches)
+				auto AddAttributePass = [
+					&AttributeRenderState,
+					DepthTexture,
+					&GraphBuilder,
+					&InstanceCullingUniformBuffer,
+					&SceneUniformBuffer,
+					&View,
+					ViewRect](
+					const TCHAR* PassName,
+					FRDGTextureRef Target,
+					const TArray<FMeshBatch>& Batches)
 				{
 					if (!Target)
 					{
@@ -2831,7 +2854,7 @@ bool FFoliageBakerMaskedMaterialBaker::BakeDepthCorrectTile(
 		|| (ReadPixels(*AmbientOcclusionTarget.Get(), AmbientOcclusionPixels)
 			&& ReadPixels(*MetallicTarget.Get(), MetallicPixels)
 			&& ReadPixels(*EmissionTarget.Get(), EmissionPixels));
-	ReleaseResources();
+	RenderPayload->Resources.Reset();
 	if (!bReadSourceTriangleId
 		|| !bReadBaseColor
 		|| !bReadObjectSpaceNormal
