@@ -28,7 +28,7 @@ struct FFoliageBakerCardBakeRequest
 
 	EFoliageBakerTextureResolutionMode TextureResolutionMode =
 		EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
-	double TargetWorldTexelSizeCm = 5.0;
+	double TargetTexelsPerMeter = 20.0;
 	int32 MinimumTextureAtlasResolution = 64;
 	int32 TextureResolution = 4096;
 	int32 AlphaCropGuardPixels = 2;

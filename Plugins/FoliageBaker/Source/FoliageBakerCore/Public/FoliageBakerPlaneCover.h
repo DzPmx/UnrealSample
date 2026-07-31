@@ -84,7 +84,7 @@ namespace UE::FoliageBaker::PlaneCover
 		double CrackReductionProjectionScale = 1.0;
 		EFoliageBakerTextureResolutionMode TextureResolutionMode =
 			EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
-		double TargetWorldTexelSizeCm = 5.0;
+		double TargetTexelsPerMeter = 20.0;
 		int32 MinimumTextureAtlasResolution = 64;
 		int32 TextureAtlasResolution = 4096;
 		EDoubleSidedBakeMode DoubleSidedBakeMode = EDoubleSidedBakeMode::Off;

@@ -36,8 +36,8 @@ namespace
 		}
 		Settings.CrackReductionProjectionScale = FMath::Clamp(EditorSettings.KMeansCrackReductionProjectionScale, 0.0, 1.0);
 		Settings.TextureResolutionMode = EditorSettings.TextureResolutionMode;
-		Settings.TargetWorldTexelSizeCm =
-			FMath::Max(EditorSettings.TargetWorldTexelSizeCm, 0.01);
+		Settings.TargetTexelsPerMeter =
+			FMath::Max(EditorSettings.TargetTexelsPerMeter, 0.01);
 		Settings.MinimumTextureAtlasResolution =
 			FMath::Clamp(
 				EditorSettings.MinimumTextureAtlasResolution,
@@ -682,10 +682,10 @@ namespace
 	{
 		if (EditorSettings.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
-			&& (!FMath::IsFinite(EditorSettings.TargetWorldTexelSizeCm)
-				|| EditorSettings.TargetWorldTexelSizeCm <= 0.0))
+			&& (!FMath::IsFinite(EditorSettings.TargetTexelsPerMeter)
+				|| EditorSettings.TargetTexelsPerMeter <= 0.0))
 		{
-			OutError = TEXT("Target World Texel Size must be greater than zero.");
+			OutError = TEXT("Target Texels Per Meter must be greater than zero.");
 			return false;
 		}
 
@@ -1131,22 +1131,30 @@ namespace
 				!EditorSettings.bBakeMixAtlas,
 				TextureData.AtlasStats.MaterialAverages,
 				MaterialScalarParameterNames);
+		const double MinimumActualTexelsPerMeter =
+			UE::FoliageBaker::TextureResolution::
+				WorldTexelSizeCmToTexelsPerMeter(
+					MeshData.Stats.MaximumWorldTexelSizeCm);
+		const double MaximumActualTexelsPerMeter =
+			UE::FoliageBaker::TextureResolution::
+				WorldTexelSizeCmToTexelsPerMeter(
+					MeshData.Stats.MinimumWorldTexelSizeCm);
 		const FString ResolutionDetails =
 			EditorSettings.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
 			? FString::Printf(
-				TEXT("auto world texel size, target=%.4f cm/texel, actual range=%.4f-%.4f cm/texel%s"),
-				EditorSettings.TargetWorldTexelSizeCm,
-				MeshData.Stats.MinimumWorldTexelSizeCm,
-				MeshData.Stats.MaximumWorldTexelSizeCm,
-				MeshData.Stats.MaximumWorldTexelSizeCm
-						> EditorSettings.TargetWorldTexelSizeCm * 1.001
+				TEXT("auto texels per meter, target=%.2f texels/m, actual range=%.2f-%.2f texels/m%s"),
+				EditorSettings.TargetTexelsPerMeter,
+				MinimumActualTexelsPerMeter,
+				MaximumActualTexelsPerMeter,
+				MinimumActualTexelsPerMeter
+						< EditorSettings.TargetTexelsPerMeter / 1.001
 					? TEXT(", target exceeded by atlas limit or trunk scale")
 					: TEXT(""))
 			: FString::Printf(
-				TEXT("manual atlas resolution, actual range=%.4f-%.4f cm/texel"),
-				MeshData.Stats.MinimumWorldTexelSizeCm,
-				MeshData.Stats.MaximumWorldTexelSizeCm);
+				TEXT("manual atlas resolution, actual range=%.2f-%.2f texels/m"),
+				MinimumActualTexelsPerMeter,
+				MaximumActualTexelsPerMeter);
 		const TCHAR* AlphaCropDetails = !EditorSettings.bEnableAlphaAwareTileCrop
 			? TEXT("disabled")
 			: EditorSettings.TextureResolutionMode

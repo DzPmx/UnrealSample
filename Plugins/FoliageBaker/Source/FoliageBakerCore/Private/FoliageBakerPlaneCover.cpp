@@ -579,7 +579,8 @@ namespace UE::FoliageBaker::PlaneCover
 						Settings.MinimumTextureAtlasResolution,
 						MaximumAtlasResolution);
 				const double TargetPixelsPerCentimeter =
-					1.0 / FMath::Max(Settings.TargetWorldTexelSizeCm, 0.01);
+					FMath::Max(Settings.TargetTexelsPerMeter, 0.01)
+					/ TextureResolution::CentimetersPerMeter;
 				// Keep target-sized tiles unchanged and leave unused power-of-two
 				// atlas space empty so different assets retain the same density.
 				if (MaxPlaneDimension * TargetPixelsPerCentimeter
@@ -982,7 +983,8 @@ namespace UE::FoliageBaker::PlaneCover
 			if (bUseWorldTexelSize)
 			{
 				const double TargetPixelsPerCentimeter =
-					1.0 / FMath::Max(Settings.TargetWorldTexelSizeCm, 0.01);
+					FMath::Max(Settings.TargetTexelsPerMeter, 0.01)
+					/ TextureResolution::CentimetersPerMeter;
 				const double TargetTileWidth =
 					PlaneWidth * TargetPixelsPerCentimeter;
 				const double TargetTileHeight =

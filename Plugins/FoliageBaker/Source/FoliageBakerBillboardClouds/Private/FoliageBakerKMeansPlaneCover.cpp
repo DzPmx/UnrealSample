@@ -824,8 +824,8 @@ namespace UE::FoliageBaker::BillboardClouds
 			ProxySettings.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
 			? FString::Printf(
-				TEXT("auto %.4f cm/texel, %d-%d atlas"),
-				ProxySettings.TargetWorldTexelSizeCm,
+				TEXT("auto %.2f texels/m, %d-%d atlas"),
+				ProxySettings.TargetTexelsPerMeter,
 				ProxySettings.MinimumTextureAtlasResolution,
 				ProxySettings.TextureAtlasResolution)
 			: FString::Printf(

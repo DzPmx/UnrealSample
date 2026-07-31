@@ -700,13 +700,13 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		if (Inputs.Settings.TextureResolutionMode
 			!= EFoliageBakerTextureResolutionMode::AutoWorldTexelSize)
 		{
-			OutError = TEXT("Target-density alpha crop requires Auto World Texel Size mode.");
+			OutError = TEXT("Target-density alpha crop requires Auto Texels Per Meter mode.");
 			return false;
 		}
-		if (!FMath::IsFinite(Inputs.Settings.TargetWorldTexelSizeCm)
-			|| Inputs.Settings.TargetWorldTexelSizeCm <= 0.0)
+		if (!FMath::IsFinite(Inputs.Settings.TargetTexelsPerMeter)
+			|| Inputs.Settings.TargetTexelsPerMeter <= 0.0)
 		{
-			OutError = TEXT("Target-density alpha crop requires a positive world texel size.");
+			OutError = TEXT("Target-density alpha crop requires positive texels per meter.");
 			return false;
 		}
 
@@ -721,7 +721,8 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			GetDiagnosticName(Policy) + TEXT(" target-density alpha crop prepass");
 
 		const double TargetPixelsPerCentimeter =
-			1.0 / Inputs.Settings.TargetWorldTexelSizeCm;
+			Inputs.Settings.TargetTexelsPerMeter
+			/ TextureResolution::CentimetersPerMeter;
 		const int32 MaximumPrepassDimension =
 			TextureResolution::MaximumSupportedAtlasResolution;
 		for (int32 PlaneIndex = 0;

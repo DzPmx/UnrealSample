@@ -187,7 +187,7 @@ namespace
 			UE::FoliageBaker::TextureResolution::MinimumSupportedAtlasResolution,
 			UE::FoliageBaker::TextureResolution::MaximumSupportedAtlasResolution);
 		Settings.TextureResolutionMode = Request.TextureResolutionMode;
-		Settings.TargetWorldTexelSizeCm = Request.TargetWorldTexelSizeCm;
+		Settings.TargetTexelsPerMeter = Request.TargetTexelsPerMeter;
 		Settings.MinimumTextureAtlasResolution = Request.MinimumTextureAtlasResolution;
 		Settings.TextureAtlasResolution = Request.bTrimUnusedAtlasSpace
 			? ClampedTextureResolution
@@ -1619,22 +1619,30 @@ namespace
 				!Request.bBakeMix,
 				AtlasData.AtlasStats.MaterialAverages,
 				MaterialScalarParameterNames);
+		const double MinimumActualTexelsPerMeter =
+			UE::FoliageBaker::TextureResolution::
+				WorldTexelSizeCmToTexelsPerMeter(
+					MeshData.OutputStats.MaximumWorldTexelSizeCm);
+		const double MaximumActualTexelsPerMeter =
+			UE::FoliageBaker::TextureResolution::
+				WorldTexelSizeCmToTexelsPerMeter(
+					MeshData.OutputStats.MinimumWorldTexelSizeCm);
 		const FString ResolutionDetails =
 			Request.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
 			? FString::Printf(
-				TEXT("auto world texel size, target=%.4f cm/texel, actual range=%.4f-%.4f cm/texel%s"),
-				Request.TargetWorldTexelSizeCm,
-				MeshData.OutputStats.MinimumWorldTexelSizeCm,
-				MeshData.OutputStats.MaximumWorldTexelSizeCm,
-				MeshData.OutputStats.MaximumWorldTexelSizeCm
-						> Request.TargetWorldTexelSizeCm * 1.001
+				TEXT("auto texels per meter, target=%.2f texels/m, actual range=%.2f-%.2f texels/m%s"),
+				Request.TargetTexelsPerMeter,
+				MinimumActualTexelsPerMeter,
+				MaximumActualTexelsPerMeter,
+				MinimumActualTexelsPerMeter
+						< Request.TargetTexelsPerMeter / 1.001
 					? TEXT(", maximum atlas reached")
 					: TEXT(""))
 			: FString::Printf(
-				TEXT("manual atlas resolution, actual range=%.4f-%.4f cm/texel"),
-				MeshData.OutputStats.MinimumWorldTexelSizeCm,
-				MeshData.OutputStats.MaximumWorldTexelSizeCm);
+				TEXT("manual atlas resolution, actual range=%.2f-%.2f texels/m"),
+				MinimumActualTexelsPerMeter,
+				MaximumActualTexelsPerMeter);
 		const TCHAR* AlphaCropDetails =
 			Request.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
@@ -2089,10 +2097,10 @@ namespace
 		}
 		if (Request.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
-			&& (!FMath::IsFinite(Request.TargetWorldTexelSizeCm)
-				|| Request.TargetWorldTexelSizeCm <= 0.0))
+			&& (!FMath::IsFinite(Request.TargetTexelsPerMeter)
+				|| Request.TargetTexelsPerMeter <= 0.0))
 		{
-			return Fail(TEXT("target world texel size must be greater than zero."));
+			return Fail(TEXT("target texels per meter must be greater than zero."));
 		}
 		if (Request.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
@@ -2117,8 +2125,8 @@ namespace
 			FMath::Clamp(Request.MultiBillboardsPerCluster, 2, 8);
 		Result.TrunkTrianglePercentage =
 			FMath::Clamp(Request.TrunkTrianglePercentage, 0.05f, 1.0f);
-		Result.TargetWorldTexelSizeCm =
-			FMath::Max(Request.TargetWorldTexelSizeCm, 0.01);
+		Result.TargetTexelsPerMeter =
+			FMath::Max(Request.TargetTexelsPerMeter, 0.01);
 		Result.MinimumTextureAtlasResolution =
 			FMath::Clamp(
 				Request.MinimumTextureAtlasResolution,

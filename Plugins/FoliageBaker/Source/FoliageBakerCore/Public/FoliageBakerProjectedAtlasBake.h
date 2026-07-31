@@ -110,7 +110,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 	/**
 	 * Detects alpha bounds one plane at a time at the configured target world
-	 * texel size, independent of whether all target-sized tiles fit one atlas.
+	 * texel density, independent of whether all target-density tiles fit one atlas.
 	 * Front and back coverage share the same prepass tile so the crop is
 	 * conservative for both sides.
 	 */

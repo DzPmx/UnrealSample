@@ -74,15 +74,15 @@ Impostor 使用固定帧 WPO 几何的 Sphere Radius 计算正方形捕获直径
 
 ## 分辨率与 Texel Density
 
-项目默认使用 `Auto - World Texel Size`：
+项目默认使用 `Auto - Texels Per Meter`：
 
 | 设置 | 项目默认值 |
 | --- | --- |
-| `Target World Texel Size` | `5 cm/texel` |
+| `Target Texels Per Meter` | `20 texels/m` |
 | `Minimum Atlas Resolution` | `64` |
 | `Maximum Atlas Resolution` | `4096` |
 
-`cm/texel` 是线性尺度：`5 cm/texel` 表示一个 Texel 在源网格局部空间中约覆盖 5 cm。Auto 会在最小值与最大值之间选择满足目标密度的最小 2 次幂预算；到达最大分辨率后不再继续放大。
+`texels/m` 是线性密度：`20 texels/m` 表示源网格局部空间中的 1 米约使用 20 个 Texel，与原来的 `5 cm/texel` 完全等价。数值越大，目标细节越高。Auto 会在最小值与最大值之间选择满足目标密度的最小 2 次幂预算；到达最大分辨率后不再继续放大。
 
 各模式对预算的使用方式不同：
 

@@ -52,7 +52,7 @@ namespace
 		Request.bIncludeReducedTrunk = Settings.bIncludeReducedTrunk;
 		Request.TrunkTrianglePercentage = Settings.TrunkTrianglePercentage;
 		Request.TextureResolutionMode = Settings.TextureResolutionMode;
-		Request.TargetWorldTexelSizeCm = Settings.TargetWorldTexelSizeCm;
+		Request.TargetTexelsPerMeter = Settings.TargetTexelsPerMeter;
 		Request.MinimumTextureAtlasResolution = Settings.MinimumTextureAtlasResolution;
 		Request.TextureResolution = IsSingleBillboardMode(Settings.Mode)
 			? Settings.SingleTextureResolution

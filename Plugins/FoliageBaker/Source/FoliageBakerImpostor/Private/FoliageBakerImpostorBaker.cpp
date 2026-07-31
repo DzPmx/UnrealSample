@@ -232,7 +232,8 @@ namespace
 					Settings.MinimumTextureAtlasResolution,
 					MaximumAtlasResolution);
 			const double TargetTexelSizeCm =
-				FMath::Max(Settings.TargetWorldTexelSizeCm, 0.01);
+				UE::FoliageBaker::TextureResolution::CentimetersPerMeter
+				/ Settings.TargetTexelsPerMeter;
 			AtlasResolution = MaximumAtlasResolution;
 			for (int32 CandidateAtlasResolution = MinimumAtlasResolution;
 				CandidateAtlasResolution <= MaximumAtlasResolution;
@@ -1281,11 +1282,11 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	}
 	if (Settings.TextureResolutionMode
 			== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
-		&& (!FMath::IsFinite(Settings.TargetWorldTexelSizeCm)
-			|| Settings.TargetWorldTexelSizeCm <= 0.0))
+		&& (!FMath::IsFinite(Settings.TargetTexelsPerMeter)
+			|| Settings.TargetTexelsPerMeter <= 0.0))
 	{
 		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: Target World Texel Size must be greater than zero."),
+			TEXT("%s\n  failed: Target Texels Per Meter must be greater than zero."),
 			*SourceStaticMesh.GetName());
 		return Result;
 	}
@@ -1676,19 +1677,22 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	const double ActualWorldTexelSizeCm =
 		2.0 * BakeData.SharedCaptureHalfExtent
 		/ static_cast<double>(BakeData.Stats.TileResolution);
+	const double ActualTexelsPerMeter =
+		UE::FoliageBaker::TextureResolution::
+			WorldTexelSizeCmToTexelsPerMeter(ActualWorldTexelSizeCm);
 	const FString ResolutionDetails =
 		Settings.TextureResolutionMode
 			== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
 		? FString::Printf(
-			TEXT("auto world texel size, target=%.4f cm/texel, actual=%.4f cm/texel%s"),
-			Settings.TargetWorldTexelSizeCm,
-			ActualWorldTexelSizeCm,
-			ActualWorldTexelSizeCm > Settings.TargetWorldTexelSizeCm * 1.001
+			TEXT("auto texels per meter, target=%.2f texels/m, actual=%.2f texels/m%s"),
+			Settings.TargetTexelsPerMeter,
+			ActualTexelsPerMeter,
+			ActualTexelsPerMeter < Settings.TargetTexelsPerMeter / 1.001
 				? TEXT(", maximum atlas reached")
 				: TEXT(""))
 		: FString::Printf(
-			TEXT("manual atlas resolution, actual=%.4f cm/texel"),
-			ActualWorldTexelSizeCm);
+			TEXT("manual atlas resolution, actual=%.2f texels/m"),
+			ActualTexelsPerMeter);
 	const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
 		MaterialScalarParameterNames = {
 			Settings.LeafRoughnessParameterName,
