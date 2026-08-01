@@ -30,8 +30,9 @@ enum class EFoliageBakerSingleCaptureAxis : uint8
 UENUM()
 enum class EFoliageBakerBillboardMode : uint8
 {
-	SinglePlane UMETA(DisplayName = "Single Plane"),
-	DoublePlanes UMETA(DisplayName = "Double Planes")
+	SinglePlane = 0 UMETA(DisplayName = "Single Plane - One View"),
+	SinglePlaneTwoViews = 2 UMETA(DisplayName = "Single Plane - Two Views"),
+	DoublePlanes = 1 UMETA(DisplayName = "Double Planes - Two Views")
 };
 
 UENUM()
@@ -59,10 +60,10 @@ public:
 	UPROPERTY(config)
 	EFoliageBakerCardMode Mode = EFoliageBakerCardMode::SingleBillboard;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Billboard Mode", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Single Plane captures one view and emits one camera-facing plane. Double Planes captures the selected primary axis plus a second horizontal axis rotated 90 degrees around local +Z, then emits two parallel camera-facing planes for angle-based material blending."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Billboard Mode", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Single Plane - One View captures one view and emits one camera-facing plane. Single Plane - Two Views captures the selected primary axis plus a second horizontal axis rotated 90 degrees around local +Z, packs the primary tile above the second tile, stores them in UV0 and UV1, and emits one plane. Double Planes - Two Views captures the same two views, uses the same fixed vertical atlas layout, and emits two parallel planes."))
 	EFoliageBakerBillboardMode BillboardMode = EFoliageBakerBillboardMode::SinglePlane;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Capture Axis", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard || Mode == EFoliageBakerCardMode::MultiBillboard", EditConditionHides, ToolTip = "Camera is placed on the selected local axis and looks toward the source geometry. Double Planes derives its second capture direction by rotating this axis 90 degrees around local +Z. MultiBillboard uses this axis as the shared normal and depth-slicing direction for every cluster's parallel Billboard stack."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Capture Axis", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard || Mode == EFoliageBakerCardMode::MultiBillboard", EditConditionHides, ToolTip = "Camera is placed on the selected local axis and looks toward the source geometry. Both two-view Billboard modes derive their second capture direction by rotating this axis 90 degrees around local +Z. MultiBillboard uses this axis as the shared normal and depth-slicing direction for every cluster's parallel Billboard stack."))
 	EFoliageBakerSingleCaptureAxis SingleCaptureAxis = EFoliageBakerSingleCaptureAxis::PositiveX;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (ClampMin = "2", ClampMax = "5", EditCondition = "Mode == EFoliageBakerCardMode::CrossCards", EditConditionHides, ToolTip = "Number of vertical planes distributed evenly over 180 degrees. Every plane is baked from both sides, and all planes intersect on the vertical axis through the source Static Mesh local origin (asset pivot)."))
@@ -123,7 +124,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / Opacity", ToolTip = "RGB stores base color. A stores visible source classification: background 0, trunk 0.5, leaf 1."))
 	bool bBakeBaseColorOpacity = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Trunk Leaf Mask", ToolTip = "RGB stores object/local-space normal for Single Plane and Cross Cards. Double Planes re-expresses each view's normal in its capture Facing/Right/Up frame so both views use the same billboard decoder. A stores the visible trunk/leaf classification after source opacity clipping: background 0, trunk 0.5, leaf 1."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Trunk Leaf Mask", ToolTip = "RGB stores object/local-space normal for Single Plane - One View and Cross Cards. Both two-view Billboard modes re-express each view's normal in its capture Facing/Right/Up frame so both views use the same billboard decoder. A stores the visible trunk/leaf classification after source opacity clipping: background 0, trunk 0.5, leaf 1."))
 	bool bBakeNormalDepth = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission. The destination material texture parameter is configured in Material."))
@@ -171,7 +172,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MaterialInstanceNameSuffix;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Standard Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Used by Single Plane Billboard, Cross Cards, or MultiBillboard. Double Planes Billboard uses its dedicated Parent Material Instance slot. Generated proxy materials are new child Material Instance Constants."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Standard Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Used by Single Plane - One View, Cross Cards, or MultiBillboard. Both two-view Billboard modes use their dedicated Parent Material Instance slots. Generated proxy materials are new child Material Instance Constants."))
 	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
 
 	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Override Static Switches During Bake", ToolTip = "Creates one transient child Material Instance per unique selected-LOD material and applies every configured Global static switch override that exists on that material. Missing switches emit warnings and the remaining overrides continue. Source material assets are never modified. World Position Offset is evaluated with animation time fixed at zero; Displacement remains disabled."))
@@ -185,7 +186,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Opacity Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and trunk/leaf opacity classification in A."))
 	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Trunk Leaf Mask Parameter", ToolTip = "Texture parameter receiving Normal RGB and the trunk/leaf classification in A. Double Planes Normal RGB uses the shared capture-frame convention required by its billboard decoder."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Trunk Leaf Mask Parameter", ToolTip = "Texture parameter receiving Normal RGB and the trunk/leaf classification in A. Both two-view Billboard modes use the shared capture-frame convention required by their billboard decoders."))
 	FName NormalDepthTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission texture when that output is enabled."))
@@ -215,7 +216,10 @@ class FOLIAGEBAKERCARDS_API UFoliageBakerSingleBillboardSettings final : public 
 public:
 	UFoliageBakerSingleBillboardSettings();
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Double Planes Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used exclusively by Double Planes Billboard. The generated mesh provides the per-plane atlas tile in UV0, local capture direction in UV1.xy, and plane selector 0 or 1 in UV2.x for view-angle Dither blending and dynamic plane spacing."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Single Plane - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlaneTwoViews", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used exclusively by Single Plane - Two Views Billboard. The generated mesh stores the upper primary atlas tile in UV0, the lower +90-degree atlas tile in UV1, and the primary local capture direction in UV2.xy. The parent material owns view-angle selection or blending."))
+	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneTwoViewsMaterialInstanceTemplate;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Double Planes - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::DoublePlanes", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used exclusively by Double Planes - Two Views Billboard. The generated mesh provides the per-plane atlas tile in UV0, local capture direction in UV1.xy, and plane selector 0 or 1 in UV2.x for view-angle Dither blending and dynamic plane spacing."))
 	TSoftObjectPtr<UMaterialInstanceConstant> DoublePlanesMaterialInstanceTemplate;
 };
 

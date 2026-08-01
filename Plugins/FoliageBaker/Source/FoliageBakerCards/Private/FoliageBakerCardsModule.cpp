@@ -24,13 +24,21 @@ namespace
 	TSoftObjectPtr<UMaterialInstanceConstant> GetConfiguredMaterialTemplate(
 		const UFoliageBakerCardsSettings& ToolSettings)
 	{
-		if (IsSingleBillboardMode(ToolSettings.Mode)
-			&& ToolSettings.BillboardMode == EFoliageBakerBillboardMode::DoublePlanes)
+		if (IsSingleBillboardMode(ToolSettings.Mode))
 		{
 			const UFoliageBakerSingleBillboardSettings& BillboardSettings =
 				*CastChecked<UFoliageBakerSingleBillboardSettings>(
 					&ToolSettings);
-			return BillboardSettings.DoublePlanesMaterialInstanceTemplate;
+			if (ToolSettings.BillboardMode
+				== EFoliageBakerBillboardMode::SinglePlaneTwoViews)
+			{
+				return BillboardSettings.SinglePlaneTwoViewsMaterialInstanceTemplate;
+			}
+			if (ToolSettings.BillboardMode
+				== EFoliageBakerBillboardMode::DoublePlanes)
+			{
+				return BillboardSettings.DoublePlanesMaterialInstanceTemplate;
+			}
 		}
 		return ToolSettings.MaterialInstanceTemplate;
 	}
@@ -41,7 +49,7 @@ namespace
 		FFoliageBakerCardBakeRequest Request;
 		Request.SourceLODIndex = Settings.SourceLODIndex;
 		Request.Mode = Settings.Mode;
-		Request.BillboardPlaneMode = Settings.BillboardMode;
+		Request.BillboardMode = Settings.BillboardMode;
 		Request.SingleCaptureAxis = Settings.SingleCaptureAxis;
 		Request.CrossCardPlaneCount = Settings.CrossCardPlaneCount;
 		Request.CrossCardGeometryMode = Settings.CrossCardFaceMode;
@@ -193,7 +201,7 @@ TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageB
 			? LOCTEXT("BakeMultiBillboardButton", "Bake MultiBillboard")
 			: LOCTEXT("BakeCrossCardsButton", "Bake Cross Cards");
 	ControllerArgs.BakeButtonTooltip = IsSingleBillboardMode(Mode)
-		? LOCTEXT("BakeBillboardTooltip", "Bake the selected Single Plane or Double Planes Billboard mode for every queued Static Mesh.")
+		? LOCTEXT("BakeBillboardTooltip", "Bake the selected Single Plane - One View, Single Plane - Two Views, or Double Planes - Two Views mode for every queued Static Mesh.")
 		: IsMultiBillboardMode(Mode)
 			? LOCTEXT("BakeMultiBillboardTooltip", "Bake clustered leaf Billboards and, when enabled, retain and simplify the non-leaf trunk and branch geometry with its original materials.")
 			: LOCTEXT("BakeCrossCardsTooltip", "Bake one Cross Cards asset for every queued Static Mesh.");

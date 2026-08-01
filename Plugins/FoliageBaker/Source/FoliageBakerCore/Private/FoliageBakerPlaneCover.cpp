@@ -965,7 +965,6 @@ namespace UE::FoliageBaker::PlaneCover
 
 			const double PlaneWidth = FMath::Max(PlaneInfos[0].MaxU - PlaneInfos[0].MinU, 1.0);
 			const double PlaneHeight = FMath::Max(PlaneInfos[0].MaxV - PlaneInfos[0].MinV, 1.0);
-			const bool bHorizontalLayout = PlaneHeight > PlaneWidth;
 			const bool bUseWorldTexelSize =
 				Settings.TextureResolutionMode
 				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize;
@@ -989,20 +988,17 @@ namespace UE::FoliageBaker::PlaneCover
 					PlaneWidth * TargetPixelsPerCentimeter;
 				const double TargetTileHeight =
 					PlaneHeight * TargetPixelsPerCentimeter;
-				const bool bTargetFits = bHorizontalLayout
-					? (TargetTileWidth <= MaximumAtlasResolution / 2.0
-						&& TargetTileHeight <= MaximumAtlasResolution)
-					: (TargetTileWidth <= MaximumAtlasResolution
-						&& TargetTileHeight <= MaximumAtlasResolution / 2.0);
+				const bool bTargetFits =
+					TargetTileWidth <= MaximumAtlasResolution
+					&& TargetTileHeight <= MaximumAtlasResolution / 2.0;
 				if (bTargetFits)
 				{
 					TileWidth =
 						FMath::Max(1, FMath::CeilToInt(TargetTileWidth));
 					TileHeight =
 						FMath::Max(1, FMath::CeilToInt(TargetTileHeight));
-					const int32 RequiredAtlasResolution = bHorizontalLayout
-						? FMath::Max(TileWidth * 2, TileHeight)
-						: FMath::Max(TileWidth, TileHeight * 2);
+					const int32 RequiredAtlasResolution =
+						FMath::Max(TileWidth, TileHeight * 2);
 					AtlasResolution = FMath::Max(
 						TextureResolution::ResolveMinimumAtlasResolution(
 							Settings.MinimumTextureAtlasResolution,
@@ -1014,21 +1010,17 @@ namespace UE::FoliageBaker::PlaneCover
 
 			if (TileWidth == 0 || TileHeight == 0)
 			{
-				const double PixelsPerUnit = bHorizontalLayout
-					? FMath::Min(
-						static_cast<double>(AtlasResolution) / (2.0 * PlaneWidth),
-						static_cast<double>(AtlasResolution) / PlaneHeight)
-					: FMath::Min(
-						static_cast<double>(AtlasResolution) / PlaneWidth,
-						static_cast<double>(AtlasResolution) / (2.0 * PlaneHeight));
+				const double PixelsPerUnit = FMath::Min(
+					static_cast<double>(AtlasResolution) / PlaneWidth,
+					static_cast<double>(AtlasResolution) / (2.0 * PlaneHeight));
 				TileWidth = FMath::Clamp(
 					FMath::FloorToInt(PlaneWidth * PixelsPerUnit),
 					1,
-					bHorizontalLayout ? AtlasResolution / 2 : AtlasResolution);
+					AtlasResolution);
 				TileHeight = FMath::Clamp(
 					FMath::FloorToInt(PlaneHeight * PixelsPerUnit),
 					1,
-					bHorizontalLayout ? AtlasResolution : AtlasResolution / 2);
+					AtlasResolution / 2);
 			}
 
 			OutAtlasWidth = AtlasResolution;
@@ -1040,9 +1032,7 @@ namespace UE::FoliageBaker::PlaneCover
 				FPlaneProxyPlaneInfo& PlaneInfo = PlaneInfos[PlaneIndex];
 				PlaneInfo.AtlasPixelMin = PlaneIndex == 0
 					? FIntPoint::ZeroValue
-					: bHorizontalLayout
-						? FIntPoint(TileWidth, 0)
-						: FIntPoint(0, TileHeight);
+					: FIntPoint(0, TileHeight);
 				PlaneInfo.AtlasTileSize = FIntPoint(TileWidth, TileHeight);
 				PlaneInfo.BackAtlasPixelMin = FIntPoint::ZeroValue;
 				PlaneInfo.BackAtlasTileSize = FIntPoint::ZeroValue;

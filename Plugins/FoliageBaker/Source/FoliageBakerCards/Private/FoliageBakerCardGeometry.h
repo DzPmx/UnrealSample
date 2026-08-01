@@ -27,8 +27,15 @@ namespace UE::FoliageBaker::Cards::Geometry
 		FRetainedTrunkResult& OutResult,
 		FString& OutError);
 
-	bool BuildDoublePlanesOutput(
+	bool BuildDoublePlanesTwoViewsOutput(
 		const FVector& OutputNormal,
+		const PlaneCover::FPlaneProxySettings& PlaneSettings,
+		const FFoliageBakerProxyGeometry& CaptureGeometry,
+		FMeshDescription& OutMeshDescription,
+		PlaneCover::FPlaneProxyMeshStats& OutStats,
+		FString& OutError);
+
+	bool BuildSinglePlaneTwoViewsOutput(
 		const PlaneCover::FPlaneProxySettings& PlaneSettings,
 		const FFoliageBakerProxyGeometry& CaptureGeometry,
 		FMeshDescription& OutMeshDescription,

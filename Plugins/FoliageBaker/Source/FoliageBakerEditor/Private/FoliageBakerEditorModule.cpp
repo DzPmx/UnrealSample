@@ -72,7 +72,7 @@ namespace
 					"Bake either one camera-facing plane or two parallel camera-facing planes captured from horizontal directions 90 degrees apart."),
 				LOCTEXT(
 					"BillboardFeatureMetadata",
-					"Selectable source LOD  |  Single Plane or Double Planes  |  orthographic capture  |  1024 default")
+					"Selectable source LOD  |  Single Plane - One View, Single Plane - Two Views, or Double Planes - Two Views  |  orthographic capture  |  1024 default")
 			},
 			{
 				EFoliageBakerFeatureKind::CrossCards,
@@ -160,7 +160,7 @@ namespace
 				LOCTEXT("BillboardSettingsName", "Foliage Baker - Billboard"),
 				LOCTEXT(
 					"BillboardSettingsDescription",
-					"Configure Single Plane and Double Planes Billboard preferences, including their default Parent Material Instances."),
+					"Configure Single Plane - One View, Single Plane - Two Views, and Double Planes - Two Views preferences, including their default Parent Material Instances."),
 				UFoliageBakerSingleBillboardSettings::StaticClass()
 			},
 			{

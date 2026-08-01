@@ -272,7 +272,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 		return true;
 	}
 
-	bool BuildDoublePlanesOutput(
+	bool BuildDoublePlanesTwoViewsOutput(
 		const FVector& OutputNormal,
 		const PlaneCover::FPlaneProxySettings& PlaneSettings,
 		const FFoliageBakerProxyGeometry& CaptureGeometry,
@@ -283,7 +283,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 		if (CaptureGeometry.PlaneInfos.Num() != 2)
 		{
 			OutError = FString::Printf(
-				TEXT("Double Planes Billboard requires exactly two captured planes, but %d were generated."),
+				TEXT("Double Planes - Two Views Billboard requires exactly two captured planes, but %d were generated."),
 				CaptureGeometry.PlaneInfos.Num());
 			return false;
 		}
@@ -292,7 +292,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 		const FVector AxisU = FVector::CrossProduct(FVector::UpVector, Normal).GetSafeNormal();
 		if (Normal.IsNearlyZero() || AxisU.IsNearlyZero())
 		{
-			OutError = TEXT("Double Planes Billboard could not construct a horizontal output plane frame.");
+			OutError = TEXT("Double Planes - Two Views Billboard could not construct a horizontal output plane frame.");
 			return false;
 		}
 
@@ -306,7 +306,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 			if (CaptureNormal.IsNearlyZero())
 			{
 				OutError = FString::Printf(
-					TEXT("Double Planes Billboard capture plane %d has an invalid direction."),
+					TEXT("Double Planes - Two Views Billboard capture plane %d has an invalid direction."),
 					PlaneIndex);
 				return false;
 			}
@@ -348,6 +348,55 @@ namespace UE::FoliageBaker::Cards::Geometry
 		OutStats.AveragePlaneToShadingNormalDot = 1.0;
 		OutStats.AveragePlaneToShadingNormalAngleDegrees = 0.0;
 		return true;
+	}
+
+	bool BuildSinglePlaneTwoViewsOutput(
+		const PlaneCover::FPlaneProxySettings& PlaneSettings,
+		const FFoliageBakerProxyGeometry& CaptureGeometry,
+		FMeshDescription& OutMeshDescription,
+		PlaneCover::FPlaneProxyMeshStats& OutStats,
+		FString& OutError)
+	{
+		if (CaptureGeometry.PlaneInfos.Num() != 2)
+		{
+			OutError = FString::Printf(
+				TEXT("Single Plane - Two Views Billboard requires exactly two captured planes, but %d were generated."),
+				CaptureGeometry.PlaneInfos.Num());
+			return false;
+		}
+
+		const PlaneCover::FPlaneProxyPlaneInfo& PrimaryCapture =
+			CaptureGeometry.PlaneInfos[0];
+		const PlaneCover::FPlaneProxyPlaneInfo& SecondaryCapture =
+			CaptureGeometry.PlaneInfos[1];
+		const FVector PrimaryCaptureNormal = PrimaryCapture.Normal.GetSafeNormal();
+		if (PrimaryCaptureNormal.IsNearlyZero())
+		{
+			OutError = TEXT("Single Plane - Two Views Billboard has an invalid primary capture direction.");
+			return false;
+		}
+
+		TArray<PlaneCover::FPlaneProxyPlaneInfo> OutputPlaneInfos;
+		PlaneCover::FPlaneProxyPlaneInfo& OutputPlane =
+			OutputPlaneInfos.Add_GetRef(PrimaryCapture);
+		for (int32 CornerIndex = 0; CornerIndex < 4; ++CornerIndex)
+		{
+			OutputPlane.BackAtlasUVs[CornerIndex] =
+				SecondaryCapture.AtlasUVs[CornerIndex];
+		}
+		OutputPlane.bHasBackFaceAtlas = false;
+		OutputPlane.bUseCustomAuxiliaryUV = true;
+		OutputPlane.AuxiliaryUV = FVector2f(
+			static_cast<float>(PrimaryCaptureNormal.X),
+			static_cast<float>(PrimaryCaptureNormal.Y));
+
+		OutStats = CaptureGeometry.Stats;
+		return PlaneCover::RebuildPlaneProxyMeshDescriptionFromPlaneInfos(
+			OutputPlaneInfos,
+			PlaneSettings,
+			OutMeshDescription,
+			OutStats,
+			OutError);
 	}
 
 	bool BuildMultiBillboardOutput(

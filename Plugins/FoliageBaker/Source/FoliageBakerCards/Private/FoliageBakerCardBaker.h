@@ -15,7 +15,7 @@ struct FFoliageBakerCardBakeRequest
 	int32 SourceLODIndex = 0;
 
 	EFoliageBakerCardMode Mode = EFoliageBakerCardMode::SingleBillboard;
-	EFoliageBakerBillboardMode BillboardPlaneMode = EFoliageBakerBillboardMode::SinglePlane;
+	EFoliageBakerBillboardMode BillboardMode = EFoliageBakerBillboardMode::SinglePlane;
 	EFoliageBakerSingleCaptureAxis SingleCaptureAxis = EFoliageBakerSingleCaptureAxis::PositiveX;
 	int32 CrossCardPlaneCount = 2;
 	EFoliageBakerCrossCardFaceMode CrossCardGeometryMode = EFoliageBakerCrossCardFaceMode::TwoSidedTwoUVs;

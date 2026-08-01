@@ -5,7 +5,7 @@
 
 namespace UE::FoliageBaker::Cards::Atlas
 {
-	int32 MergeDoublePlaneTileCrops(
+	int32 MergeTwoViewTileCrops(
 		TArray<PlaneCover::FPlaneProxyTileCrop>& TileCrops)
 	{
 		if (TileCrops.Num() != 2 || !TileCrops[0].bEnabled || !TileCrops[1].bEnabled)

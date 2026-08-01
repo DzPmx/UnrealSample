@@ -12,7 +12,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 		PowerOfTwoUsedBounds
 	};
 
-	int32 MergeDoublePlaneTileCrops(
+	int32 MergeTwoViewTileCrops(
 		TArray<PlaneCover::FPlaneProxyTileCrop>& TileCrops);
 
 	int32 MergeGroupedTileCrops(
