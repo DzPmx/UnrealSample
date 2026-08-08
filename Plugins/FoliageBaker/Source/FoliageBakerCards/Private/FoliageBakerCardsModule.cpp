@@ -29,6 +29,21 @@ namespace
 			const UFoliageBakerSingleBillboardSettings& BillboardSettings =
 				*CastChecked<UFoliageBakerSingleBillboardSettings>(
 					&ToolSettings);
+			if (ToolSettings.bBakeUpperHemisphereL1Visibility)
+			{
+				switch (ToolSettings.BillboardMode)
+				{
+				case EFoliageBakerBillboardMode::SinglePlane:
+					return BillboardSettings.SinglePlaneSHShadowMaterialInstanceTemplate;
+				case EFoliageBakerBillboardMode::SinglePlaneTwoViews:
+					return BillboardSettings.SinglePlaneTwoViewsSHShadowMaterialInstanceTemplate;
+				case EFoliageBakerBillboardMode::DoublePlanes:
+					return BillboardSettings.DoublePlanesSHShadowMaterialInstanceTemplate;
+				default:
+					checkNoEntry();
+					return TSoftObjectPtr<UMaterialInstanceConstant>();
+				}
+			}
 			if (ToolSettings.BillboardMode
 				== EFoliageBakerBillboardMode::SinglePlaneTwoViews)
 			{

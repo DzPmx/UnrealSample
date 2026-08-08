@@ -23,10 +23,14 @@ private:
 	FText GetActiveFeatureTitle() const;
 	FText GetActiveFeatureDescription() const;
 	FText GetActiveFeatureMetadata() const;
+	int32 GetActiveWorkflowIndex() const;
 	int32 GetActiveFeatureIndex() const;
+	void HandleWorkflowChanged(int32 NewWorkflowIndex);
 	void HandleFeatureChanged(int32 NewFeatureIndex);
 
+	int32 ActiveWorkflowIndex = 0;
 	int32 ActiveFeatureIndex = 0;
 	TArray<FName> RegisteredPreferenceClassNames;
+	TSharedPtr<SWidgetSwitcher> WorkflowSwitcher;
 	TSharedPtr<SWidgetSwitcher> FeatureSwitcher;
 };

@@ -3,7 +3,7 @@
 	"Version": 1,
 	"VersionName": "0.1.0",
 	"FriendlyName": "Foliage Baker",
-	"Description": "Extensible editor-side foliage baking tools with shared core services and feature modules.",
+	"Description": "Extensible editor-side foliage data and proxy baking tools with shared core services.",
 	"Category": "Rendering",
 	"CreatedBy": "Codex",
 	"CreatedByURL": "",

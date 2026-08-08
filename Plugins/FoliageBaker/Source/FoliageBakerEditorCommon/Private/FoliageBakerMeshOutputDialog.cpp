@@ -6,6 +6,7 @@
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
 #include "Styling/CoreStyle.h"
+#include "UObject/SoftObjectPath.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 #include "Widgets/SCompoundWidget.h"
@@ -37,7 +38,7 @@ namespace
 			FModuleManager::LoadModuleChecked<FAssetRegistryModule>(
 				TEXT("AssetRegistry"));
 		if (AssetRegistryModule.Get().GetAssetByObjectPath(
-				FName(*ObjectPath)).IsValid())
+				FSoftObjectPath(ObjectPath)).IsValid())
 		{
 			return true;
 		}

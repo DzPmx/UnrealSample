@@ -32,6 +32,8 @@
 namespace
 {
 	const FName FoliageBakerToolTabName(TEXT("FoliageBakerTools"));
+	constexpr int32 DataBakeWorkflowIndex = 0;
+	constexpr int32 ProxyBakeWorkflowIndex = 1;
 	constexpr int32 BillboardFeatureIndex = 0;
 	const FName EditorSettingsContainerName(TEXT("Editor"));
 	const FName PluginsSettingsCategoryName(TEXT("Plugins"));
@@ -208,7 +210,7 @@ void FFoliageBakerEditorModule::StartupModule()
 		FoliageBakerToolTabName,
 		FOnSpawnTab::CreateRaw(this, &FFoliageBakerEditorModule::SpawnToolTab))
 		.SetDisplayName(LOCTEXT("FoliageBakerToolTabTitle", "Foliage Baker"))
-		.SetTooltipText(LOCTEXT("FoliageBakerToolTabTooltip", "Bake distant foliage representations from a selected Static Mesh LOD."))
+		.SetTooltipText(LOCTEXT("FoliageBakerToolTabTooltip", "Open the foliage Data Bake and Proxy Bake workflows."))
 		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"))
 		.SetMenuType(ETabSpawnerMenuType::Hidden);
 
@@ -229,6 +231,7 @@ void FFoliageBakerEditorModule::ShutdownModule()
 		}
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(FoliageBakerToolTabName);
 	}
+	WorkflowSwitcher.Reset();
 	FeatureSwitcher.Reset();
 }
 
@@ -312,7 +315,7 @@ void FFoliageBakerEditorModule::RegisterMenus()
 	Section.AddMenuEntry(
 		TEXT("OpenFoliageBaker"),
 		LOCTEXT("OpenFoliageBakerLabel", "Foliage Baker"),
-		LOCTEXT("OpenFoliageBakerTooltip", "Open the unified Billboard, Cross Cards, Impostor, MultiBillboard, and BillboardClouds tool."),
+		LOCTEXT("OpenFoliageBakerTooltip", "Open the unified Data Bake and Proxy Bake tool."),
 		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"),
 		FToolMenuExecuteAction::CreateRaw(this, &FFoliageBakerEditorModule::ExecuteOpenTool));
 }
@@ -320,6 +323,7 @@ void FFoliageBakerEditorModule::RegisterMenus()
 TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs& SpawnTabArgs)
 {
 	(void)SpawnTabArgs;
+	ActiveWorkflowIndex = DataBakeWorkflowIndex;
 	ActiveFeatureIndex = BillboardFeatureIndex;
 
 	FFoliageBakerBillboardCloudsModule& BillboardCloudsModule =
@@ -328,6 +332,20 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 		FModuleManager::LoadModuleChecked<FFoliageBakerCardsModule>(TEXT("FoliageBakerCards"));
 	FFoliageBakerImpostorModule& ImpostorModule =
 		FModuleManager::LoadModuleChecked<FFoliageBakerImpostorModule>(TEXT("FoliageBakerImpostor"));
+
+	TSharedRef<SSegmentedControl<int32>> WorkflowTabs =
+		SNew(SSegmentedControl<int32>)
+		.Value_Lambda([this]() { return GetActiveWorkflowIndex(); })
+		.OnValueChanged_Lambda(
+			[this](const int32 NewWorkflowIndex)
+			{
+				HandleWorkflowChanged(NewWorkflowIndex);
+			})
+		.UniformPadding(FMargin(30.0f, 8.0f))
+		+ SSegmentedControl<int32>::Slot(DataBakeWorkflowIndex)
+		.Text(LOCTEXT("DataBakeWorkflowTab", "Data Bake"))
+		+ SSegmentedControl<int32>::Slot(ProxyBakeWorkflowIndex)
+		.Text(LOCTEXT("ProxyBakeWorkflowTab", "Proxy Bake"));
 
 	TSharedRef<SSegmentedControl<int32>> FeatureTabs =
 		SNew(SSegmentedControl<int32>)
@@ -374,6 +392,86 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 			FeaturePanel
 		];
 	}
+
+	TSharedRef<SWidget> DataBakePanel =
+		SNew(SBorder)
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+		.Padding(FMargin(14.0f, 10.0f))
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT(
+				"DataBakePlaceholder",
+				"No Data Bake tools are currently available."))
+		];
+
+	TSharedRef<SWidget> ProxyBakePanel =
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(10.0f, 0.0f, 10.0f, 6.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(FMargin(14.0f, 10.0f))
+			[
+				FeatureTabs
+			]
+		]
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(10.0f, 0.0f, 10.0f, 6.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(FMargin(14.0f, 10.0f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this]() { return GetActiveFeatureTitle(); })
+					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 3.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this]() { return GetActiveFeatureDescription(); })
+					.AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 5.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this]() { return GetActiveFeatureMetadata(); })
+					.TextStyle(FAppStyle::Get(), "SmallText")
+				]
+			]
+		]
+		+ SVerticalBox::Slot()
+		.FillHeight(1.0f)
+		.Padding(10.0f, 0.0f, 10.0f, 10.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(1.0f)
+			[
+				FeatureSwitcher.ToSharedRef()
+			]
+		];
+
+	SAssignNew(WorkflowSwitcher, SWidgetSwitcher)
+		+ SWidgetSwitcher::Slot()
+		[
+			DataBakePanel
+		]
+		+ SWidgetSwitcher::Slot()
+		[
+			ProxyBakePanel
+		];
 
 	TSharedRef<SDockTab> ToolTab = SNew(SDockTab)
 		.TabRole(ETabRole::NomadTab)
@@ -422,7 +520,7 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 							.Padding(0.0f, 2.0f, 0.0f, 0.0f)
 							[
 								SNew(STextBlock)
-								.Text(LOCTEXT("FoliageBakerHeaderSubtitle", "Bake optimized distant foliage representations from a selected Static Mesh LOD."))
+								.Text(LOCTEXT("FoliageBakerHeaderSubtitle", "Choose between foliage data processing and proxy generation workflows."))
 							]
 						]
 					]
@@ -430,58 +528,19 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 					.AutoHeight()
 					.Padding(0.0f, 14.0f, 0.0f, 0.0f)
 					[
-						FeatureTabs
-					]
-				]
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(10.0f, 0.0f, 10.0f, 6.0f)
-			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(FMargin(14.0f, 10.0f))
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot()
-					.AutoHeight()
-					[
-						SNew(STextBlock)
-						.Text_Lambda([this]() { return GetActiveFeatureTitle(); })
-						.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-					]
-					+ SVerticalBox::Slot()
-					.AutoHeight()
-					.Padding(0.0f, 3.0f, 0.0f, 0.0f)
-					[
-						SNew(STextBlock)
-						.Text_Lambda([this]() { return GetActiveFeatureDescription(); })
-						.AutoWrapText(true)
-					]
-					+ SVerticalBox::Slot()
-					.AutoHeight()
-					.Padding(0.0f, 5.0f, 0.0f, 0.0f)
-					[
-						SNew(STextBlock)
-						.Text_Lambda([this]() { return GetActiveFeatureMetadata(); })
-						.TextStyle(FAppStyle::Get(), "SmallText")
+						WorkflowTabs
 					]
 				]
 			]
 			+ SVerticalBox::Slot()
 			.FillHeight(1.0f)
-			.Padding(10.0f, 0.0f, 10.0f, 10.0f)
 			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(1.0f)
-				[
-					FeatureSwitcher.ToSharedRef()
-				]
+				WorkflowSwitcher.ToSharedRef()
 			]
 		];
 
 	FeatureSwitcher->SetActiveWidgetIndex(ActiveFeatureIndex);
+	WorkflowSwitcher->SetActiveWidgetIndex(ActiveWorkflowIndex);
 	return ToolTab;
 }
 
@@ -503,6 +562,25 @@ FText FFoliageBakerEditorModule::GetActiveFeatureMetadata() const
 int32 FFoliageBakerEditorModule::GetActiveFeatureIndex() const
 {
 	return ActiveFeatureIndex;
+}
+
+int32 FFoliageBakerEditorModule::GetActiveWorkflowIndex() const
+{
+	return ActiveWorkflowIndex;
+}
+
+void FFoliageBakerEditorModule::HandleWorkflowChanged(
+	const int32 NewWorkflowIndex)
+{
+	ActiveWorkflowIndex = FMath::Clamp(
+		NewWorkflowIndex,
+		DataBakeWorkflowIndex,
+		ProxyBakeWorkflowIndex);
+	if (WorkflowSwitcher.IsValid())
+	{
+		WorkflowSwitcher->SetActiveWidgetIndex(
+			ActiveWorkflowIndex);
+	}
 }
 
 void FFoliageBakerEditorModule::HandleFeatureChanged(const int32 NewFeatureIndex)

@@ -2296,6 +2296,12 @@ namespace UE::FoliageBaker::PlaneCover
 			SharedMinV = FMath::Min(SharedMinV, PlaneInfo.MinV);
 			SharedMaxV = FMath::Max(SharedMaxV, PlaneInfo.MaxV);
 		}
+		// The mesh-local pivot is the origin, whose projection onto every AxisU is zero.
+		const double SharedHalfExtentU = FMath::Max(
+			FMath::Abs(SharedMinU),
+			FMath::Abs(SharedMaxU));
+		SharedMinU = -SharedHalfExtentU;
+		SharedMaxU = SharedHalfExtentU;
 
 		if (!FMath::IsFinite(SharedMinU)
 			|| !FMath::IsFinite(SharedMaxU)

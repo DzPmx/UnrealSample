@@ -172,7 +172,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MaterialInstanceNameSuffix;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Standard Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Used by Single Plane - One View, Cross Cards, or MultiBillboard. Both two-view Billboard modes use their dedicated Parent Material Instance slots. Generated proxy materials are new child Material Instance Constants."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Standard Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Used by Single Plane - One View when Upper Hemisphere L1 Visibility is disabled, and by Cross Cards or MultiBillboard. Both two-view Billboard modes use their dedicated Parent Material Instance slots. Generated proxy materials are new child Material Instance Constants."))
 	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
 
 	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Override Static Switches During Bake", ToolTip = "Creates one transient child Material Instance per unique selected-LOD material and applies every configured Global static switch override that exists on that material. Missing switches emit warnings and the remaining overrides continue. Source material assets are never modified. World Position Offset is evaluated with animation time fixed at zero; Displacement remains disabled."))
@@ -216,11 +216,20 @@ class FOLIAGEBAKERCARDS_API UFoliageBakerSingleBillboardSettings final : public 
 public:
 	UFoliageBakerSingleBillboardSettings();
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Single Plane - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlaneTwoViews", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used exclusively by Single Plane - Two Views Billboard. The generated mesh stores the upper primary atlas tile in UV0, the lower +90-degree atlas tile in UV1, and the primary local capture direction in UV2.xy. The parent material owns view-angle selection or blending."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Single Plane - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlaneTwoViews", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used by Single Plane - Two Views Billboard when Upper Hemisphere L1 Visibility is disabled. The generated mesh stores the upper primary atlas tile in UV0, the lower +90-degree atlas tile in UV1, and the primary local capture direction in UV2.xy. The parent material owns view-angle selection or blending."))
 	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneTwoViewsMaterialInstanceTemplate;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Double Planes - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::DoublePlanes", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used exclusively by Double Planes - Two Views Billboard. The generated mesh provides the per-plane atlas tile in UV0, local capture direction in UV1.xy, and plane selector 0 or 1 in UV2.x for view-angle Dither blending and dynamic plane spacing."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Double Planes - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::DoublePlanes", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used by Double Planes - Two Views Billboard when Upper Hemisphere L1 Visibility is disabled. The generated mesh provides the per-plane atlas tile in UV0, local capture direction in UV1.xy, and plane selector 0 or 1 in UV2.x for view-angle Dither blending and dynamic plane spacing."))
 	TSoftObjectPtr<UMaterialInstanceConstant> DoublePlanesMaterialInstanceTemplate;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|SH Shadow", meta = (DisplayName = "Single Plane - One View SH Shadow Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlane", EditConditionHides, ToolTip = "Parent Material Instance used instead of the standard template when Upper Hemisphere L1 Visibility is baked for Single Plane - One View."))
+	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneSHShadowMaterialInstanceTemplate;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|SH Shadow", meta = (DisplayName = "Single Plane - Two Views SH Shadow Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlaneTwoViews", EditConditionHides, ToolTip = "Parent Material Instance used instead of the regular Two View template when Upper Hemisphere L1 Visibility is baked for Single Plane - Two Views."))
+	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneTwoViewsSHShadowMaterialInstanceTemplate;
+
+	UPROPERTY(config, EditAnywhere, Category = "Material|SH Shadow", meta = (DisplayName = "Double Planes - Two Views SH Shadow Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::DoublePlanes", EditConditionHides, ToolTip = "Parent Material Instance used instead of the regular Two View template when Upper Hemisphere L1 Visibility is baked for Double Planes - Two Views."))
+	TSoftObjectPtr<UMaterialInstanceConstant> DoublePlanesSHShadowMaterialInstanceTemplate;
 };
 
 UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Cross Cards"))

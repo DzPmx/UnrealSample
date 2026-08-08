@@ -23,6 +23,13 @@ namespace UE::FoliageBaker::Cards::Atlas
 		SharedCrop.MaxUFraction = FMath::Max(TileCrops[0].MaxUFraction, TileCrops[1].MaxUFraction);
 		SharedCrop.MinVFraction = FMath::Min(TileCrops[0].MinVFraction, TileCrops[1].MinVFraction);
 		SharedCrop.MaxVFraction = FMath::Max(TileCrops[0].MaxVFraction, TileCrops[1].MaxVFraction);
+		// Shared Two View bounds place the mesh pivot at the horizontal tile center.
+		constexpr double PivotUFraction = 0.5;
+		const double SharedHalfExtentU = FMath::Max(
+			PivotUFraction - SharedCrop.MinUFraction,
+			SharedCrop.MaxUFraction - PivotUFraction);
+		SharedCrop.MinUFraction = PivotUFraction - SharedHalfExtentU;
+		SharedCrop.MaxUFraction = PivotUFraction + SharedHalfExtentU;
 
 		constexpr double CropEpsilon = 1.0e-5;
 		const bool bCropsTile = SharedCrop.MinUFraction > CropEpsilon
