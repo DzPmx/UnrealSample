@@ -100,7 +100,7 @@ void FFoliageBakerImpostorModule::Bake()
 							*MaterialTemplate,
 							*Settings,
 							FFoliageBakerMeshOutputSelector::CreateStatic(
-								&FFoliageBakerMeshOutputDialog::OpenAfterBake));
+								&FFoliageBakerMeshOutputDialog::OpenForBake));
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);
 				}));
 

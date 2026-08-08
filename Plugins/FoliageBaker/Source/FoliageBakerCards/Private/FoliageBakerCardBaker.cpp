@@ -6,10 +6,10 @@
 #include "FoliageBakerCardGeometry.h"
 #include "FoliageBakerL1Visibility.h"
 #include "FoliageBakerMaterialResolver.h"
-#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerMultiBillboardLayout.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedAtlasBake.h"
+#include "FoliageBakerProxyPreflight.h"
 #include "FoliageBakerProxyGeometry.h"
 #include "FoliageBakerSourceMesh.h"
 #include "Engine/StaticMesh.h"
@@ -87,113 +87,6 @@ namespace
 		return UsesDoublePlanesTwoViewsBillboard(Request)
 			? TEXT("_DoubleBillboard")
 			: TEXT("_Billboard");
-	}
-
-	bool BuildCardGeneratedAssetPlan(
-		const UStaticMesh& StaticMesh,
-		const FFoliageBakerCardBakeRequest& Settings,
-		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
-		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
-		TArray<FFoliageBakerGeneratedAssetPath>& OutGeneratedAssets,
-		FString& OutError)
-	{
-		OutGeneratedAssets.Reset();
-		auto AddGeneratedAsset = [
-			&StaticMesh,
-			&OutGeneratedAssets,
-			&OutError](
-			const FString& DisplayName,
-			const FString& ConfiguredOutputFolder,
-			const FString& OutputPackagePathOverride,
-			const FString& Prefix,
-			const FString& Suffix)
-		{
-			FFoliageBakerGeneratedAssetPath& AssetPath =
-				OutGeneratedAssets.AddDefaulted_GetRef();
-			if (!FFoliageBakerAssetBuilder::BuildGeneratedAssetPath(
-					StaticMesh,
-					ConfiguredOutputFolder,
-					OutputPackagePathOverride,
-					Prefix,
-					Suffix,
-					AssetPath,
-					OutError))
-			{
-				OutGeneratedAssets.Pop();
-				return false;
-			}
-			AssetPath.DisplayName = DisplayName;
-			return true;
-		};
-
-		if (Settings.bBakeBaseColorOpacity
-			&& !AddGeneratedAsset(
-				TEXT("Base Color / Opacity"),
-				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
-				Settings.TextureNamePrefix,
-				Settings.BaseColorOpacityTextureSuffix))
-		{
-			return false;
-		}
-		if (Settings.bBakeNormalDepth
-			&& !AddGeneratedAsset(
-				TEXT("Normal / Mask"),
-				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
-				Settings.TextureNamePrefix,
-				Settings.NormalDepthTextureSuffix))
-		{
-			return false;
-		}
-		if (Settings.bBakeMix
-			&& !AddGeneratedAsset(
-				TEXT("Mix"),
-				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
-				Settings.TextureNamePrefix,
-				Settings.MixTextureSuffix))
-		{
-			return false;
-		}
-		if (Settings.bBakeUpperHemisphereL1Visibility
-			&& !AddGeneratedAsset(
-				TEXT("Upper Hemisphere L1 Visibility"),
-				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
-				Settings.TextureNamePrefix,
-				Settings.UpperHemisphereL1VisibilityTextureSuffix))
-		{
-			return false;
-		}
-		if (!AddGeneratedAsset(
-				TEXT("Material Instance"),
-				Settings.MaterialOutputFolderName,
-				OutputFolders.MaterialPackagePath,
-				Settings.MaterialInstanceNamePrefix,
-				Settings.MaterialInstanceNameSuffix))
-		{
-			return false;
-		}
-
-		if (MeshOutputSelection.OutputMode
-			== EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
-		{
-			FFoliageBakerGeneratedAssetPath& MeshPath =
-				OutGeneratedAssets.AddDefaulted_GetRef();
-			MeshPath.DisplayName = TEXT("Static Mesh");
-			if (!FFoliageBakerAssetBuilder::BuildGeneratedStaticMeshAssetPath(
-					StaticMesh,
-					GetCardMeshAssetSuffix(Settings),
-					MeshPath,
-					OutError))
-			{
-				OutGeneratedAssets.Pop();
-				return false;
-			}
-			MeshPath.DisplayName = TEXT("Static Mesh");
-		}
-		return true;
 	}
 
 	UE::FoliageBaker::PlaneCover::FPlaneProxySettings BuildSettingsForMesh(
@@ -621,7 +514,7 @@ namespace
 		FProxyAssetBuildResult Result;
 		Result.bCancelled = true;
 		Result.Report = FString::Printf(
-			TEXT("%s\n  cancelled: asset output was not confirmed and no generated assets were committed."),
+			TEXT("%s\n  cancelled: asset output was not confirmed and no bake work was started."),
 			*StaticMesh.GetName());
 		return Result;
 	}
@@ -654,13 +547,9 @@ namespace
 	}
 
 	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(
-		const FFoliageBakerCardBakeRequest& Request,
-		const FFoliageBakerMeshOutputSelection& OutputSelection)
+		const FFoliageBakerCardBakeRequest& Request)
 	{
 		FFoliageBakerSourceLODAssetParams Params;
-		Params.OutputMode = OutputSelection.OutputMode;
-		Params.RequestedReplaceLODIndex = OutputSelection.ReplaceLODIndex;
-		Params.RequestedInsertAfterLODIndex = OutputSelection.InsertAfterLODIndex;
 		Params.SourceLODIndex = Request.SourceLODIndex;
 		Params.DesiredUVChannelCount = GetDesiredCardUVChannelCount(Request);
 		Params.RebuildLODMetadataKey = Request.Mode == EFoliageBakerCardMode::CrossCards
@@ -673,6 +562,59 @@ namespace
 						? FName(TEXT("FoliageBaker.DoublePlanesBillboardLOD"))
 						: FName(TEXT("FoliageBaker.SingleBillboardLOD"));
 		return Params;
+	}
+
+	FFoliageBakerProxyPreflightRequest BuildCardPreflightRequest(
+		const FFoliageBakerCardBakeRequest& Settings)
+	{
+		FFoliageBakerProxyPreflightRequest Result;
+		Result.SourceLODAssetParams = BuildSourceLODAssetParams(Settings);
+		Result.SeparateMeshAssetSuffix = GetCardMeshAssetSuffix(Settings);
+		Result.bPlaceGeneratedAssetsNearReplacedLODAssets =
+			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
+		if (Settings.bBakeBaseColorOpacity)
+		{
+			Result.GeneratedAssets.Add({
+				TEXT("Base Color / Opacity"),
+				Settings.TextureOutputFolderName,
+				Settings.TextureNamePrefix,
+				Settings.BaseColorOpacityTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
+		}
+		if (Settings.bBakeNormalDepth)
+		{
+			Result.GeneratedAssets.Add({
+				TEXT("Normal / Mask"),
+				Settings.TextureOutputFolderName,
+				Settings.TextureNamePrefix,
+				Settings.NormalDepthTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
+		}
+		if (Settings.bBakeMix)
+		{
+			Result.GeneratedAssets.Add({
+				TEXT("Mix"),
+				Settings.TextureOutputFolderName,
+				Settings.TextureNamePrefix,
+				Settings.MixTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
+		}
+		if (Settings.bBakeUpperHemisphereL1Visibility)
+		{
+			Result.GeneratedAssets.Add({
+				TEXT("Upper Hemisphere L1 Visibility"),
+				Settings.TextureOutputFolderName,
+				Settings.TextureNamePrefix,
+				Settings.UpperHemisphereL1VisibilityTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
+		}
+		Result.GeneratedAssets.Add({
+			TEXT("Material Instance"),
+			Settings.MaterialOutputFolderName,
+			Settings.MaterialInstanceNamePrefix,
+			Settings.MaterialInstanceNameSuffix,
+			EFoliageBakerGeneratedAssetLocation::Material});
+		return Result;
 	}
 
 	bool BuildProxyPlaneCoverData(
@@ -1479,7 +1421,8 @@ namespace
 
 	bool CreateProxyMeshAssetBundle(
 		UStaticMesh& StaticMesh,
-		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const FFoliageBakerSourceLODAssetParams& SourceLODAssetParams,
+		const FString& SeparateMeshAssetSuffix,
 		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
 		const FFoliageBakerExistingAssetDecision& AssetDecision,
 		FFoliageBakerAssetTransaction& AssetTransaction,
@@ -1495,7 +1438,7 @@ namespace
 				.GetNumChannels();
 		const int32 OutputUVChannelCount = FMath::Clamp(
 			FMath::Max(
-				GetDesiredCardUVChannelCount(EditorSettings),
+				SourceLODAssetParams.DesiredUVChannelCount,
 				MeshData.RetainedTrunkUVChannelCount),
 			1,
 			UE::FoliageBaker::PlaneCover::MaxSourceMeshUVChannels);
@@ -1511,8 +1454,7 @@ namespace
 		if (MeshOutputSelection.OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 		{
 			FFoliageBakerStaticMeshAssetParams MeshParams;
-			MeshParams.AssetNameSuffix =
-				GetCardMeshAssetSuffix(EditorSettings);
+			MeshParams.AssetNameSuffix = SeparateMeshAssetSuffix;
 			MeshParams.ExistingAssetPolicy =
 				AssetDecision.ExistingAssetPolicy;
 			MeshParams.AssetNameVersion = AssetDecision.AssetNameVersion;
@@ -1533,8 +1475,7 @@ namespace
 		else
 		{
 			int32 InstalledLODIndex = INDEX_NONE;
-			FFoliageBakerSourceLODAssetParams LODParams =
-				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection);
+			FFoliageBakerSourceLODAssetParams LODParams = SourceLODAssetParams;
 			LODParams.DesiredUVChannelCount = OutputUVChannelCount;
 			LODParams.AdditionalMaterialSlots = MeshData.AdditionalMaterialSlots;
 			if (!FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
@@ -1806,21 +1747,20 @@ namespace
 
 		FProxyAssetBuildResult Run()
 		{
+			const EPipelineStageResult PreflightStageResult = RunPreflightStage();
+			if (PreflightStageResult == EPipelineStageResult::Cancelled)
+			{
+				return MakeProxyBuildCancelled(StaticMesh);
+			}
+			if (PreflightStageResult == EPipelineStageResult::Failed)
+			{
+				return Fail();
+			}
 			if (!BuildSourceStage())
 			{
 				return Fail();
 			}
 			if (!BuildGeometryStage())
-			{
-				return Fail();
-			}
-
-			const EPipelineStageResult OutputSelectionResult = ResolveOutputStage();
-			if (OutputSelectionResult == EPipelineStageResult::Cancelled)
-			{
-				return MakeProxyBuildCancelled(StaticMesh);
-			}
-			if (OutputSelectionResult == EPipelineStageResult::Failed)
 			{
 				return Fail();
 			}
@@ -1876,56 +1816,22 @@ namespace
 			return BuildProxyMeshData(Source, Geometry, Error);
 		}
 
-		EPipelineStageResult ResolveOutputStage()
+		EPipelineStageResult RunPreflightStage()
 		{
-			MeshOutputSelection =
-				MeshOutputSelector.Execute(StaticMesh, Settings.SourceLODIndex);
-			if (!MeshOutputSelection.IsSet())
+			const EFoliageBakerProxyPreflightStatus Status =
+				FFoliageBakerProxyPreflight::Run(
+					StaticMesh,
+					BuildCardPreflightRequest(Settings),
+					MeshOutputSelector,
+					PreflightResult,
+					Error);
+			if (Status == EFoliageBakerProxyPreflightStatus::Cancelled)
 			{
 				return EPipelineStageResult::Cancelled;
 			}
-
-			if (MeshOutputSelection->OutputMode
-					!= EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
-				&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
-					StaticMesh,
-					BuildSourceLODAssetParams(Settings, *MeshOutputSelection),
-					Error))
-			{
-				return EPipelineStageResult::Failed;
-			}
-
-			if (Settings.bPlaceGeneratedAssetsNearReplacedLODAssets
-				&& MeshOutputSelection->OutputMode
-					== EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD)
-			{
-				OutputFolders = FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
-					StaticMesh,
-					MeshOutputSelection->ReplaceLODIndex);
-			}
-
-			TArray<FFoliageBakerGeneratedAssetPath> GeneratedAssets;
-			if (!BuildCardGeneratedAssetPlan(
-					StaticMesh,
-					Settings,
-					*MeshOutputSelection,
-					OutputFolders,
-					GeneratedAssets,
-					Error))
-			{
-				return EPipelineStageResult::Failed;
-			}
-			ExistingAssetDecision =
-				FFoliageBakerExistingAssetDialog::OpenIfNeeded(
-					GeneratedAssets,
-					Error);
-			if (!ExistingAssetDecision.IsSet())
-			{
-				return Error.IsEmpty()
-					? EPipelineStageResult::Cancelled
-					: EPipelineStageResult::Failed;
-			}
-			return EPipelineStageResult::Succeeded;
+			return Status == EFoliageBakerProxyPreflightStatus::Succeeded
+				? EPipelineStageResult::Succeeded
+				: EPipelineStageResult::Failed;
 		}
 
 		bool PrepareCaptureGeometryStage()
@@ -1956,12 +1862,6 @@ namespace
 
 		bool WriteMaterialAssetsStage()
 		{
-			if (!ExistingAssetDecision.IsSet())
-			{
-				Error = TEXT(
-					"The Card bake pipeline reached asset output without an existing-asset decision.");
-				return false;
-			}
 			return CreateProxyMaterialAssets(
 				StaticMesh,
 				MaterialTemplate,
@@ -1970,21 +1870,14 @@ namespace
 				Geometry,
 				Atlas,
 				MaterialRecipe,
-				OutputFolders,
-				*ExistingAssetDecision,
+				PreflightResult.OutputFolders,
+				PreflightResult.ExistingAssetDecision,
 				MaterialAssets,
 				Error);
 		}
 
 		bool WriteMeshOutputStage()
 		{
-			if (!MeshOutputSelection.IsSet()
-				|| !ExistingAssetDecision.IsSet())
-			{
-				Error = TEXT(
-					"The Card bake pipeline reached mesh output without a complete output decision.");
-				return false;
-			}
 			if (!AppendReducedMultiBillboardTrunk(
 					StaticMesh,
 					Settings,
@@ -1998,9 +1891,10 @@ namespace
 
 			return CreateProxyMeshAssetBundle(
 				StaticMesh,
-				Settings,
-				*MeshOutputSelection,
-				*ExistingAssetDecision,
+				PreflightResult.SourceLODAssetParams,
+				PreflightResult.SeparateMeshAssetSuffix,
+				PreflightResult.MeshOutputSelection,
+				PreflightResult.ExistingAssetDecision,
 				AssetTransaction,
 				Geometry,
 				MaterialAssets,
@@ -2023,10 +1917,7 @@ namespace
 		FProxyAtlasBuildData Atlas;
 		FProxyMaterialRecipe MaterialRecipe;
 		FProxyMaterialAssetData MaterialAssets;
-		TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection;
-		TOptional<FFoliageBakerExistingAssetDecision>
-			ExistingAssetDecision;
-		FFoliageBakerGeneratedAssetOutputFolders OutputFolders;
+		FFoliageBakerProxyPreflightResult PreflightResult;
 		FFoliageBakerAssetTransaction AssetTransaction;
 		FProxyAssetBuildResult Result;
 	};
@@ -2064,7 +1955,6 @@ namespace
 	bool ValidateCardBakeRequest(
 		const UStaticMesh& SourceStaticMesh,
 		const FFoliageBakerCardBakeRequest& Request,
-		const FFoliageBakerMeshOutputSelector& MeshOutputSelector,
 		FString& OutFailureReport)
 	{
 		auto Fail = [&OutFailureReport, &SourceStaticMesh](const FString& Message)
@@ -2075,23 +1965,12 @@ namespace
 				*Message);
 			return false;
 		};
-		if (Request.SourceLODIndex < 0 || Request.SourceLODIndex >= MAX_STATIC_MESH_LODS)
-		{
-			return Fail(FString::Printf(
-				TEXT("source LOD index %d is outside the supported range 0-%d."),
-				Request.SourceLODIndex,
-				MAX_STATIC_MESH_LODS - 1));
-		}
 		if (!Request.bBakeBaseColorOpacity
 			&& !Request.bBakeNormalDepth
 			&& !Request.bBakeMix
 			&& !Request.bBakeUpperHemisphereL1Visibility)
 		{
 			return Fail(TEXT("no texture output is enabled."));
-		}
-		if (!MeshOutputSelector.IsBound())
-		{
-			return Fail(TEXT("mesh output selector is not bound."));
 		}
 		if (Request.bBakeUpperHemisphereL1Visibility
 			&& Request.Mode != EFoliageBakerCardMode::SingleBillboard)
@@ -2249,7 +2128,6 @@ FFoliageBakerCardBakeResult FFoliageBakerCardBaker::Bake(
 	if (!ValidateCardBakeRequest(
 			SourceStaticMesh,
 			Request,
-			MeshOutputSelector,
 			ValidationFailureReport))
 	{
 		FFoliageBakerCardBakeResult Result;

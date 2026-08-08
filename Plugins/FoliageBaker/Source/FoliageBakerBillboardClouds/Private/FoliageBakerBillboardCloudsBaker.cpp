@@ -5,10 +5,10 @@
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerKMeansPlaneCover.h"
-#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedAtlasBake.h"
 #include "FoliageBakerProxyGeometry.h"
+#include "FoliageBakerProxyPreflight.h"
 #include "FoliageBakerSourceMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
@@ -449,102 +449,6 @@ namespace
 			OutError);
 	}
 
-	bool BuildBillboardCloudsGeneratedAssetPlan(
-		const UStaticMesh& StaticMesh,
-		const UFoliageBakerBillboardCloudsSettings& Settings,
-		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
-		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
-		TArray<FFoliageBakerGeneratedAssetPath>& OutGeneratedAssets,
-		FString& OutError)
-	{
-		OutGeneratedAssets.Reset();
-		auto AddGeneratedAsset = [
-			&StaticMesh,
-			&OutGeneratedAssets,
-			&OutError](
-			const FString& DisplayName,
-			const FString& ConfiguredOutputFolder,
-			const FString& OutputPackagePathOverride,
-			const FString& Prefix,
-			const FString& Suffix)
-		{
-			FFoliageBakerGeneratedAssetPath& AssetPath =
-				OutGeneratedAssets.AddDefaulted_GetRef();
-			if (!FFoliageBakerAssetBuilder::BuildGeneratedAssetPath(
-					StaticMesh,
-					ConfiguredOutputFolder,
-					OutputPackagePathOverride,
-					Prefix,
-					Suffix,
-					AssetPath,
-					OutError))
-			{
-				OutGeneratedAssets.Pop();
-				return false;
-			}
-			AssetPath.DisplayName = DisplayName;
-			return true;
-		};
-
-		if (Settings.bBakeBaseColorOpacityAtlas
-			&& !AddGeneratedAsset(
-				TEXT("Base Color / Opacity"),
-				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
-				Settings.TextureNamePrefix,
-				Settings.BaseColorOpacityTextureSuffix))
-		{
-			return false;
-		}
-		if (Settings.bBakeNormalMaskAtlas
-			&& !AddGeneratedAsset(
-				TEXT("Normal / Mask"),
-				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
-				Settings.TextureNamePrefix,
-				Settings.NormalTextureSuffix))
-		{
-			return false;
-		}
-		if (Settings.bBakeMixAtlas
-			&& !AddGeneratedAsset(
-				TEXT("Mix"),
-				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
-				Settings.TextureNamePrefix,
-				Settings.MixTextureSuffix))
-		{
-			return false;
-		}
-		if (!AddGeneratedAsset(
-				TEXT("Material Instance"),
-				Settings.MaterialOutputFolderName,
-				OutputFolders.MaterialPackagePath,
-				Settings.MaterialInstanceNamePrefix,
-				Settings.MaterialInstanceNameSuffix))
-		{
-			return false;
-		}
-
-		if (MeshOutputSelection.OutputMode
-			== EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
-		{
-			FFoliageBakerGeneratedAssetPath& MeshPath =
-				OutGeneratedAssets.AddDefaulted_GetRef();
-			if (!FFoliageBakerAssetBuilder::BuildGeneratedStaticMeshAssetPath(
-					StaticMesh,
-					TEXT("_BillboardCloudProxy"),
-					MeshPath,
-					OutError))
-			{
-				OutGeneratedAssets.Pop();
-				return false;
-			}
-			MeshPath.DisplayName = TEXT("Static Mesh");
-		}
-		return true;
-	}
-
 	const TCHAR* GetMeshOutputModeText(const EFoliageBakerMeshAssetOutputMode OutputMode)
 	{
 		switch (OutputMode)
@@ -562,18 +466,58 @@ namespace
 	}
 
 	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(
-		const UFoliageBakerBillboardCloudsSettings& Settings,
-		const FFoliageBakerMeshOutputSelection& MeshOutputSelection)
+		const UFoliageBakerBillboardCloudsSettings& Settings)
 	{
 		FFoliageBakerSourceLODAssetParams Params;
-		Params.OutputMode = MeshOutputSelection.OutputMode;
-		Params.RequestedReplaceLODIndex = MeshOutputSelection.ReplaceLODIndex;
-		Params.RequestedInsertAfterLODIndex = MeshOutputSelection.InsertAfterLODIndex;
 		Params.SourceLODIndex = Settings.SourceLODIndex;
 		Params.DesiredUVChannelCount = 3;
 
 		Params.RebuildLODMetadataKey = FName(TEXT("FoliageBaker.BillboardCloudsLOD"));
 		return Params;
+	}
+
+	FFoliageBakerProxyPreflightRequest BuildBillboardCloudsPreflightRequest(
+		const UFoliageBakerBillboardCloudsSettings& Settings)
+	{
+		FFoliageBakerProxyPreflightRequest Result;
+		Result.SourceLODAssetParams = BuildSourceLODAssetParams(Settings);
+		Result.SeparateMeshAssetSuffix = TEXT("_BillboardCloudProxy");
+		Result.bPlaceGeneratedAssetsNearReplacedLODAssets =
+			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
+		if (Settings.bBakeBaseColorOpacityAtlas)
+		{
+			Result.GeneratedAssets.Add({
+				TEXT("Base Color / Opacity"),
+				Settings.TextureOutputFolderName,
+				Settings.TextureNamePrefix,
+				Settings.BaseColorOpacityTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
+		}
+		if (Settings.bBakeNormalMaskAtlas)
+		{
+			Result.GeneratedAssets.Add({
+				TEXT("Normal / Mask"),
+				Settings.TextureOutputFolderName,
+				Settings.TextureNamePrefix,
+				Settings.NormalTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
+		}
+		if (Settings.bBakeMixAtlas)
+		{
+			Result.GeneratedAssets.Add({
+				TEXT("Mix"),
+				Settings.TextureOutputFolderName,
+				Settings.TextureNamePrefix,
+				Settings.MixTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
+		}
+		Result.GeneratedAssets.Add({
+			TEXT("Material Instance"),
+			Settings.MaterialOutputFolderName,
+			Settings.MaterialInstanceNamePrefix,
+			Settings.MaterialInstanceNameSuffix,
+			EFoliageBakerGeneratedAssetLocation::Material});
+		return Result;
 	}
 
 	struct FProxyPlaneCoverBuildData : FFoliageBakerSourceMeshData
@@ -630,7 +574,7 @@ namespace
 		FProxyAssetBuildResult Result;
 		Result.bCancelled = true;
 		Result.Report = FString::Printf(
-			TEXT("%s\n  cancelled after bake: asset output was not confirmed and no generated assets were committed."),
+			TEXT("%s\n  cancelled: asset output was not confirmed and no bake work was started."),
 			*StaticMesh.GetName());
 		return Result;
 	}
@@ -674,21 +618,83 @@ namespace
 		return OutputSelection;
 	}
 
+	bool ValidateBillboardCloudsTextureParameterName(
+		const bool bOutputEnabled,
+		const FName ParameterName,
+		const FString& OutputLabel,
+		TSet<FName>& UsedParameterNames,
+		FString& OutError)
+	{
+		if (!bOutputEnabled)
+		{
+			return true;
+		}
+		if (ParameterName.IsNone())
+		{
+			OutError = FString::Printf(
+				TEXT("The %s texture output is enabled, but its material texture parameter name is None."),
+				*OutputLabel);
+			return false;
+		}
+		if (UsedParameterNames.Contains(ParameterName))
+		{
+			OutError = FString::Printf(
+				TEXT("Material texture parameter name '%s' is assigned to more than one enabled texture output."),
+				*ParameterName.ToString());
+			return false;
+		}
+		UsedParameterNames.Add(ParameterName);
+		return true;
+	}
+
+	bool ValidateBillboardCloudsBakeRequest(
+		const UFoliageBakerBillboardCloudsSettings& Settings,
+		FString& OutError)
+	{
+		const FAtlasOutputSelection OutputSelection =
+			BuildAtlasOutputSelection(Settings);
+		if (!OutputSelection.HasAnyOutput())
+		{
+			OutError = TEXT(
+				"No atlas outputs selected. Enable BaseColor/Opacity, Normal/Depth, or Mix in the Billboard Clouds tool panel.");
+			return false;
+		}
+		if (Settings.TextureResolutionMode
+				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
+			&& (!FMath::IsFinite(Settings.TargetTexelsPerMeter)
+				|| Settings.TargetTexelsPerMeter <= 0.0))
+		{
+			OutError = TEXT("Target Texels Per Meter must be greater than zero.");
+			return false;
+		}
+
+		TSet<FName> UsedTextureParameterNames;
+		return ValidateBillboardCloudsTextureParameterName(
+				OutputSelection.bBaseColorOpacity,
+				Settings.BaseColorOpacityTextureParameterName,
+				TEXT("BaseColor/Opacity"),
+				UsedTextureParameterNames,
+				OutError)
+			&& ValidateBillboardCloudsTextureParameterName(
+				OutputSelection.bNormalMask,
+				Settings.NormalDepthTextureParameterName,
+				TEXT("Normal/Depth"),
+				UsedTextureParameterNames,
+				OutError)
+			&& ValidateBillboardCloudsTextureParameterName(
+				OutputSelection.bMix,
+				Settings.MixTextureParameterName,
+				TEXT("Mix"),
+				UsedTextureParameterNames,
+				OutError);
+	}
+
 	bool BuildProxyPlaneCoverData(
 		const UStaticMesh& StaticMesh,
 		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
 		FProxyPlaneCoverBuildData& OutData,
 		FString& OutError)
 	{
-		if (EditorSettings.TextureResolutionMode
-				== EFoliageBakerTextureResolutionMode::AutoWorldTexelSize
-			&& (!FMath::IsFinite(EditorSettings.TargetTexelsPerMeter)
-				|| EditorSettings.TargetTexelsPerMeter <= 0.0))
-		{
-			OutError = TEXT("Target Texels Per Meter must be greater than zero.");
-			return false;
-		}
-
 		if (!FFoliageBakerSourceMeshReader::Read(
 				StaticMesh,
 				EditorSettings.SourceLODIndex,
@@ -775,38 +781,6 @@ namespace
 		FString& OutError)
 	{
 		OutData.OutputSelection = BuildAtlasOutputSelection(EditorSettings);
-		if (!OutData.OutputSelection.HasAnyOutput())
-		{
-			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Opacity, Normal/Depth, or Mix in the Billboard Clouds tool panel.");
-			return false;
-		}
-
-		TSet<FName> EnabledTextureParameterNames;
-		auto ValidateTextureParameterName = [&EnabledTextureParameterNames, &OutError](bool bOutputEnabled, FName ParameterName, const TCHAR* OutputLabel) -> bool
-		{
-			if (!bOutputEnabled)
-			{
-				return true;
-			}
-			if (ParameterName.IsNone())
-			{
-				OutError = FString::Printf(TEXT("The %s texture output is enabled, but its material texture parameter name is None."), OutputLabel);
-				return false;
-			}
-			if (EnabledTextureParameterNames.Contains(ParameterName))
-			{
-				OutError = FString::Printf(TEXT("Material texture parameter name '%s' is assigned to more than one enabled texture output."), *ParameterName.ToString());
-				return false;
-			}
-			EnabledTextureParameterNames.Add(ParameterName);
-			return true;
-		};
-		if (!ValidateTextureParameterName(OutData.OutputSelection.bBaseColorOpacity, EditorSettings.BaseColorOpacityTextureParameterName, TEXT("BaseColor/Opacity"))
-			|| !ValidateTextureParameterName(OutData.OutputSelection.bNormalMask, EditorSettings.NormalDepthTextureParameterName, TEXT("Normal/Depth"))
-			|| !ValidateTextureParameterName(OutData.OutputSelection.bMix, EditorSettings.MixTextureParameterName, TEXT("Mix")))
-		{
-			return false;
-		}
 		int32 AlphaAwareCroppedPlaneCount = 0;
 		if (CoverData.Settings.bEnableAlphaAwareTileCrop && !MeshData.PlaneInfos.IsEmpty())
 		{
@@ -1031,7 +1005,8 @@ namespace
 
 	bool CreateProxyMeshAssetBundle(
 		UStaticMesh& StaticMesh,
-		const UFoliageBakerBillboardCloudsSettings& EditorSettings,
+		const FFoliageBakerSourceLODAssetParams& SourceLODAssetParams,
+		const FString& SeparateMeshAssetSuffix,
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FProxyMeshBuildData& MeshData,
 		const FProxyTextureBuildData& TextureData,
@@ -1045,7 +1020,7 @@ namespace
 		if (MeshOutputSelection.OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 		{
 			FFoliageBakerStaticMeshAssetParams MeshParams;
-			MeshParams.AssetNameSuffix = TEXT("_BillboardCloudProxy");
+			MeshParams.AssetNameSuffix = SeparateMeshAssetSuffix;
 			MeshParams.ExistingAssetPolicy =
 				AssetDecision.ExistingAssetPolicy;
 			MeshParams.AssetNameVersion = AssetDecision.AssetNameVersion;
@@ -1068,7 +1043,7 @@ namespace
 			if (!FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 				StaticMesh,
 				AssetTransaction,
-				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection),
+				SourceLODAssetParams,
 				MeshData.MeshDescription,
 				*TextureData.Material,
 				InstalledLODIndex,
@@ -1209,6 +1184,27 @@ namespace
 		const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 	{
 		FString Error;
+		if (!ValidateBillboardCloudsBakeRequest(EditorSettings, Error))
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+		FFoliageBakerProxyPreflightResult PreflightResult;
+		const EFoliageBakerProxyPreflightStatus PreflightStatus =
+			FFoliageBakerProxyPreflight::Run(
+				StaticMesh,
+				BuildBillboardCloudsPreflightRequest(EditorSettings),
+				MeshOutputSelector,
+				PreflightResult,
+				Error);
+		if (PreflightStatus == EFoliageBakerProxyPreflightStatus::Cancelled)
+		{
+			return MakeProxyBuildCancelled(StaticMesh);
+		}
+		if (PreflightStatus == EFoliageBakerProxyPreflightStatus::Failed)
+		{
+			return MakeProxyBuildFailure(StaticMesh, Error);
+		}
+
 		FProxyPlaneCoverBuildData CoverData;
 		if (!BuildProxyPlaneCoverData(StaticMesh, EditorSettings, CoverData, Error))
 		{
@@ -1221,53 +1217,6 @@ namespace
 			return MakeProxyBuildFailure(StaticMesh, Error);
 		}
 
-		const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
-			MeshOutputSelector.Execute(StaticMesh, EditorSettings.SourceLODIndex);
-		if (!MeshOutputSelection.IsSet())
-		{
-			return MakeProxyBuildCancelled(StaticMesh);
-		}
-		if (MeshOutputSelection->OutputMode != EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
-			&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
-				StaticMesh,
-				BuildSourceLODAssetParams(EditorSettings, MeshOutputSelection.GetValue()),
-				Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
-		}
-
-		FFoliageBakerGeneratedAssetOutputFolders OutputFolders;
-		if (EditorSettings.bPlaceGeneratedAssetsNearReplacedLODAssets
-			&& MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD)
-		{
-			OutputFolders = FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
-				StaticMesh,
-				MeshOutputSelection->ReplaceLODIndex);
-		}
-
-		TArray<FFoliageBakerGeneratedAssetPath> GeneratedAssets;
-		if (!BuildBillboardCloudsGeneratedAssetPlan(
-				StaticMesh,
-				EditorSettings,
-				MeshOutputSelection.GetValue(),
-				OutputFolders,
-				GeneratedAssets,
-				Error))
-		{
-			return MakeProxyBuildFailure(StaticMesh, Error);
-		}
-		const TOptional<FFoliageBakerExistingAssetDecision>
-			ExistingAssetDecision =
-				FFoliageBakerExistingAssetDialog::OpenIfNeeded(
-					GeneratedAssets,
-					Error);
-		if (!ExistingAssetDecision.IsSet())
-		{
-			return Error.IsEmpty()
-				? MakeProxyBuildCancelled(StaticMesh)
-				: MakeProxyBuildFailure(StaticMesh, Error);
-		}
-
 		FProxyTextureBuildData TextureData;
 		FFoliageBakerAssetTransaction AssetTransaction;
 		if (!BuildProxyTextureData(
@@ -1277,8 +1226,8 @@ namespace
 				AssetTransaction,
 				CoverData,
 				MeshData,
-				OutputFolders,
-				ExistingAssetDecision.GetValue(),
+				PreflightResult.OutputFolders,
+				PreflightResult.ExistingAssetDecision,
 				TextureData,
 				Error))
 		{
@@ -1288,12 +1237,13 @@ namespace
 		FProxyAssetBuildResult Result;
 		if (!CreateProxyMeshAssetBundle(
 				StaticMesh,
-				EditorSettings,
+				PreflightResult.SourceLODAssetParams,
+				PreflightResult.SeparateMeshAssetSuffix,
 				AssetTransaction,
 				MeshData,
 				TextureData,
-				MeshOutputSelection.GetValue(),
-				ExistingAssetDecision.GetValue(),
+				PreflightResult.MeshOutputSelection,
+				PreflightResult.ExistingAssetDecision,
 				Result,
 				Error))
 		{
@@ -1346,14 +1296,6 @@ FFoliageBakerBillboardCloudsBakeResult FFoliageBakerBillboardCloudsBaker::Bake(
 	const UFoliageBakerBillboardCloudsSettings& Settings,
 	const FFoliageBakerMeshOutputSelector& MeshOutputSelector)
 {
-	if (!MeshOutputSelector.IsBound())
-	{
-		FFoliageBakerBillboardCloudsBakeResult Result;
-		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: mesh output selector is not bound."),
-			*StaticMesh.GetName());
-		return Result;
-	}
 	const FProxyAssetBuildResult BuildResult =
 		BuildBillboardCloudProxyAsset(
 			StaticMesh,

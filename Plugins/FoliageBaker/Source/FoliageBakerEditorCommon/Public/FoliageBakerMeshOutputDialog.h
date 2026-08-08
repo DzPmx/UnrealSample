@@ -16,7 +16,7 @@ struct FOLIAGEBAKEREDITORCOMMON_API FFoliageBakerExistingAssetDecision
 class FOLIAGEBAKEREDITORCOMMON_API FFoliageBakerMeshOutputDialog final
 {
 public:
-	static TOptional<FFoliageBakerMeshOutputSelection> OpenAfterBake(
+	static TOptional<FFoliageBakerMeshOutputSelection> OpenForBake(
 		const UStaticMesh& SourceStaticMesh,
 		int32 SourceLODIndex);
 };

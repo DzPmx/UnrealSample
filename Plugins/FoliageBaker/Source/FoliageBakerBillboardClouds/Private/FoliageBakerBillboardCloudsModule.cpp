@@ -117,7 +117,7 @@ void FFoliageBakerBillboardCloudsModule::Bake()
 							*MaterialTemplate,
 							*Settings,
 							FFoliageBakerMeshOutputSelector::CreateStatic(
-								&FFoliageBakerMeshOutputDialog::OpenAfterBake)));
+								&FFoliageBakerMeshOutputDialog::OpenForBake)));
 				}));
 	FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(
 		BatchResult.CreatedAssets);

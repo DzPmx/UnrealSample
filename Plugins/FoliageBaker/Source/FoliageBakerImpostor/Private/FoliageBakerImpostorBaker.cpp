@@ -5,9 +5,9 @@
 #include "FoliageBakerImpostorSettings.h"
 #include "FoliageBakerMaskedMaterialBaker.h"
 #include "FoliageBakerMaterialResolver.h"
-#include "FoliageBakerMeshOutputDialog.h"
 #include "FoliageBakerPlaneCover.h"
 #include "FoliageBakerProjectedMaterialBake.h"
+#include "FoliageBakerProxyPreflight.h"
 #include "FoliageBakerSourceMesh.h"
 #include "Containers/Set.h"
 #include "Engine/StaticMesh.h"
@@ -1050,13 +1050,9 @@ namespace
 	}
 
 	FFoliageBakerSourceLODAssetParams BuildSourceLODAssetParams(
-		const UFoliageBakerImpostorSettings& Settings,
-		const FFoliageBakerMeshOutputSelection& MeshOutputSelection)
+		const UFoliageBakerImpostorSettings& Settings)
 	{
 		FFoliageBakerSourceLODAssetParams Params;
-		Params.OutputMode = MeshOutputSelection.OutputMode;
-		Params.RequestedReplaceLODIndex = MeshOutputSelection.ReplaceLODIndex;
-		Params.RequestedInsertAfterLODIndex = MeshOutputSelection.InsertAfterLODIndex;
 		Params.SourceLODIndex = Settings.SourceLODIndex;
 		Params.DesiredUVChannelCount = 1;
 		Params.MaterialSlotName = TEXT("ImpostorProxy");
@@ -1067,100 +1063,48 @@ namespace
 		return Params;
 	}
 
-	bool BuildImpostorGeneratedAssetPlan(
-		const UStaticMesh& StaticMesh,
-		const UFoliageBakerImpostorSettings& Settings,
-		const FFoliageBakerMeshOutputSelection& MeshOutputSelection,
-		const FFoliageBakerGeneratedAssetOutputFolders& OutputFolders,
-		TArray<FFoliageBakerGeneratedAssetPath>& OutGeneratedAssets,
-		FString& OutError)
+	FFoliageBakerProxyPreflightRequest BuildImpostorPreflightRequest(
+		const UFoliageBakerImpostorSettings& Settings)
 	{
-		OutGeneratedAssets.Reset();
-		auto AddGeneratedAsset = [
-			&StaticMesh,
-			&OutGeneratedAssets,
-			&OutError](
-			const FString& DisplayName,
-			const FString& ConfiguredOutputFolder,
-			const FString& OutputPackagePathOverride,
-			const FString& Prefix,
-			const FString& Suffix)
+		FFoliageBakerProxyPreflightRequest Result;
+		Result.SourceLODAssetParams = BuildSourceLODAssetParams(Settings);
+		Result.SeparateMeshAssetSuffix = TEXT("_ImpostorProxy");
+		Result.bPlaceGeneratedAssetsNearReplacedLODAssets =
+			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
+		if (Settings.bBakeBaseColorSdf)
 		{
-			FFoliageBakerGeneratedAssetPath& AssetPath =
-				OutGeneratedAssets.AddDefaulted_GetRef();
-			if (!FFoliageBakerAssetBuilder::BuildGeneratedAssetPath(
-					StaticMesh,
-					ConfiguredOutputFolder,
-					OutputPackagePathOverride,
-					Prefix,
-					Suffix,
-					AssetPath,
-					OutError))
-			{
-				OutGeneratedAssets.Pop();
-				return false;
-			}
-			AssetPath.DisplayName = DisplayName;
-			return true;
-		};
-
-		if (Settings.bBakeBaseColorSdf
-			&& !AddGeneratedAsset(
+			Result.GeneratedAssets.Add({
 				TEXT("Base Color / SDF"),
 				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
 				Settings.TextureNamePrefix,
-				Settings.BaseColorSdfTextureSuffix))
-		{
-			return false;
+				Settings.BaseColorSdfTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
-		if (Settings.bBakeNormalDepth
-			&& !AddGeneratedAsset(
+		if (Settings.bBakeNormalDepth)
+		{
+			Result.GeneratedAssets.Add({
 				TEXT("Normal / Depth"),
 				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
 				Settings.TextureNamePrefix,
-				Settings.NormalDepthTextureSuffix))
-		{
-			return false;
+				Settings.NormalDepthTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
-		if (Settings.bBakeMix
-			&& !AddGeneratedAsset(
+		if (Settings.bBakeMix)
+		{
+			Result.GeneratedAssets.Add({
 				TEXT("Mix"),
 				Settings.TextureOutputFolderName,
-				OutputFolders.TexturePackagePath,
 				Settings.TextureNamePrefix,
-				Settings.MixTextureSuffix))
-		{
-			return false;
+				Settings.MixTextureSuffix,
+				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
-		if (!AddGeneratedAsset(
-				TEXT("Material Instance"),
-				Settings.MaterialOutputFolderName,
-				OutputFolders.MaterialPackagePath,
-				Settings.MaterialInstanceNamePrefix,
-				Settings.MaterialInstanceNameSuffix))
-		{
-			return false;
-		}
-
-		if (MeshOutputSelection.OutputMode
-			== EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
-		{
-			FFoliageBakerGeneratedAssetPath& MeshPath =
-				OutGeneratedAssets.AddDefaulted_GetRef();
-			if (!FFoliageBakerAssetBuilder::BuildGeneratedStaticMeshAssetPath(
-					StaticMesh,
-					TEXT("_ImpostorProxy"),
-					MeshPath,
-					OutError))
-			{
-				OutGeneratedAssets.Pop();
-				return false;
-			}
-			MeshPath.DisplayName = TEXT("Static Mesh");
-		}
-		return true;
+		Result.GeneratedAssets.Add({
+			TEXT("Material Instance"),
+			Settings.MaterialOutputFolderName,
+			Settings.MaterialInstanceNamePrefix,
+			Settings.MaterialInstanceNameSuffix,
+			EFoliageBakerGeneratedAssetLocation::Material});
+		return Result;
 	}
 
 	TStrongObjectPtr<UTexture2D> CreateTexture(
@@ -1263,18 +1207,6 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 {
 	FFoliageBakerImpostorBakeResult Result;
 	FString Error;
-	if (!MeshOutputSelector.IsBound())
-	{
-		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: no mesh output selector was provided."),
-			*SourceStaticMesh.GetName());
-		return Result;
-	}
-	if (Settings.SourceLODIndex < 0 || Settings.SourceLODIndex >= MAX_STATIC_MESH_LODS)
-	{
-		Result.Report = FString::Printf(TEXT("%s\n  failed: Source LOD Index is outside the supported range."), *SourceStaticMesh.GetName());
-		return Result;
-	}
 	if (!Settings.bBakeBaseColorSdf && !Settings.bBakeNormalDepth && !Settings.bBakeMix)
 	{
 		Result.Report = FString::Printf(TEXT("%s\n  failed: no Impostor texture output is enabled."), *SourceStaticMesh.GetName());
@@ -1297,6 +1229,30 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			Error = TEXT("One or more runtime material parameter names are None.");
 		}
 		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), *Error);
+		return Result;
+	}
+	FFoliageBakerProxyPreflightResult PreflightResult;
+	const EFoliageBakerProxyPreflightStatus PreflightStatus =
+		FFoliageBakerProxyPreflight::Run(
+			SourceStaticMesh,
+			BuildImpostorPreflightRequest(Settings),
+			MeshOutputSelector,
+			PreflightResult,
+			Error);
+	if (PreflightStatus == EFoliageBakerProxyPreflightStatus::Cancelled)
+	{
+		Result.bCancelled = true;
+		Result.Report = FString::Printf(
+			TEXT("%s\n  cancelled: asset output was not confirmed and no bake work was started."),
+			*SourceStaticMesh.GetName());
+		return Result;
+	}
+	if (PreflightStatus == EFoliageBakerProxyPreflightStatus::Failed)
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: %s"),
+			*SourceStaticMesh.GetName(),
+			*Error);
 		return Result;
 	}
 
@@ -1372,74 +1328,6 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		return Result;
 	}
 
-	const TOptional<FFoliageBakerMeshOutputSelection> MeshOutputSelection =
-		MeshOutputSelector.Execute(SourceStaticMesh, Settings.SourceLODIndex);
-	if (!MeshOutputSelection.IsSet())
-	{
-		Result.bCancelled = true;
-		Result.Report = FString::Printf(
-			TEXT("%s\n  cancelled after bake: no mesh output was selected and no generated assets were committed."),
-			*SourceStaticMesh.GetName());
-		return Result;
-	}
-	if (MeshOutputSelection->OutputMode != EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset
-		&& !FFoliageBakerAssetBuilder::ValidateSourceMeshOutputTarget(
-			SourceStaticMesh,
-			BuildSourceLODAssetParams(Settings, MeshOutputSelection.GetValue()),
-			Error))
-	{
-		Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), *Error);
-		return Result;
-	}
-
-	FFoliageBakerGeneratedAssetOutputFolders OutputFolders;
-	if (Settings.bPlaceGeneratedAssetsNearReplacedLODAssets
-		&& MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::ReplaceSourceMeshLOD)
-	{
-		OutputFolders = FFoliageBakerAssetBuilder::ResolveSourceLODAssetOutputFolders(
-			SourceStaticMesh,
-			MeshOutputSelection->ReplaceLODIndex);
-	}
-
-	TArray<FFoliageBakerGeneratedAssetPath> GeneratedAssets;
-	if (!BuildImpostorGeneratedAssetPlan(
-			SourceStaticMesh,
-			Settings,
-			MeshOutputSelection.GetValue(),
-			OutputFolders,
-			GeneratedAssets,
-			Error))
-	{
-		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: %s"),
-			*SourceStaticMesh.GetName(),
-			*Error);
-		return Result;
-	}
-	const TOptional<FFoliageBakerExistingAssetDecision>
-		ExistingAssetDecision =
-			FFoliageBakerExistingAssetDialog::OpenIfNeeded(
-				GeneratedAssets,
-				Error);
-	if (!ExistingAssetDecision.IsSet())
-	{
-		if (Error.IsEmpty())
-		{
-			Result.bCancelled = true;
-			Result.Report = FString::Printf(
-				TEXT("%s\n  cancelled after bake: existing generated assets were left unchanged."),
-				*SourceStaticMesh.GetName());
-		}
-		else
-		{
-			Result.Report = FString::Printf(
-				TEXT("%s\n  failed: %s"),
-				*SourceStaticMesh.GetName(),
-				*Error);
-		}
-		return Result;
-	}
-
 	FFoliageBakerAssetTransaction Transaction;
 	if (Settings.bBakeBaseColorSdf)
 	{
@@ -1447,9 +1335,9 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
-			OutputFolders.TexturePackagePath,
+			PreflightResult.OutputFolders.TexturePackagePath,
 			Settings.BaseColorSdfTextureSuffix,
-			ExistingAssetDecision.GetValue(),
+			PreflightResult.ExistingAssetDecision,
 			BakeData.BaseColorPixels,
 			BakeData.Stats,
 			TC_BC7,
@@ -1471,9 +1359,9 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
-			OutputFolders.TexturePackagePath,
+			PreflightResult.OutputFolders.TexturePackagePath,
 			Settings.NormalDepthTextureSuffix,
-			ExistingAssetDecision.GetValue(),
+			PreflightResult.ExistingAssetDecision,
 			BakeData.NormalDepthPixels,
 			BakeData.Stats,
 			TC_BC7,
@@ -1498,9 +1386,9 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
-			OutputFolders.TexturePackagePath,
+			PreflightResult.OutputFolders.TexturePackagePath,
 			Settings.MixTextureSuffix,
-			ExistingAssetDecision.GetValue(),
+			PreflightResult.ExistingAssetDecision,
 			BakeData.MixPixels,
 			BakeData.Stats,
 			TC_BC7,
@@ -1518,13 +1406,14 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 
 	FFoliageBakerMaterialInstanceAssetParams MaterialParams;
 	MaterialParams.OutputFolderName = Settings.MaterialOutputFolderName;
-	MaterialParams.OutputPackagePathOverride = OutputFolders.MaterialPackagePath;
+	MaterialParams.OutputPackagePathOverride =
+		PreflightResult.OutputFolders.MaterialPackagePath;
 	MaterialParams.AssetNamePrefix = Settings.MaterialInstanceNamePrefix;
 	MaterialParams.AssetNameSuffix = Settings.MaterialInstanceNameSuffix;
 	MaterialParams.ExistingAssetPolicy =
-		ExistingAssetDecision->ExistingAssetPolicy;
+		PreflightResult.ExistingAssetDecision.ExistingAssetPolicy;
 	MaterialParams.AssetNameVersion =
-		ExistingAssetDecision->AssetNameVersion;
+		PreflightResult.ExistingAssetDecision.AssetNameVersion;
 	MaterialParams.BaseColorOpacityTextureParameterName = Settings.BaseColorSdfTextureParameterName;
 	MaterialParams.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
 	MaterialParams.MixTextureParameterName = Settings.MixTextureParameterName;
@@ -1593,14 +1482,16 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		return Result;
 	}
 
-	if (MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
+	if (PreflightResult.MeshOutputSelection.OutputMode
+		== EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 	{
 		FFoliageBakerStaticMeshAssetParams MeshParams;
-		MeshParams.AssetNameSuffix = TEXT("_ImpostorProxy");
+		MeshParams.AssetNameSuffix =
+			PreflightResult.SeparateMeshAssetSuffix;
 		MeshParams.ExistingAssetPolicy =
-			ExistingAssetDecision->ExistingAssetPolicy;
+			PreflightResult.ExistingAssetDecision.ExistingAssetPolicy;
 		MeshParams.AssetNameVersion =
-			ExistingAssetDecision->AssetNameVersion;
+			PreflightResult.ExistingAssetDecision.AssetNameVersion;
 		MeshParams.DesiredUVChannelCount = 1;
 		MeshParams.MaterialSlotName = TEXT("ImpostorProxy");
 		MeshParams.bRecomputeNormals = true;
@@ -1645,7 +1536,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		if (!FFoliageBakerAssetBuilder::InstallMeshDescriptionAsSourceMeshLOD(
 				SourceStaticMesh,
 				Transaction,
-				BuildSourceLODAssetParams(Settings, MeshOutputSelection.GetValue()),
+				PreflightResult.SourceLODAssetParams,
 				MeshDescription,
 				*Result.MaterialInstance,
 				InstalledLODIndex,
@@ -1660,7 +1551,8 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 
 	Transaction.Commit();
 	Result.bSucceeded = true;
-	if (MeshOutputSelection->OutputMode == EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
+	if (PreflightResult.MeshOutputSelection.OutputMode
+		== EFoliageBakerMeshAssetOutputMode::SeparateMeshAsset)
 	{
 		AppendCreatedAsset(Result.ProxyMesh, Result.CreatedAssets);
 	}

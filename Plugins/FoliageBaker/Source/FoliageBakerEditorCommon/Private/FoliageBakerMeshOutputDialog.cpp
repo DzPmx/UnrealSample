@@ -5,6 +5,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
+#include "StaticMeshResources.h"
 #include "Styling/CoreStyle.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/StrongObjectPtr.h"
@@ -289,8 +290,8 @@ namespace
 					[
 						SNew(STextBlock)
 						.Text(FText::FromString(SourceStaticMesh
-							? FString::Printf(TEXT("Bake completed for %s"), *SourceStaticMesh->GetName())
-							: FString(TEXT("Bake completed"))))
+							? FString::Printf(TEXT("Configure bake output for %s"), *SourceStaticMesh->GetName())
+							: FString(TEXT("Configure bake output"))))
 						.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 14))
 					]
 					+ SVerticalBox::Slot()
@@ -608,7 +609,7 @@ namespace
 	};
 }
 
-TOptional<FFoliageBakerMeshOutputSelection> FFoliageBakerMeshOutputDialog::OpenAfterBake(
+TOptional<FFoliageBakerMeshOutputSelection> FFoliageBakerMeshOutputDialog::OpenForBake(
 	const UStaticMesh& SourceStaticMesh,
 	const int32 SourceLODIndex)
 {

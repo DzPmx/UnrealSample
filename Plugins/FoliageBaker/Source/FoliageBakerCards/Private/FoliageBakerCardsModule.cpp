@@ -297,7 +297,7 @@ void FFoliageBakerCardsModule::Bake(const EFoliageBakerCardMode Mode)
 							*MaterialTemplate,
 							BuildRequest(*Settings),
 							FFoliageBakerMeshOutputSelector::CreateStatic(
-								&FFoliageBakerMeshOutputDialog::OpenAfterBake));
+								&FFoliageBakerMeshOutputDialog::OpenForBake));
 					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);
 				}));
 

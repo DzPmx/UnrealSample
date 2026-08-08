@@ -3,6 +3,35 @@
 #include "Engine/StaticMesh.h"
 #include "StaticMeshResources.h"
 
+bool FFoliageBakerSourceMeshReader::ValidateSourceLOD(
+	const UStaticMesh& StaticMesh,
+	const int32 SourceLODIndex,
+	FString& OutError)
+{
+	OutError.Reset();
+	if (SourceLODIndex < 0 || SourceLODIndex >= MAX_STATIC_MESH_LODS)
+	{
+		OutError = FString::Printf(
+			TEXT("Source LOD index %d is outside the supported range 0-%d."),
+			SourceLODIndex,
+			MAX_STATIC_MESH_LODS - 1);
+		return false;
+	}
+	if (SourceLODIndex < StaticMesh.GetNumLODs()
+		|| StaticMesh.IsMeshDescriptionValid(SourceLODIndex))
+	{
+		return true;
+	}
+
+	OutError = FString::Printf(
+		TEXT("Static Mesh '%s' does not contain source or render LOD %d (render LOD count: %d, source model count: %d)."),
+		*StaticMesh.GetName(),
+		SourceLODIndex,
+		StaticMesh.GetNumLODs(),
+		StaticMesh.GetNumSourceModels());
+	return false;
+}
+
 bool FFoliageBakerSourceMeshReader::Read(
 	const UStaticMesh& StaticMesh,
 	const int32 SourceLODIndex,
@@ -13,12 +42,8 @@ bool FFoliageBakerSourceMeshReader::Read(
 {
 	OutData = FFoliageBakerSourceMeshData();
 	OutData.SourceLODIndex = SourceLODIndex;
-	if (SourceLODIndex < 0 || SourceLODIndex >= MAX_STATIC_MESH_LODS)
+	if (!ValidateSourceLOD(StaticMesh, SourceLODIndex, OutError))
 	{
-		OutError = FString::Printf(
-			TEXT("Source LOD index %d is outside the supported range 0-%d."),
-			SourceLODIndex,
-			MAX_STATIC_MESH_LODS - 1);
 		return false;
 	}
 	if (!UE::FoliageBaker::PlaneCover::ExtractTrianglesFromStaticMesh(

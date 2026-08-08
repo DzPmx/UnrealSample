@@ -29,6 +29,11 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerSourceMeshData
 class FOLIAGEBAKERCORE_API FFoliageBakerSourceMeshReader final
 {
 public:
+	static bool ValidateSourceLOD(
+		const UStaticMesh& StaticMesh,
+		int32 SourceLODIndex,
+		FString& OutError);
+
 	static bool Read(
 		const UStaticMesh& StaticMesh,
 		int32 SourceLODIndex,
