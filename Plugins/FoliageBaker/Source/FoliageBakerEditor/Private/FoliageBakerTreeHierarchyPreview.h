@@ -19,7 +19,10 @@ public:
 
 	void Construct(const FArguments& InArgs);
 	void SetPreviewData(
-		TSharedPtr<const FFoliageBakerTreeHierarchyPreviewData> InPreviewData);
+		TSharedPtr<const FFoliageBakerTreeHierarchyPreviewData> InPreviewData,
+		bool bFrameCamera = true);
+	void SetHighlightedBranchIDs(const TSet<int32>& InBranchIDs);
+	void SetDebugDrawingEnabled(bool bInEnabled);
 	void ClearPreview();
 
 protected:

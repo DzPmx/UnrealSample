@@ -88,6 +88,59 @@ namespace
 		{
 			return false;
 		}
+		Test.TestTrue(
+			FString::Printf(TEXT("%s has assigned leaf clusters"), *AssetName),
+			!PreviewData.LeafClusters.IsEmpty());
+		TSet<int32> PreviewBranchIDs;
+		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
+			PreviewData.Branches)
+		{
+			if (Branch.BranchID != INDEX_NONE)
+			{
+				PreviewBranchIDs.Add(Branch.BranchID);
+			}
+		}
+		bool bHasBranchOwnedLeafCluster = false;
+		for (int32 LeafClusterIndex = 0;
+			LeafClusterIndex < PreviewData.LeafClusters.Num();
+			++LeafClusterIndex)
+		{
+			const FFoliageBakerTreeHierarchyPreviewLeafCluster& LeafCluster =
+				PreviewData.LeafClusters[LeafClusterIndex];
+			Test.TestTrue(
+				FString::Printf(
+					TEXT("%s leaf cluster %d has source triangles"),
+					*AssetName,
+					LeafClusterIndex),
+				!LeafCluster.SourceTriangleIDs.IsEmpty());
+			Test.TestTrue(
+				FString::Printf(
+					TEXT("%s leaf cluster %d has valid bounds"),
+					*AssetName,
+					LeafClusterIndex),
+				LeafCluster.Bounds.IsValid != 0);
+			Test.TestEqual(
+				FString::Printf(
+					TEXT("%s leaf cluster %d preserves triangle positions"),
+					*AssetName,
+					LeafClusterIndex),
+				LeafCluster.TrianglePositions.Num(),
+				LeafCluster.SourceTriangleIDs.Num() * 3);
+			Test.TestTrue(
+				FString::Printf(
+					TEXT("%s leaf cluster %d references an existing parent"),
+					*AssetName,
+					LeafClusterIndex),
+				LeafCluster.ParentBranchID == INDEX_NONE
+					|| PreviewBranchIDs.Contains(LeafCluster.ParentBranchID));
+			bHasBranchOwnedLeafCluster |=
+				LeafCluster.ParentBranchID != INDEX_NONE;
+		}
+		Test.TestTrue(
+			FString::Printf(
+				TEXT("%s assigns foliage to at least one branch"),
+				*AssetName),
+			bHasBranchOwnedLeafCluster);
 
 		const FFoliageBakerTreeHierarchyPreviewBranch& Trunk =
 			PreviewData.Branches[0];
@@ -194,6 +247,12 @@ bool FFoliageBakerTreeHierarchyAllOakAssetsTest::RunTest(
 		{
 			continue;
 		}
+		TestEqual(
+			FString::Printf(
+				TEXT("%s reports every assigned leaf cluster"),
+				*AssetName),
+			Result.LeafClusterCount,
+			Result.PreviewData->LeafClusters.Num());
 		ValidatePreview(*this, AssetName, *Result.PreviewData);
 	}
 	return !HasAnyErrors();

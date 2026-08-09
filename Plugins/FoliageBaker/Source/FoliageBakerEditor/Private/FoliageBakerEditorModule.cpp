@@ -16,6 +16,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "IDetailCustomization.h"
 #include "ISettingsModule.h"
+#include "Misc/MessageDialog.h"
 #include "PropertyEditorModule.h"
 #include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
@@ -25,6 +26,8 @@
 #include "UObject/UObjectGlobals.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SSegmentedControl.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
@@ -33,6 +36,7 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SNullWidget.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SListView.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerEditorModule"
 
@@ -242,6 +246,10 @@ void FFoliageBakerEditorModule::ShutdownModule()
 	FeatureSwitcher.Reset();
 	DataBakeController.Reset();
 	DataBakePreview.Reset();
+	DataBakePreviewData.Reset();
+	DataBakeBranchOptions.Reset();
+	SelectedDataBakeBranchIDs.Reset();
+	DataBakeBranchList.Reset();
 	DataBakeSettings.Reset();
 }
 
@@ -549,6 +557,10 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 {
 	EnsureDataBakeSettings();
 	DataBakeSettings->SourceStaticMeshes.Reset();
+	DataBakePreviewData.Reset();
+	DataBakeBranchOptions.Reset();
+	SelectedDataBakeBranchIDs.Reset();
+	DataBakeBranchList.Reset();
 
 	FFoliageBakerFeatureControllerArgs ControllerArgs;
 	ControllerArgs.SettingsObject.Reset(DataBakeSettings.Get());
@@ -586,6 +598,8 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 			});
 	DataBakeController = FFoliageBakerFeatureController::Create(ControllerArgs);
 	SAssignNew(DataBakePreview, SFoliageBakerTreeHierarchyPreview);
+	const TWeakPtr<SFoliageBakerTreeHierarchyPreview> WeakDataBakePreview =
+		DataBakePreview;
 
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
@@ -654,16 +668,140 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 					.AutoHeight()
 					.Padding(8.0f, 6.0f)
 					[
-						SNew(STextBlock)
-						.Text(LOCTEXT(
-							"TreeHierarchyPreviewTitle",
-							"Hierarchy View"))
-						.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT(
+								"TreeHierarchyPreviewTitle",
+								"Hierarchy View"))
+							.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT(
+								"TreeHierarchySetAsTrunk",
+								"Set as Trunk"))
+							.ToolTipText(LOCTEXT(
+								"TreeHierarchySetAsTrunkTooltip",
+								"Write all selected Branch IDs and their associated cap geometry as trunk-white vertex colors."))
+							.IsEnabled_Lambda(
+								[this]()
+								{
+									return DataBakePreviewData.IsValid()
+										&& !SelectedDataBakeBranchIDs.IsEmpty();
+								})
+							.OnClicked_Lambda(
+								[this]()
+								{
+									MarkSelectedHierarchyBranchAsTrunk();
+									return FReply::Handled();
+								})
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(SCheckBox)
+							.IsChecked(ECheckBoxState::Checked)
+							.ToolTipText(LOCTEXT(
+								"TreeHierarchyShowDebugTooltip",
+								"Show trunk and branch cylinders, joints, and labels in the Hierarchy View."))
+							.OnCheckStateChanged_Lambda(
+								[WeakDataBakePreview](const ECheckBoxState NewState)
+								{
+									if (const TSharedPtr<SFoliageBakerTreeHierarchyPreview> Preview =
+										WeakDataBakePreview.Pin())
+									{
+										Preview->SetDebugDrawingEnabled(
+											NewState == ECheckBoxState::Checked);
+									}
+								})
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT(
+									"TreeHierarchyShowDebug",
+									"Show Debug"))
+							]
+						]
 					]
 					+ SVerticalBox::Slot()
 					.FillHeight(1.0f)
 					[
-						DataBakePreview.ToSharedRef()
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(6.0f, 0.0f, 4.0f, 6.0f)
+						[
+							SNew(SBox)
+							.WidthOverride(140.0f)
+							[
+								SNew(SVerticalBox)
+								+ SVerticalBox::Slot()
+								.AutoHeight()
+								.Padding(2.0f, 2.0f, 2.0f, 4.0f)
+								[
+									SNew(STextBlock)
+									.Text(LOCTEXT(
+										"TreeHierarchyBranchListTitle",
+										"Branches (Ctrl/Shift to multi-select)"))
+									.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+								]
+								+ SVerticalBox::Slot()
+								.FillHeight(1.0f)
+								[
+									SNew(SBorder)
+									.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+									[
+										SAssignNew(
+											DataBakeBranchList,
+											SListView<TSharedPtr<int32>>)
+										.ListItemsSource(&DataBakeBranchOptions)
+										.SelectionMode(ESelectionMode::Multi)
+										.OnGenerateRow_Lambda(
+											[](
+												const TSharedPtr<int32> BranchID,
+												const TSharedRef<STableViewBase>& OwnerTable)
+											{
+												return SNew(
+													STableRow<TSharedPtr<int32>>,
+													OwnerTable)
+												[
+													SNew(STextBlock)
+													.Text(BranchID.IsValid()
+														? FText::Format(
+															LOCTEXT(
+																"TreeHierarchyBranchOption",
+																"Branch ID {0}"),
+															FText::AsNumber(*BranchID))
+														: FText::GetEmpty())
+												];
+											})
+										.OnSelectionChanged_Lambda(
+											[this](
+												const TSharedPtr<int32> BranchID,
+												const ESelectInfo::Type SelectionType)
+											{
+												(void)BranchID;
+												(void)SelectionType;
+												RefreshDataBakeBranchSelection();
+											})
+									]
+							]
+						]
+						]
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						[
+							DataBakePreview.ToSharedRef()
+						]
 					]
 				]
 			]
@@ -687,6 +825,8 @@ bool FFoliageBakerEditorModule::CanBakeTreeHierarchyColors() const
 void FFoliageBakerEditorModule::BakeTreeHierarchyColors()
 {
 	EnsureDataBakeSettings();
+	DataBakePreviewData.Reset();
+	RefreshDataBakeBranchOptions();
 	if (DataBakePreview.IsValid())
 	{
 		DataBakePreview->ClearPreview();
@@ -705,7 +845,8 @@ void FFoliageBakerEditorModule::BakeTreeHierarchyColors()
 			true,
 			TEXT("\n"),
 			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
-				[Settings = DataBakeSettings, WeakPreview](UStaticMesh& StaticMesh)
+				[this, Settings = DataBakeSettings, WeakPreview](
+					UStaticMesh& StaticMesh)
 				{
 					const FFoliageBakerTreeHierarchyColorBakeResult Result =
 						FFoliageBakerTreeHierarchyColorBaker::Bake(
@@ -713,6 +854,8 @@ void FFoliageBakerEditorModule::BakeTreeHierarchyColors()
 							Settings->SourceLODIndex);
 					if (Result.bSucceeded && Result.PreviewData.IsValid())
 					{
+						DataBakePreviewData = Result.PreviewData;
+						RefreshDataBakeBranchOptions();
 						if (const TSharedPtr<SFoliageBakerTreeHierarchyPreview> Preview =
 							WeakPreview.Pin())
 						{
@@ -729,6 +872,150 @@ void FFoliageBakerEditorModule::BakeTreeHierarchyColors()
 		LOCTEXT(
 			"BakeTreeHierarchyColorsSummary",
 			"Foliage Baker wrote hierarchy test colors to {0} of {1} Static Mesh asset(s).\n\n{2}"));
+}
+
+void FFoliageBakerEditorModule::RefreshDataBakeBranchOptions()
+{
+	DataBakeBranchOptions.Reset();
+	SelectedDataBakeBranchIDs.Reset();
+	if (DataBakePreviewData.IsValid())
+	{
+		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
+			DataBakePreviewData->Branches)
+		{
+			if (Branch.BranchID != INDEX_NONE)
+			{
+				DataBakeBranchOptions.Add(MakeShared<int32>(Branch.BranchID));
+			}
+		}
+		DataBakeBranchOptions.Sort(
+			[](const TSharedPtr<int32>& First, const TSharedPtr<int32>& Second)
+			{
+				return *First < *Second;
+			});
+	}
+	if (DataBakeBranchList.IsValid())
+	{
+		DataBakeBranchList->ClearSelection();
+		DataBakeBranchList->RequestListRefresh();
+	}
+	if (DataBakePreview.IsValid())
+	{
+		DataBakePreview->SetHighlightedBranchIDs(
+			SelectedDataBakeBranchIDs);
+	}
+}
+
+void FFoliageBakerEditorModule::RefreshDataBakeBranchSelection()
+{
+	SelectedDataBakeBranchIDs.Reset();
+	if (DataBakeBranchList.IsValid())
+	{
+		for (const TSharedPtr<int32>& BranchID :
+			DataBakeBranchList->GetSelectedItems())
+		{
+			if (BranchID.IsValid())
+			{
+				SelectedDataBakeBranchIDs.Add(*BranchID);
+			}
+		}
+	}
+	if (DataBakePreview.IsValid())
+	{
+		DataBakePreview->SetHighlightedBranchIDs(
+			SelectedDataBakeBranchIDs);
+	}
+}
+
+void FFoliageBakerEditorModule::MarkSelectedHierarchyBranchAsTrunk()
+{
+	if (!DataBakePreviewData.IsValid()
+		|| SelectedDataBakeBranchIDs.IsEmpty()
+		|| !DataBakePreviewData->SourceStaticMesh.IsValid())
+	{
+		return;
+	}
+
+	TArray<int32> SelectedBranchIndices;
+	TArray<int32> SelectedSourceTriangleIDs;
+	int32 TrunkBranchIndex = INDEX_NONE;
+	for (int32 BranchIndex = 0;
+		BranchIndex < DataBakePreviewData->Branches.Num();
+		++BranchIndex)
+	{
+		const int32 BranchID =
+			DataBakePreviewData->Branches[BranchIndex].BranchID;
+		if (BranchID == INDEX_NONE)
+		{
+			TrunkBranchIndex = BranchIndex;
+		}
+		else if (SelectedDataBakeBranchIDs.Contains(BranchID))
+		{
+			SelectedBranchIndices.Add(BranchIndex);
+			SelectedSourceTriangleIDs.Append(
+				DataBakePreviewData->Branches[BranchIndex].SourceTriangleIDs);
+		}
+	}
+	if (SelectedBranchIndices.IsEmpty()
+		|| !DataBakePreviewData->Branches.IsValidIndex(TrunkBranchIndex))
+	{
+		return;
+	}
+
+	UStaticMesh& StaticMesh =
+		*DataBakePreviewData->SourceStaticMesh.Get();
+	const FScopedTransaction Transaction(LOCTEXT(
+		"MarkTreeHierarchyBranchesAsTrunkTransaction",
+		"Mark Tree Hierarchy Branches as Trunk"));
+	FString Error;
+	if (!FFoliageBakerTreeHierarchyColorBaker::MarkBranchAsTrunk(
+			StaticMesh,
+			DataBakePreviewData->SourceLODIndex,
+			SelectedSourceTriangleIDs,
+			Error))
+	{
+		FMessageDialog::Open(
+			EAppMsgType::Ok,
+			FText::Format(
+				LOCTEXT(
+					"MarkTreeHierarchyBranchesAsTrunkFailed",
+					"Could not mark the selected branches as trunk.\n\n{0}"),
+				FText::FromString(Error)));
+		return;
+	}
+
+	FFoliageBakerTreeHierarchyPreviewBranch& TrunkBranch =
+		DataBakePreviewData->Branches[TrunkBranchIndex];
+	for (const int32 SelectedBranchIndex : SelectedBranchIndices)
+	{
+		const FFoliageBakerTreeHierarchyPreviewBranch& SelectedBranch =
+			DataBakePreviewData->Branches[SelectedBranchIndex];
+		TrunkBranch.Cylinders.Append(SelectedBranch.Cylinders);
+		TrunkBranch.Joints.Append(SelectedBranch.Joints);
+		TrunkBranch.SourceTriangleIDs.Append(SelectedBranch.SourceTriangleIDs);
+	}
+	SelectedBranchIndices.Sort(
+		[](const int32 First, const int32 Second)
+		{
+			return First > Second;
+		});
+	for (const int32 SelectedBranchIndex : SelectedBranchIndices)
+	{
+		DataBakePreviewData->Branches.RemoveAt(SelectedBranchIndex);
+	}
+	for (FFoliageBakerTreeHierarchyPreviewLeafCluster& LeafCluster :
+		DataBakePreviewData->LeafClusters)
+	{
+		if (SelectedDataBakeBranchIDs.Contains(LeafCluster.ParentBranchID))
+		{
+			LeafCluster.ParentBranchID = INDEX_NONE;
+		}
+	}
+	RefreshDataBakeBranchOptions();
+	if (DataBakePreview.IsValid())
+	{
+		DataBakePreview->SetPreviewData(DataBakePreviewData, false);
+	}
 }
 
 FText FFoliageBakerEditorModule::GetActiveFeatureTitle() const

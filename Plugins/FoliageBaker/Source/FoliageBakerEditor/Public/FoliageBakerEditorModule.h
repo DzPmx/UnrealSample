@@ -11,6 +11,9 @@ class FSpawnTabArgs;
 class FFoliageBakerFeatureController;
 class UFoliageBakerTreeHierarchySettings;
 struct FToolMenuContext;
+struct FFoliageBakerTreeHierarchyPreviewData;
+template <typename OptionType>
+class SListView;
 
 class FFoliageBakerEditorModule final : public IModuleInterface
 {
@@ -28,6 +31,9 @@ private:
 	void EnsureDataBakeSettings();
 	bool CanBakeTreeHierarchyColors() const;
 	void BakeTreeHierarchyColors();
+	void RefreshDataBakeBranchOptions();
+	void RefreshDataBakeBranchSelection();
+	void MarkSelectedHierarchyBranchAsTrunk();
 	FText GetActiveFeatureTitle() const;
 	FText GetActiveFeatureDescription() const;
 	FText GetActiveFeatureMetadata() const;
@@ -42,6 +48,10 @@ private:
 	TStrongObjectPtr<UFoliageBakerTreeHierarchySettings> DataBakeSettings;
 	TSharedPtr<FFoliageBakerFeatureController> DataBakeController;
 	TSharedPtr<SFoliageBakerTreeHierarchyPreview> DataBakePreview;
+	TSharedPtr<FFoliageBakerTreeHierarchyPreviewData> DataBakePreviewData;
+	TArray<TSharedPtr<int32>> DataBakeBranchOptions;
+	TSet<int32> SelectedDataBakeBranchIDs;
+	TSharedPtr<SListView<TSharedPtr<int32>>> DataBakeBranchList;
 	TSharedPtr<SWidgetSwitcher> WorkflowSwitcher;
 	TSharedPtr<SWidgetSwitcher> FeatureSwitcher;
 };

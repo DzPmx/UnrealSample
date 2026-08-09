@@ -18,6 +18,7 @@ public class FoliageBakerEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"InputCore",
 				"RenderCore",
 				"Slate",
 				"SlateCore",

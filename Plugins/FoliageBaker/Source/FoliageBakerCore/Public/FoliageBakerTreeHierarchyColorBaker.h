@@ -21,11 +21,21 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewJoint
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewBranch
 {
+	int32 BranchID = INDEX_NONE;
 	FLinearColor Color = FLinearColor::White;
 	FString Label;
 	FVector LabelPosition = FVector::ZeroVector;
 	TArray<FFoliageBakerTreeHierarchyPreviewCylinder> Cylinders;
 	TArray<FFoliageBakerTreeHierarchyPreviewJoint> Joints;
+	TArray<int32> SourceTriangleIDs;
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewLeafCluster
+{
+	int32 ParentBranchID = INDEX_NONE;
+	FBox Bounds = FBox(EForceInit::ForceInit);
+	TArray<int32> SourceTriangleIDs;
+	TArray<FVector3f> TrianglePositions;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewData
@@ -35,6 +45,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewData
 	TWeakObjectPtr<UStaticMesh> SourceStaticMesh;
 	int32 SourceLODIndex = 0;
 	TArray<FFoliageBakerTreeHierarchyPreviewBranch> Branches;
+	TArray<FFoliageBakerTreeHierarchyPreviewLeafCluster> LeafClusters;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyColorBakeResult
@@ -42,6 +53,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyColorBakeResult
 	bool bSucceeded = false;
 	bool bCancelled = false;
 	int32 BranchCount = 0;
+	int32 LeafClusterCount = 0;
 	TSharedPtr<FFoliageBakerTreeHierarchyPreviewData> PreviewData;
 	TArray<TStrongObjectPtr<UObject>> CreatedAssets;
 	FString Report;
@@ -53,4 +65,10 @@ public:
 	static FFoliageBakerTreeHierarchyColorBakeResult Bake(
 		UStaticMesh& StaticMesh,
 		int32 SourceLODIndex);
+
+	static bool MarkBranchAsTrunk(
+		UStaticMesh& StaticMesh,
+		int32 SourceLODIndex,
+		const TArray<int32>& SourceTriangleIDs,
+		FString& OutError);
 };
