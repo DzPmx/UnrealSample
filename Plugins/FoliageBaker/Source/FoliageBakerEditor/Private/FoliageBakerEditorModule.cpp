@@ -6,12 +6,18 @@
 #include "FoliageBakerCardsSettings.h"
 #include "FoliageBakerImpostorModule.h"
 #include "FoliageBakerImpostorSettings.h"
+#include "FoliageBakerFeatureTool.h"
+#include "FoliageBakerTreeHierarchyColorBaker.h"
+#include "FoliageBakerTreeHierarchyPreview.h"
+#include "FoliageBakerTreeHierarchySettings.h"
 #include "DetailLayoutBuilder.h"
+#include "Engine/StaticMesh.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "IDetailCustomization.h"
 #include "ISettingsModule.h"
 #include "PropertyEditorModule.h"
+#include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
 #include "Templates/SubclassOf.h"
 #include "ToolMenus.h"
@@ -22,6 +28,7 @@
 #include "Widgets/Input/SSegmentedControl.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SNullWidget.h"
@@ -233,6 +240,9 @@ void FFoliageBakerEditorModule::ShutdownModule()
 	}
 	WorkflowSwitcher.Reset();
 	FeatureSwitcher.Reset();
+	DataBakeController.Reset();
+	DataBakePreview.Reset();
+	DataBakeSettings.Reset();
 }
 
 void FFoliageBakerEditorModule::RegisterEditorPreferences()
@@ -393,16 +403,7 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 		];
 	}
 
-	TSharedRef<SWidget> DataBakePanel =
-		SNew(SBorder)
-		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-		.Padding(FMargin(14.0f, 10.0f))
-		[
-			SNew(STextBlock)
-			.Text(LOCTEXT(
-				"DataBakePlaceholder",
-				"No Data Bake tools are currently available."))
-		];
+	const TSharedRef<SWidget> DataBakePanel = CreateDataBakePanel();
 
 	TSharedRef<SWidget> ProxyBakePanel =
 		SNew(SVerticalBox)
@@ -542,6 +543,192 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 	FeatureSwitcher->SetActiveWidgetIndex(ActiveFeatureIndex);
 	WorkflowSwitcher->SetActiveWidgetIndex(ActiveWorkflowIndex);
 	return ToolTab;
+}
+
+TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
+{
+	EnsureDataBakeSettings();
+	DataBakeSettings->SourceStaticMeshes.Reset();
+
+	FFoliageBakerFeatureControllerArgs ControllerArgs;
+	ControllerArgs.SettingsObject.Reset(DataBakeSettings.Get());
+	ControllerArgs.GetSourceStaticMeshes =
+		[Settings = DataBakeSettings]() -> TArray<TObjectPtr<UStaticMesh>>&
+		{
+			return Settings->SourceStaticMeshes;
+		};
+	ControllerArgs.BakeButtonText = LOCTEXT(
+		"BakeTreeHierarchyColorsButton",
+		"Write Test Vertex Colors");
+	ControllerArgs.BakeButtonTooltip = LOCTEXT(
+		"BakeTreeHierarchyColorsTooltip",
+		"Recognize the three-level tree hierarchy, overwrite the selected source LOD vertex colors, and refresh the Hierarchy View.");
+	ControllerArgs.RequirementsHint = LOCTEXT(
+		"TreeHierarchyColorsRequirements",
+		"Queue at least one Static Mesh. The selected source LOD must contain separate card-foliage and wood materials.");
+	ControllerArgs.AddMeshesTransactionText = LOCTEXT(
+		"AddTreeHierarchySourceMeshesTransaction",
+		"Add Tree Hierarchy Test Source Meshes");
+	ControllerArgs.ClearMeshesTransactionText = LOCTEXT(
+		"ClearTreeHierarchySourceMeshesTransaction",
+		"Clear Tree Hierarchy Test Source Meshes");
+	ControllerArgs.CanBake =
+		FFoliageBakerFeaturePredicateDelegate::CreateLambda(
+			[this]()
+			{
+				return CanBakeTreeHierarchyColors();
+			});
+	ControllerArgs.Bake =
+		FFoliageBakerFeatureActionDelegate::CreateLambda(
+			[this]()
+			{
+				BakeTreeHierarchyColors();
+			});
+	DataBakeController = FFoliageBakerFeatureController::Create(ControllerArgs);
+	SAssignNew(DataBakePreview, SFoliageBakerTreeHierarchyPreview);
+
+	return SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(10.0f, 0.0f, 10.0f, 6.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(FMargin(14.0f, 10.0f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT(
+						"TreeHierarchyColorsTitle",
+						"Tree Hierarchy Test Colors"))
+					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 3.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT(
+						"TreeHierarchyColorsDescription",
+						"Recognize one trunk, first-level branch chains, and card foliage, then write validation colors and draw the collapsed hierarchy over the source mesh."))
+					.AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 5.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT(
+						"TreeHierarchyColorsMetadata",
+						"Trunk: white  |  Card foliage: black  |  Each Branch ID: one stable pseudo-random color"))
+					.TextStyle(FAppStyle::Get(), "SmallText")
+				]
+			]
+		]
+		+ SVerticalBox::Slot()
+		.FillHeight(1.0f)
+		.Padding(10.0f, 0.0f, 10.0f, 10.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(1.0f)
+			[
+				SNew(SSplitter)
+				.Orientation(Orient_Horizontal)
+				.PhysicalSplitterHandleSize(3.0f)
+				+ SSplitter::Slot()
+				.Value(0.45f)
+				.MinSize(280.0f)
+				[
+					DataBakeController->GetWidget()
+				]
+				+ SSplitter::Slot()
+				.Value(0.55f)
+				.MinSize(320.0f)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(8.0f, 6.0f)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT(
+							"TreeHierarchyPreviewTitle",
+							"Hierarchy View"))
+						.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					]
+					+ SVerticalBox::Slot()
+					.FillHeight(1.0f)
+					[
+						DataBakePreview.ToSharedRef()
+					]
+				]
+			]
+		];
+}
+
+void FFoliageBakerEditorModule::EnsureDataBakeSettings()
+{
+	FFoliageBakerFeatureTool::EnsureTransientSettings(
+		DataBakeSettings,
+		FName(TEXT("FoliageBakerTreeHierarchySettings")));
+}
+
+bool FFoliageBakerEditorModule::CanBakeTreeHierarchyColors() const
+{
+	return DataBakeSettings.IsValid()
+		&& FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
+			DataBakeSettings->SourceStaticMeshes);
+}
+
+void FFoliageBakerEditorModule::BakeTreeHierarchyColors()
+{
+	EnsureDataBakeSettings();
+	if (DataBakePreview.IsValid())
+	{
+		DataBakePreview->ClearPreview();
+	}
+	const TWeakPtr<SFoliageBakerTreeHierarchyPreview> WeakPreview =
+		DataBakePreview;
+	const FScopedTransaction Transaction(LOCTEXT(
+		"BakeTreeHierarchyColorsTransaction",
+		"Write Tree Hierarchy Test Vertex Colors"));
+	const FFoliageBakerFeatureBatchResult BatchResult =
+		FFoliageBakerFeatureTool::RunBakeBatch(
+			DataBakeSettings->SourceStaticMeshes,
+			LOCTEXT(
+				"BakeTreeHierarchyColorsSlowTask",
+				"Writing tree hierarchy test vertex colors..."),
+			true,
+			TEXT("\n"),
+			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
+				[Settings = DataBakeSettings, WeakPreview](UStaticMesh& StaticMesh)
+				{
+					const FFoliageBakerTreeHierarchyColorBakeResult Result =
+						FFoliageBakerTreeHierarchyColorBaker::Bake(
+							StaticMesh,
+							Settings->SourceLODIndex);
+					if (Result.bSucceeded && Result.PreviewData.IsValid())
+					{
+						if (const TSharedPtr<SFoliageBakerTreeHierarchyPreview> Preview =
+							WeakPreview.Pin())
+						{
+							Preview->SetPreviewData(Result.PreviewData);
+						}
+					}
+					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);
+				}));
+
+	FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(
+		BatchResult.CreatedAssets);
+	FFoliageBakerFeatureTool::ShowBatchSummary(
+		BatchResult,
+		LOCTEXT(
+			"BakeTreeHierarchyColorsSummary",
+			"Foliage Baker wrote hierarchy test colors to {0} of {1} Static Mesh asset(s).\n\n{2}"));
 }
 
 FText FFoliageBakerEditorModule::GetActiveFeatureTitle() const

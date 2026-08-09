@@ -11,17 +11,23 @@ public class FoliageBakerEditor : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
+				"Engine",
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"RenderCore",
 				"Slate",
 				"SlateCore",
 				"ToolMenus",
 				"Settings",
 				"PropertyEditor",
+				"EditorFramework",
+				"UnrealEd",
+				"FoliageBakerCore",
+				"FoliageBakerEditorCommon",
 				"FoliageBakerCards",
 				"FoliageBakerImpostor",
 				"FoliageBakerBillboardClouds",
