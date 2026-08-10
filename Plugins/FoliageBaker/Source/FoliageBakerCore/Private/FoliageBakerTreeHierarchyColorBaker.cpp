@@ -16,19 +16,11 @@ namespace
 	constexpr double MinimumBranchPreviewRadius = 0.5;
 	constexpr double TrunkPreviewRadiusScale = 2.5;
 	constexpr double JointPreviewRadiusScale = 1.5;
-	constexpr double PreviewSliceLengthScale = 2.0;
-	constexpr double TrunkPreviewSliceLengthScale = 0.75;
-	constexpr int32 MaximumPreviewSliceCount = 48;
-	constexpr int32 MaximumTrunkPreviewSliceCount = 128;
-	constexpr double PreviewCenterlineSimplificationScale = 2.0;
-	constexpr double TrunkPreviewCenterlineSimplificationScale = 0.75;
-	constexpr double PreviewCenterlineSimplificationLengthFraction = 0.003;
-	constexpr double TrunkPreviewCenterlineSimplificationLengthFraction = 0.001;
-	constexpr int32 PreviewCenterlineSmoothingPassCount = 1;
-	constexpr int32 TrunkPreviewCenterlineSmoothingPassCount = 3;
-	constexpr double PreviewCenterlineImprovementRatio = 0.9;
-	constexpr double MaximumPreviewCenterlineLengthRatio = 1.35;
-	constexpr double MinimumPreviewCenterlineDirectionDot = 0.5;
+	constexpr double PreviewSliceLengthScale = 0.75;
+	constexpr int32 MaximumPreviewSliceCount = 128;
+	constexpr double PreviewCenterlineSimplificationScale = 0.75;
+	constexpr double PreviewCenterlineSimplificationLengthFraction = 0.001;
+	constexpr int32 PreviewCenterlineSmoothingPassCount = 3;
 	constexpr double PreviewJointMinimumDirectionDot = 0.984807753012208;
 	constexpr double LocalTrunkDiameterSupportLengthFraction = 0.02;
 	constexpr double LocalTrunkDiameterGeometryScale = 4.0;
@@ -994,40 +986,6 @@ namespace
 		return Projections[Projections.Num() / 2];
 	}
 
-	double FindPointToCenterlineDistanceSquared(
-		const FVector& Position,
-		const TArray<FVector>& Centerline)
-	{
-		check(Centerline.Num() >= 2);
-		double MinimumDistanceSquared = TNumericLimits<double>::Max();
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			const FVector ClosestPoint = FMath::ClosestPointOnSegment(
-				Position,
-				Centerline[PointIndex - 1],
-				Centerline[PointIndex]);
-			MinimumDistanceSquared = FMath::Min(
-				MinimumDistanceSquared,
-				FVector::DistSquared(Position, ClosestPoint));
-		}
-		return MinimumDistanceSquared;
-	}
-
-	double MeasureMeanCenterlineDistance(
-		const TArray<FVector>& Positions,
-		const TArray<FVector>& Centerline)
-	{
-		check(!Positions.IsEmpty());
-		check(Centerline.Num() >= 2);
-		double DistanceSum = 0.0;
-		for (const FVector& Position : Positions)
-		{
-			DistanceSum += FMath::Sqrt(
-				FindPointToCenterlineDistanceSquared(Position, Centerline));
-		}
-		return DistanceSum / static_cast<double>(Positions.Num());
-	}
-
 	void MarkCenterlinePointsToKeep(
 		const TArray<FVector>& Points,
 		const int32 FirstIndex,
@@ -1136,41 +1094,6 @@ namespace
 		return Result;
 	}
 
-	bool IsCenterlineSemanticallyClear(
-		const TArray<FVector>& Centerline,
-		const FVector& Axis,
-		const double AxialLength)
-	{
-		check(Centerline.Num() >= 2);
-		check(AxialLength > MinimumGeometryScale);
-		double TotalLength = 0.0;
-		FVector PreviousDirection = FVector::ZeroVector;
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			const FVector Segment =
-				Centerline[PointIndex] - Centerline[PointIndex - 1];
-			const double SegmentLength = Segment.Size();
-			if (SegmentLength <= MinimumGeometryScale)
-			{
-				return false;
-			}
-			const FVector Direction = Segment / SegmentLength;
-			if (FVector::DotProduct(Direction, Axis) <= 0.0)
-			{
-				return false;
-			}
-			if (!PreviousDirection.IsNearlyZero()
-				&& FVector::DotProduct(PreviousDirection, Direction)
-				< MinimumPreviewCenterlineDirectionDot)
-			{
-				return false;
-			}
-			PreviousDirection = Direction;
-			TotalLength += SegmentLength;
-		}
-		return TotalLength <= AxialLength * MaximumPreviewCenterlineLengthRatio;
-	}
-
 	TArray<FVector> BuildPreviewCenterline(
 		const FWoodComponent& Component,
 		const bool bIsTrunk)
@@ -1198,19 +1121,13 @@ namespace
 			return PrincipalLine;
 		}
 
-		const double SliceLengthScale = bIsTrunk
-			? TrunkPreviewSliceLengthScale
-			: PreviewSliceLengthScale;
-		const int32 MaximumSliceCount = bIsTrunk
-			? MaximumTrunkPreviewSliceCount
-			: MaximumPreviewSliceCount;
 		const double TargetSliceLength = FMath::Max(
-			Component.GeometryScale * SliceLengthScale,
+			Component.GeometryScale * PreviewSliceLengthScale,
 			MinimumGeometryScale);
 		const int32 SliceCount = FMath::Clamp(
 			FMath::CeilToInt(AxialLength / TargetSliceLength),
 			2,
-			MaximumSliceCount);
+			MaximumPreviewSliceCount);
 		TArray<TArray<FVector>> SlicePositions;
 		SlicePositions.SetNum(SliceCount);
 		for (const FVector& Position : Component.Positions)
@@ -1252,46 +1169,16 @@ namespace
 		SlicedCenterline.Last() += Axis * (
 			MaximumProjection
 			- FVector::DotProduct(SlicedCenterline.Last() - Center, Axis));
-		const int32 SmoothingPassCount = bIsTrunk
-			? TrunkPreviewCenterlineSmoothingPassCount
-			: PreviewCenterlineSmoothingPassCount;
 		SlicedCenterline = SmoothCenterline(
 			SlicedCenterline,
-			SmoothingPassCount);
+			PreviewCenterlineSmoothingPassCount);
 
-		const double SimplificationScale = bIsTrunk
-			? TrunkPreviewCenterlineSimplificationScale
-			: PreviewCenterlineSimplificationScale;
-		const double SimplificationLengthFraction = bIsTrunk
-			? TrunkPreviewCenterlineSimplificationLengthFraction
-			: PreviewCenterlineSimplificationLengthFraction;
 		const double SimplificationTolerance = FMath::Max(
-			Component.GeometryScale * SimplificationScale,
-			AxialLength * SimplificationLengthFraction);
-		TArray<FVector> CandidateCenterline = SimplifyCenterline(
+			Component.GeometryScale * PreviewCenterlineSimplificationScale,
+			AxialLength * PreviewCenterlineSimplificationLengthFraction);
+		return SimplifyCenterline(
 			SlicedCenterline,
 			SimplificationTolerance);
-		if (bIsTrunk)
-		{
-			return CandidateCenterline;
-		}
-
-		const double PrincipalLineError = MeasureMeanCenterlineDistance(
-			Component.Positions,
-			PrincipalLine);
-		const double CandidateError = MeasureMeanCenterlineDistance(
-			Component.Positions,
-			CandidateCenterline);
-		if (IsCenterlineSemanticallyClear(
-				CandidateCenterline,
-				Axis,
-				AxialLength)
-			&& CandidateError
-				< PrincipalLineError * PreviewCenterlineImprovementRatio)
-		{
-			return CandidateCenterline;
-		}
-		return PrincipalLine;
 	}
 
 	void AnchorTrunkCenterlineToPivot(TArray<FVector>& Centerline)
