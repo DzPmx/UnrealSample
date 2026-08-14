@@ -17,8 +17,8 @@ namespace
 	using UE::Geometry::TImplicitSolidify;
 	using UE::Geometry::TSweepingMeshSDF;
 
-	constexpr int32 TargetVoxelResolution = 400;
-	constexpr int32 CpuFallbackVoxelResolution = 400;
+	constexpr int32 TargetVoxelResolution = 800;
+	constexpr int32 CpuFallbackVoxelResolution = 800;
 	constexpr bool bUseGpuSkeleton = true;
 	constexpr double OccupancyExpansionCellScale = 0.0;
 	constexpr double CoverageRadiusScale = 1.6;
@@ -1923,6 +1923,95 @@ namespace
 			for (const int32 PathSparseIndex : ExtractedPath)
 			{
 				Active[PathSparseIndex] = true;
+			}
+		}
+
+		for (;;)
+		{
+			TArray<int32> PruneChildCounts;
+			PruneChildCounts.Init(0, VoxelIndices.Num());
+			for (int32 SparseIndex = 0;
+				SparseIndex < Predecessors.Num();
+				++SparseIndex)
+			{
+				if (Active[SparseIndex]
+					&& Active.IsValidIndex(Predecessors[SparseIndex])
+					&& Active[Predecessors[SparseIndex]])
+				{
+					++PruneChildCounts[Predecessors[SparseIndex]];
+				}
+			}
+
+			bool bRemovedPath = false;
+			for (int32 TipSparseIndex = 0;
+				TipSparseIndex < VoxelIndices.Num();
+				++TipSparseIndex)
+			{
+				if (!Active[TipSparseIndex]
+					|| TipSparseIndex == RootSparseIndex
+					|| PruneChildCounts[TipSparseIndex] != 0)
+				{
+					continue;
+				}
+
+				TArray<int32> TerminalPath;
+				TArray<double> TerminalRadii;
+				double TerminalLength = 0.0;
+				int32 CurrentSparseIndex = TipSparseIndex;
+				while (CurrentSparseIndex != INDEX_NONE
+					&& CurrentSparseIndex != RootSparseIndex)
+				{
+					TerminalPath.Add(CurrentSparseIndex);
+					TerminalRadii.Add(
+						RadiusBySparseIndex[CurrentSparseIndex]);
+					const int32 ParentSparseIndex =
+						Predecessors[CurrentSparseIndex];
+					if (!VoxelIndices.IsValidIndex(ParentSparseIndex))
+					{
+						break;
+					}
+					TerminalLength += FVector::Distance(
+						GridPosition(
+							VoxelIndices[CurrentSparseIndex],
+							Dimensions,
+							GridOrigin,
+							GpuResult.CellSize),
+						GridPosition(
+							VoxelIndices[ParentSparseIndex],
+							Dimensions,
+							GridOrigin,
+							GpuResult.CellSize));
+					if (ParentSparseIndex == RootSparseIndex
+						|| PruneChildCounts[ParentSparseIndex] > 1)
+					{
+						break;
+					}
+					CurrentSparseIndex = ParentSparseIndex;
+				}
+				if (TerminalRadii.IsEmpty())
+				{
+					continue;
+				}
+
+				TerminalRadii.Sort();
+				const double MedianRadius = TerminalRadii[
+					TerminalRadii.Num() / 2];
+				const double MinimumLength = FMath::Max(
+					GpuResult.CellSize * MinimumExtractedPathCellCount,
+					MedianRadius * MinimumExtractedPathRadiusScale);
+				if (TerminalLength >= MinimumLength)
+				{
+					continue;
+				}
+				for (const int32 PathSparseIndex : TerminalPath)
+				{
+					Active[PathSparseIndex] = false;
+				}
+				bRemovedPath = true;
+			}
+			if (!bRemovedPath)
+			{
+				break;
 			}
 		}
 
