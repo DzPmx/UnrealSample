@@ -14,6 +14,7 @@
 #include "Engine/StaticMesh.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
+#include "HAL/IConsoleManager.h"
 #include "IDetailCustomization.h"
 #include "ISettingsModule.h"
 #include "Misc/MessageDialog.h"
@@ -226,11 +227,48 @@ void FFoliageBakerEditorModule::StartupModule()
 		.SetMenuType(ETabSpawnerMenuType::Hidden);
 
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FFoliageBakerEditorModule::RegisterMenus));
+	DebugPreviewCommand = MakeUnique<FAutoConsoleCommand>(
+		TEXT("FoliageBaker.DebugPreview"),
+		TEXT("Bake one Static Mesh object path and open the hierarchy tool for visual debugging."),
+		FConsoleCommandWithArgsDelegate::CreateLambda(
+			[this](const TArray<FString>& Arguments)
+			{
+				if (Arguments.IsEmpty())
+				{
+					return;
+				}
+				const TObjectPtr<UStaticMesh> StaticMesh = LoadObject<UStaticMesh>(nullptr, *Arguments[0]);
+				if (!StaticMesh)
+				{
+					return;
+				}
+				EnsureDataBakeSettings();
+				DataBakeSettings->SourceStaticMeshes.Reset();
+				DataBakeSettings->SourceStaticMeshes.Add(StaticMesh);
+				const FFoliageBakerTreeHierarchyColorBakeResult Result =
+					FFoliageBakerTreeHierarchyColorBaker::Bake(
+						*StaticMesh,
+						DataBakeSettings->SourceLODIndex);
+				if (!Result.bSucceeded || !Result.PreviewData.IsValid())
+				{
+					return;
+				}
+				FGlobalTabmanager::Get()->TryInvokeTab(FoliageBakerToolTabName);
+				DataBakeSettings->SourceStaticMeshes.Reset();
+				DataBakeSettings->SourceStaticMeshes.Add(StaticMesh);
+				DataBakePreviewData = Result.PreviewData;
+				RefreshDataBakeBranchOptions();
+				if (DataBakePreview.IsValid())
+				{
+					DataBakePreview->SetPreviewData(Result.PreviewData);
+				}
+			}));
 }
 
 void FFoliageBakerEditorModule::ShutdownModule()
 {
 	UnregisterEditorPreferences();
+	DebugPreviewCommand.Reset();
 
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
@@ -945,7 +983,7 @@ void FFoliageBakerEditorModule::MarkSelectedHierarchyBranchAsTrunk()
 	{
 		const int32 BranchID =
 			DataBakePreviewData->Branches[BranchIndex].BranchID;
-		if (BranchID == INDEX_NONE)
+		if (DataBakePreviewData->Branches[BranchIndex].Label == TEXT("Trunk"))
 		{
 			TrunkBranchIndex = BranchIndex;
 		}

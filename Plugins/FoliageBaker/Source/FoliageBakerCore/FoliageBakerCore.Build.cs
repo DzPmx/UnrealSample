@@ -19,6 +19,7 @@ public class FoliageBakerCore : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"GeometryCore",
 				"MaterialBaking",
 				"MeshDescription",
 			}

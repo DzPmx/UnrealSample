@@ -9,6 +9,7 @@ class SWidgetSwitcher;
 class SFoliageBakerTreeHierarchyPreview;
 class FSpawnTabArgs;
 class FFoliageBakerFeatureController;
+class FAutoConsoleCommand;
 class UFoliageBakerTreeHierarchySettings;
 struct FToolMenuContext;
 struct FFoliageBakerTreeHierarchyPreviewData;
@@ -54,4 +55,5 @@ private:
 	TSharedPtr<SListView<TSharedPtr<int32>>> DataBakeBranchList;
 	TSharedPtr<SWidgetSwitcher> WorkflowSwitcher;
 	TSharedPtr<SWidgetSwitcher> FeatureSwitcher;
+	TUniquePtr<FAutoConsoleCommand> DebugPreviewCommand;
 };

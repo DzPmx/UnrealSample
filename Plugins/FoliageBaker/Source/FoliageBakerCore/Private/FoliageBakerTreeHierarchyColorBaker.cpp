@@ -1,9 +1,12 @@
 #include "FoliageBakerTreeHierarchyColorBaker.h"
+#include "FoliageBakerTreeSkeleton.h"
 
 #include "Algo/Reverse.h"
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerTreeHierarchy, Log, All);
 
 namespace
 {
@@ -2183,6 +2186,315 @@ namespace
 		}
 		return PreviewData;
 	}
+
+	struct FSkeletonClosestLocation
+	{
+		int32 EdgeIndex = INDEX_NONE;
+		double DistanceSquared = TNumericLimits<double>::Max();
+	};
+
+	FSkeletonClosestLocation FindClosestSkeletonEdge(
+		const FVector& Position,
+		const TArray<FFoliageBakerTreeSkeletonEdge>& Edges)
+	{
+		FSkeletonClosestLocation Closest;
+		for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
+		{
+			const TArray<FVector>& Polyline = Edges[EdgeIndex].Polyline;
+			for (int32 PointIndex = 1; PointIndex < Polyline.Num(); ++PointIndex)
+			{
+				const double DistanceSquared = FVector::DistSquared(
+					Position,
+					FMath::ClosestPointOnSegment(
+						Position,
+						Polyline[PointIndex - 1],
+						Polyline[PointIndex]));
+				if (DistanceSquared < Closest.DistanceSquared)
+				{
+					Closest.EdgeIndex = EdgeIndex;
+					Closest.DistanceSquared = DistanceSquared;
+				}
+			}
+		}
+		return Closest;
+	}
+
+	EFoliageBakerTreeHierarchyPreviewNodeKind ConvertNodeKind(
+		const EFoliageBakerTreeSkeletonNodeKind Kind)
+	{
+		switch (Kind)
+		{
+		case EFoliageBakerTreeSkeletonNodeKind::Root:
+			return EFoliageBakerTreeHierarchyPreviewNodeKind::Root;
+		case EFoliageBakerTreeSkeletonNodeKind::Fork:
+			return EFoliageBakerTreeHierarchyPreviewNodeKind::Fork;
+		case EFoliageBakerTreeSkeletonNodeKind::Tip:
+		default:
+			return EFoliageBakerTreeHierarchyPreviewNodeKind::Tip;
+		}
+	}
+
+	TSharedPtr<FFoliageBakerTreeHierarchyPreviewData> BuildSkeletonPreviewData(
+		UStaticMesh& StaticMesh,
+		const int32 SourceLODIndex,
+		const TArray<FTreeTriangle>& Triangles,
+		const TVertexAttributesConstRef<FVector3f>& VertexPositions,
+		const TArray<int32>& WoodTriangleIndices,
+		const TArray<FTriangleComponent>& LeafTriangleComponents,
+		const TArray<FWoodCapIsland>& WoodCapIslands,
+		const FFoliageBakerTreeSkeletonResult& Skeleton,
+		TArray<int32>& OutTriangleBranchIDs)
+	{
+		TSharedRef<FFoliageBakerTreeHierarchyPreviewData> PreviewData =
+			MakeShared<FFoliageBakerTreeHierarchyPreviewData>();
+		PreviewData->AssetName = StaticMesh.GetName();
+		for (const FTreeTriangle& Triangle : Triangles)
+		{
+			for (const FVertexID VertexID : Triangle.VertexIDs)
+			{
+				const FVector Position(VertexPositions[VertexID]);
+				if (!Position.ContainsNaN())
+				{
+					PreviewData->Bounds += Position;
+				}
+			}
+		}
+		PreviewData->SourceStaticMesh = &StaticMesh;
+		PreviewData->SourceLODIndex = SourceLODIndex;
+		PreviewData->RootNodeID = Skeleton.RootNodeID;
+		PreviewData->SkeletonCellSize = Skeleton.CellSize;
+		PreviewData->WoodVolumeComponentCount = Skeleton.OccupiedComponentCount;
+		PreviewData->UncoveredGuideTerminalCount =
+			Skeleton.UncoveredGuideTerminalCount;
+		for (const FFoliageBakerTreeSkeletonNode& SkeletonNode : Skeleton.Nodes)
+		{
+			FFoliageBakerTreeHierarchyPreviewNode& Node =
+				PreviewData->SkeletonNodes.AddDefaulted_GetRef();
+			Node.NodeID = SkeletonNode.NodeID;
+			Node.ParentNodeID = SkeletonNode.ParentNodeID;
+			Node.Position = SkeletonNode.Position;
+			Node.Radius = SkeletonNode.Radius;
+			Node.Kind = ConvertNodeKind(SkeletonNode.Kind);
+		}
+
+		TMap<int32, int32> PreviewBranchIndexByID;
+		const int32 TrunkPreviewBranchIndex = PreviewData->Branches.AddDefaulted();
+		PreviewData->Branches[TrunkPreviewBranchIndex].BranchID = INDEX_NONE;
+		PreviewData->Branches[TrunkPreviewBranchIndex].Color = FLinearColor::White;
+		PreviewData->Branches[TrunkPreviewBranchIndex].Label = TEXT("Trunk");
+
+		const double MinimumPreviewRadius = FMath::Max(
+			MinimumBranchPreviewRadius,
+			Skeleton.CellSize * 0.45);
+		for (const FFoliageBakerTreeSkeletonEdge& SkeletonEdge : Skeleton.Edges)
+		{
+			FFoliageBakerTreeHierarchyPreviewEdge& Edge =
+				PreviewData->SkeletonEdges.AddDefaulted_GetRef();
+			Edge.EdgeID = SkeletonEdge.EdgeID;
+			Edge.StartNodeID = SkeletonEdge.StartNodeID;
+			Edge.EndNodeID = SkeletonEdge.EndNodeID;
+			Edge.BranchID = SkeletonEdge.BranchID;
+			Edge.ParentBranchID = SkeletonEdge.ParentBranchID;
+			Edge.bTrunk = SkeletonEdge.bTrunk;
+			Edge.Polyline = SkeletonEdge.Polyline;
+
+			const int32 BranchID = SkeletonEdge.bTrunk
+				? INDEX_NONE
+				: SkeletonEdge.BranchID;
+			int32 PreviewBranchIndex = INDEX_NONE;
+			if (SkeletonEdge.bTrunk)
+			{
+				PreviewBranchIndex = TrunkPreviewBranchIndex;
+			}
+			else
+			{
+				int32& BranchIndex = PreviewBranchIndexByID.FindOrAdd(
+					BranchID,
+					INDEX_NONE);
+				if (BranchIndex == INDEX_NONE)
+				{
+					BranchIndex = PreviewData->Branches.AddDefaulted();
+					FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+						PreviewData->Branches[BranchIndex];
+					Branch.BranchID = BranchID;
+					Branch.ParentBranchID = SkeletonEdge.ParentBranchID;
+					Branch.Color = FLinearColor(MakeBranchColor(StaticMesh, BranchID));
+					Branch.Label = FString::Printf(TEXT("ID %d"), BranchID);
+					Branch.LabelPosition = SkeletonEdge.Polyline.IsEmpty()
+						? FVector::ZeroVector
+						: SkeletonEdge.Polyline[SkeletonEdge.Polyline.Num() / 2];
+				}
+				PreviewBranchIndex = BranchIndex;
+			}
+			FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+				PreviewData->Branches[PreviewBranchIndex];
+			const double PreviewRadius = SkeletonEdge.bTrunk
+				? MinimumPreviewRadius * TrunkPreviewRadiusScale
+				: MinimumPreviewRadius;
+			for (int32 PointIndex = 1;
+				PointIndex < SkeletonEdge.Polyline.Num();
+				++PointIndex)
+			{
+				if (SkeletonEdge.Polyline[PointIndex - 1].Equals(
+						SkeletonEdge.Polyline[PointIndex],
+						MinimumGeometryScale))
+				{
+					continue;
+				}
+				FFoliageBakerTreeHierarchyPreviewCylinder& Cylinder =
+					Branch.Cylinders.AddDefaulted_GetRef();
+				Cylinder.Start = SkeletonEdge.Polyline[PointIndex - 1];
+				Cylinder.End = SkeletonEdge.Polyline[PointIndex];
+				Cylinder.Radius = PreviewRadius;
+			}
+		}
+
+		for (const FFoliageBakerTreeSkeletonNode& SkeletonNode : Skeleton.Nodes)
+		{
+			if (SkeletonNode.Kind != EFoliageBakerTreeSkeletonNodeKind::Fork)
+			{
+				continue;
+			}
+			for (FFoliageBakerTreeHierarchyPreviewBranch& Branch : PreviewData->Branches)
+			{
+				bool bUsesNode = false;
+				for (const FFoliageBakerTreeHierarchyPreviewEdge& Edge :
+					PreviewData->SkeletonEdges)
+				{
+					const bool bSameBranch =
+						(Branch.Label == TEXT("Trunk") && Edge.bTrunk)
+						|| (Branch.BranchID != INDEX_NONE
+							&& !Edge.bTrunk
+							&& Edge.BranchID == Branch.BranchID);
+					if (bSameBranch
+						&& (Edge.StartNodeID == SkeletonNode.NodeID
+							|| Edge.EndNodeID == SkeletonNode.NodeID))
+					{
+						bUsesNode = true;
+						break;
+					}
+				}
+				if (!bUsesNode)
+				{
+					continue;
+				}
+				FFoliageBakerTreeHierarchyPreviewJoint& Joint =
+					Branch.Joints.AddDefaulted_GetRef();
+				Joint.Position = SkeletonNode.Position;
+				Joint.Radius = MinimumPreviewRadius * JointPreviewRadiusScale;
+			}
+		}
+		FFoliageBakerTreeHierarchyPreviewBranch& FinalTrunk =
+			PreviewData->Branches[TrunkPreviewBranchIndex];
+		if (!FinalTrunk.Cylinders.IsEmpty())
+		{
+			FinalTrunk.LabelPosition = FinalTrunk.Cylinders[
+				FinalTrunk.Cylinders.Num() / 2].Start;
+		}
+		OutTriangleBranchIDs.Init(INDEX_NONE, Triangles.Num());
+		TBitArray<> WoodOwned(false, Triangles.Num());
+		TArray<int32> SkeletonWoodTriangleIndices = WoodTriangleIndices;
+		TSet<int32> WoodCapTriangleIndices;
+		for (const FWoodCapIsland& CapIsland : WoodCapIslands)
+		{
+			for (const int32 TriangleIndex : CapIsland.TriangleIndices)
+			{
+				WoodCapTriangleIndices.Add(TriangleIndex);
+				SkeletonWoodTriangleIndices.AddUnique(TriangleIndex);
+			}
+		}
+		for (const int32 TriangleIndex : SkeletonWoodTriangleIndices)
+		{
+			if (!Triangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+			const FTreeTriangle& Triangle = Triangles[TriangleIndex];
+			const FVector Center = (
+				FVector(VertexPositions[Triangle.VertexIDs[0]])
+				+ FVector(VertexPositions[Triangle.VertexIDs[1]])
+				+ FVector(VertexPositions[Triangle.VertexIDs[2]])) / 3.0;
+			const FSkeletonClosestLocation Closest = FindClosestSkeletonEdge(
+				Center,
+				Skeleton.Edges);
+			if (!Skeleton.Edges.IsValidIndex(Closest.EdgeIndex))
+			{
+				continue;
+			}
+			const FFoliageBakerTreeSkeletonEdge& Edge = Skeleton.Edges[Closest.EdgeIndex];
+			const int32 BranchID = Edge.bTrunk
+				? INDEX_NONE
+				: Edge.BranchID;
+			OutTriangleBranchIDs[TriangleIndex] = BranchID;
+			WoodOwned[TriangleIndex] = true;
+			int32 PreviewBranchIndex = INDEX_NONE;
+			if (Edge.bTrunk)
+			{
+				PreviewBranchIndex = TrunkPreviewBranchIndex;
+			}
+			else if (PreviewBranchIndexByID.Contains(BranchID))
+			{
+				PreviewBranchIndex = PreviewBranchIndexByID.FindChecked(BranchID);
+			}
+			if (PreviewData->Branches.IsValidIndex(PreviewBranchIndex))
+			{
+				PreviewData->Branches[PreviewBranchIndex].SourceTriangleIDs.Add(
+					Triangle.TriangleID.GetValue());
+			}
+		}
+
+		for (const FTriangleComponent& LeafComponent : LeafTriangleComponents)
+		{
+			TArray<int32> LeafTriangles;
+			FVector Representative = FVector::ZeroVector;
+			int32 RepresentativeCount = 0;
+			FBox Bounds(EForceInit::ForceInit);
+			TArray<FVector3f> TrianglePositions;
+			for (const int32 TriangleIndex : LeafComponent.TriangleIndices)
+			{
+				if (WoodCapTriangleIndices.Contains(TriangleIndex)
+					|| !Triangles.IsValidIndex(TriangleIndex))
+				{
+					continue;
+				}
+				LeafTriangles.Add(TriangleIndex);
+				for (const FVertexID VertexID : Triangles[TriangleIndex].VertexIDs)
+				{
+					const FVector3f Position = VertexPositions[VertexID];
+					Representative += FVector(Position);
+					++RepresentativeCount;
+					Bounds += FVector(Position);
+					TrianglePositions.Add(Position);
+				}
+			}
+			if (LeafTriangles.IsEmpty() || RepresentativeCount == 0)
+			{
+				continue;
+			}
+			Representative /= static_cast<double>(RepresentativeCount);
+			const FSkeletonClosestLocation Closest = FindClosestSkeletonEdge(
+				Representative,
+				Skeleton.Edges);
+			if (!Skeleton.Edges.IsValidIndex(Closest.EdgeIndex))
+			{
+				continue;
+			}
+			const FFoliageBakerTreeSkeletonEdge& Edge = Skeleton.Edges[Closest.EdgeIndex];
+			FFoliageBakerTreeHierarchyPreviewLeafCluster& LeafCluster =
+				PreviewData->LeafClusters.AddDefaulted_GetRef();
+			LeafCluster.ParentBranchID = Edge.bTrunk
+				? INDEX_NONE
+				: Edge.BranchID;
+			LeafCluster.Bounds = Bounds;
+			LeafCluster.TrianglePositions = MoveTemp(TrianglePositions);
+			for (const int32 TriangleIndex : LeafTriangles)
+			{
+				LeafCluster.SourceTriangleIDs.Add(
+					Triangles[TriangleIndex].TriangleID.GetValue());
+			}
+		}
+		return PreviewData;
+	}
 }
 
 FFoliageBakerTreeHierarchyColorBakeResult
@@ -2240,19 +2552,27 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 	}
 	const TArray<FTriangleComponent> WoodTriangleComponents =
 		BuildTriangleComponents(Triangles, WoodTriangleIndices);
+	TArray<int32> WoodComponentTriangleCounts;
+	WoodComponentTriangleCounts.Reserve(WoodTriangleComponents.Num());
+	int32 MaximumWoodComponentTriangleCount = 0;
+	for (const FTriangleComponent& Component : WoodTriangleComponents)
+	{
+		WoodComponentTriangleCounts.Add(Component.TriangleIndices.Num());
+		MaximumWoodComponentTriangleCount = FMath::Max(
+			MaximumWoodComponentTriangleCount,
+			Component.TriangleIndices.Num());
+	}
+	WoodComponentTriangleCounts.Sort();
+	const int32 MedianWoodComponentTriangleCount =
+		WoodComponentTriangleCounts.IsEmpty()
+			? 0
+			: WoodComponentTriangleCounts[WoodComponentTriangleCounts.Num() / 2];
 	const TArray<FTriangleComponent> LeafTriangleComponents =
 		BuildTriangleComponents(Triangles, LeafTriangleIndices);
 	if (WoodTriangleComponents.IsEmpty())
 	{
 		Result.Report = FString::Printf(
 			TEXT("%s\n  failed: No wood geometry remains after card-foliage classification."),
-			*StaticMesh.GetName());
-		return Result;
-	}
-	if (WoodTriangleComponents.Num() == 1)
-	{
-		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: All wood geometry is one connected component; component-based hierarchy recognition cannot separate the trunk and branches."),
 			*StaticMesh.GetName());
 		return Result;
 	}
@@ -2268,72 +2588,123 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 			BuildWoodComponent(Component, Triangles, VertexPositions));
 		WoodBounds += WoodComponent.Bounds;
 	}
+	TArray<int32> WoodComponentIDByTriangle;
+	WoodComponentIDByTriangle.Init(INDEX_NONE, Triangles.Num());
+	for (int32 ComponentIndex = 0;
+		ComponentIndex < WoodComponents.Num();
+		++ComponentIndex)
+	{
+		for (const int32 TriangleIndex : WoodComponents[ComponentIndex].TriangleIndices)
+		{
+			if (WoodComponentIDByTriangle.IsValidIndex(TriangleIndex))
+			{
+				WoodComponentIDByTriangle[TriangleIndex] = ComponentIndex;
+			}
+		}
+	}
 	const TArray<FWoodCapIsland> WoodCapIslands =
 		FindTopologyOwnedWoodCapIslands(
 			LeafTriangleComponents,
 			WoodTriangleComponents,
 			Triangles,
 			VertexPositions);
-	const int32 TrunkComponentIndex = FindTrunkComponent(WoodComponents);
-	const TArray<TArray<FWoodContact>> WoodContactGraph = BuildWoodContactGraph(
-		WoodComponents,
-		WoodBounds.GetSize().Size());
-	const TArray<int32> ParentComponentIndices = BuildWoodParentTree(
-		WoodComponents,
-		WoodContactGraph,
-		TrunkComponentIndex);
-	const TArray<TArray<FVector>> ComponentCenterlines =
-		BuildComponentCenterlines(
-			WoodComponents,
-			TrunkComponentIndex,
-			ParentComponentIndices);
-	const FBranchAssignment BranchAssignment = AssignBranchIDs(
-		WoodComponents,
-		TrunkComponentIndex,
-		ParentComponentIndices,
-		ComponentCenterlines);
-	Result.BranchCount = BranchAssignment.BranchCount;
-	const TArray<int32>& BranchIDs = BranchAssignment.BranchIDs;
-	const TArray<FLeafBranchAssignment> LeafBranchAssignments =
-		AssignLeafComponentsToWood(
-			LeafTriangleComponents,
-			WoodCapIslands,
-			WoodComponents,
-			Triangles,
-			VertexPositions);
-	Result.LeafClusterCount = LeafBranchAssignments.Num();
 
-	TArray<FVector4f> TriangleColors;
-	TriangleColors.Init(FVector4f(0.0f, 0.0f, 0.0f, 1.0f), Triangles.Num());
-	for (int32 ComponentIndex = 0;
-		ComponentIndex < WoodComponents.Num();
-		++ComponentIndex)
-	{
-		const FVector4f Color = ComponentIndex == TrunkComponentIndex
-			|| BranchIDs[ComponentIndex] == INDEX_NONE
-			? FVector4f(1.0f, 1.0f, 1.0f, 1.0f)
-			: MakeBranchColor(StaticMesh, BranchIDs[ComponentIndex]);
-		for (const int32 TriangleIndex : WoodComponents[ComponentIndex].TriangleIndices)
-		{
-			TriangleColors[TriangleIndex] = Color;
-		}
-	}
+	TArray<int32> SkeletonWoodTriangleIndices = WoodTriangleIndices;
 	for (const FWoodCapIsland& CapIsland : WoodCapIslands)
 	{
-		if (!BranchIDs.IsValidIndex(CapIsland.OwnerComponentIndex))
+		for (const int32 TriangleIndex : CapIsland.TriangleIndices)
+		{
+			SkeletonWoodTriangleIndices.AddUnique(TriangleIndex);
+			if (WoodComponentIDByTriangle.IsValidIndex(TriangleIndex))
+			{
+				WoodComponentIDByTriangle[TriangleIndex] =
+					CapIsland.OwnerComponentIndex;
+			}
+		}
+	}
+	TArray<FFoliageBakerTreeSkeletonTriangle> SkeletonTriangles;
+	SkeletonTriangles.Reserve(SkeletonWoodTriangleIndices.Num());
+	for (const int32 TriangleIndex : SkeletonWoodTriangleIndices)
+	{
+		if (!Triangles.IsValidIndex(TriangleIndex))
 		{
 			continue;
 		}
-		const int32 BranchID = BranchIDs[CapIsland.OwnerComponentIndex];
-		const FVector4f Color = BranchID == INDEX_NONE
-			? FVector4f(1.0f, 1.0f, 1.0f, 1.0f)
-			: MakeBranchColor(StaticMesh, BranchID);
-		for (const int32 TriangleIndex : CapIsland.TriangleIndices)
+		const FTreeTriangle& Triangle = Triangles[TriangleIndex];
+		FFoliageBakerTreeSkeletonTriangle& SkeletonTriangle =
+			SkeletonTriangles.AddDefaulted_GetRef();
+		SkeletonTriangle.SourceTriangleID = Triangle.TriangleID.GetValue();
+		SkeletonTriangle.SourceComponentID =
+			WoodComponentIDByTriangle[TriangleIndex];
+		SkeletonTriangle.A = FVector(VertexPositions[Triangle.VertexIDs[0]]);
+		SkeletonTriangle.B = FVector(VertexPositions[Triangle.VertexIDs[1]]);
+		SkeletonTriangle.C = FVector(VertexPositions[Triangle.VertexIDs[2]]);
+	}
+	UE_LOG(
+		LogFoliageBakerTreeHierarchy,
+		Display,
+		TEXT("%s: starting pure global GPU skeletonization with %d wood triangles."),
+		*StaticMesh.GetName(),
+		SkeletonTriangles.Num());
+	const double SkeletonStartSeconds = FPlatformTime::Seconds();
+	const FFoliageBakerTreeSkeletonResult Skeleton =
+		FFoliageBakerTreeSkeleton::Build(
+			SkeletonTriangles,
+			{},
+			FVector::ZeroVector);
+	UE_LOG(
+		LogFoliageBakerTreeHierarchy,
+		Display,
+		TEXT("%s: global skeletonization finished in %.3f seconds: %s"),
+		*StaticMesh.GetName(),
+		FPlatformTime::Seconds() - SkeletonStartSeconds,
+		*Skeleton.Report);
+	if (!Skeleton.bSucceeded)
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: %s"),
+			*StaticMesh.GetName(),
+			*Skeleton.Report);
+		return Result;
+	}
+	for (const FFoliageBakerTreeSkeletonEdge& Edge : Skeleton.Edges)
+	{
+		if (!Edge.bTrunk && Edge.BranchID != INDEX_NONE)
 		{
-			TriangleColors[TriangleIndex] = Color;
+			Result.BranchCount = FMath::Max(Result.BranchCount, Edge.BranchID + 1);
 		}
 	}
 
+	TArray<int32> TriangleBranchIDs;
+	Result.PreviewData = BuildSkeletonPreviewData(
+		StaticMesh,
+		SourceLODIndex,
+		Triangles,
+		VertexPositions,
+		WoodTriangleIndices,
+		LeafTriangleComponents,
+		WoodCapIslands,
+		Skeleton,
+		TriangleBranchIDs);
+	Result.LeafClusterCount = Result.PreviewData.IsValid()
+		? Result.PreviewData->LeafClusters.Num()
+		: 0;
+
+	TArray<FVector4f> TriangleColors;
+	TriangleColors.Init(FVector4f(0.0f, 0.0f, 0.0f, 1.0f), Triangles.Num());
+	for (const int32 TriangleIndex : SkeletonWoodTriangleIndices)
+	{
+		if (!Triangles.IsValidIndex(TriangleIndex)
+			|| !TriangleBranchIDs.IsValidIndex(TriangleIndex))
+		{
+			continue;
+		}
+		const int32 BranchID = TriangleBranchIDs[TriangleIndex];
+		const FVector4f Color = BranchID == INDEX_NONE
+			? FVector4f(1.0f, 1.0f, 1.0f, 1.0f)
+			: MakeBranchColor(StaticMesh, BranchID);
+		TriangleColors[TriangleIndex] = Color;
+	}
 	StaticMesh.Modify();
 	if (!StaticMesh.ModifyMeshDescription(SourceLODIndex, false))
 	{
@@ -2382,27 +2753,18 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 	StaticMesh.MarkPackageDirty();
 
 	Result.bSucceeded = true;
-	Result.PreviewData = BuildPreviewData(
-		StaticMesh,
-		Triangles,
-		WoodComponents,
-		TrunkComponentIndex,
-		ParentComponentIndices,
-		BranchIDs,
-		ComponentCenterlines,
-		WoodCapIslands,
-		LeafBranchAssignments,
-		WoodBounds,
-		SourceLODIndex);
 	Result.CreatedAssets.Add(TStrongObjectPtr<UObject>(&StaticMesh));
 	Result.Report = FString::Printf(
-		TEXT("%s\n  wrote LOD %d hierarchy test colors: trunk/root white, card foliage black, %d branch ID color(s), %d leaf cluster parent assignment(s), %d root subtree(s), %d topology-owned wood cap island(s)."),
+		TEXT("%s\n  wrote LOD %d hierarchy test colors: trunk white, card foliage black, %d branch ID color(s), %d leaf cluster parent assignment(s), %d topology-owned wood cap island(s), %d source wood component(s) (median %d, maximum %d triangles).\n  %s"),
 		*StaticMesh.GetName(),
 		SourceLODIndex,
 		Result.BranchCount,
 		Result.LeafClusterCount,
-		BranchAssignment.RootSubtreeCount,
-		WoodCapIslands.Num());
+		WoodCapIslands.Num(),
+		WoodTriangleComponents.Num(),
+		MedianWoodComponentTriangleCount,
+		MaximumWoodComponentTriangleCount,
+		*Skeleton.Report);
 	return Result;
 }
 

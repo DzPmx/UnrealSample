@@ -13,6 +13,34 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewCylinder
 	double Radius = 1.0;
 };
 
+enum class EFoliageBakerTreeHierarchyPreviewNodeKind : uint8
+{
+	Root,
+	Fork,
+	Tip
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewNode
+{
+	int32 NodeID = INDEX_NONE;
+	int32 ParentNodeID = INDEX_NONE;
+	FVector Position = FVector::ZeroVector;
+	double Radius = 1.0;
+	EFoliageBakerTreeHierarchyPreviewNodeKind Kind =
+		EFoliageBakerTreeHierarchyPreviewNodeKind::Tip;
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewEdge
+{
+	int32 EdgeID = INDEX_NONE;
+	int32 StartNodeID = INDEX_NONE;
+	int32 EndNodeID = INDEX_NONE;
+	int32 BranchID = INDEX_NONE;
+	int32 ParentBranchID = INDEX_NONE;
+	bool bTrunk = false;
+	TArray<FVector> Polyline;
+};
+
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewJoint
 {
 	FVector Position = FVector::ZeroVector;
@@ -22,6 +50,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewJoint
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewBranch
 {
 	int32 BranchID = INDEX_NONE;
+	int32 ParentBranchID = INDEX_NONE;
 	FLinearColor Color = FLinearColor::White;
 	FString Label;
 	FVector LabelPosition = FVector::ZeroVector;
@@ -44,6 +73,12 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewData
 	FBox Bounds = FBox(EForceInit::ForceInit);
 	TWeakObjectPtr<UStaticMesh> SourceStaticMesh;
 	int32 SourceLODIndex = 0;
+	int32 RootNodeID = INDEX_NONE;
+	double SkeletonCellSize = 0.0;
+	int32 WoodVolumeComponentCount = 0;
+	int32 UncoveredGuideTerminalCount = 0;
+	TArray<FFoliageBakerTreeHierarchyPreviewNode> SkeletonNodes;
+	TArray<FFoliageBakerTreeHierarchyPreviewEdge> SkeletonEdges;
 	TArray<FFoliageBakerTreeHierarchyPreviewBranch> Branches;
 	TArray<FFoliageBakerTreeHierarchyPreviewLeafCluster> LeafClusters;
 };
