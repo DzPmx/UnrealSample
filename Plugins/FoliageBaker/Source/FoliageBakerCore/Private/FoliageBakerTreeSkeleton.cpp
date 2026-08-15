@@ -30,10 +30,10 @@ namespace
 	constexpr double ComponentBridgeAmbiguityMargin = 0.45;
 	constexpr int32 MinimumComponentInteriorCellCount = 3;
 	constexpr int32 MinimumBridgeSupportSampleCount = 2;
-	constexpr double RootBandBaseDiameterScale = 2.0;
-	constexpr double MinimumRootBandLengthFraction = 0.02;
-	constexpr double MaximumRootBandLengthFraction = 0.08;
-	constexpr double RootMaximumRisePersistenceFraction = 0.25;
+	constexpr double SkeletonRootBandBaseDiameterScale = 2.0;
+	constexpr double SkeletonMinimumRootBandLengthFraction = 0.02;
+	constexpr double SkeletonMaximumRootBandLengthFraction = 0.08;
+	constexpr double SkeletonRootMaximumRisePersistenceFraction = 0.25;
 
 	struct FQueueEntry
 	{
@@ -1414,9 +1414,9 @@ namespace
 			RootNodeRadius,
 			FirstTrunkEdgeRadius) * 2.0;
 		const double RootBandLength = FMath::Clamp(
-			BaseTrunkDiameter * RootBandBaseDiameterScale,
-			TrunkLength * MinimumRootBandLengthFraction,
-			TrunkLength * MaximumRootBandLengthFraction);
+			BaseTrunkDiameter * SkeletonRootBandBaseDiameterScale,
+			TrunkLength * SkeletonMinimumRootBandLengthFraction,
+			TrunkLength * SkeletonMaximumRootBandLengthFraction);
 		for (int32 TrunkNodeIndex = 0;
 			TrunkNodeIndex < TrunkNodeIDs.Num();
 			++TrunkNodeIndex)
@@ -1461,7 +1461,7 @@ namespace
 						TrunkAxis)
 					: 0.0;
 				const double MaximumInitialRise = FMath::Max(
-					PersistenceLength * RootMaximumRisePersistenceFraction,
+					PersistenceLength * SkeletonRootMaximumRisePersistenceFraction,
 					CandidateEdge.Radius * 2.0);
 				if (SubtreeMaximumProjection <= RootBandLength
 					&& InitialRise <= MaximumInitialRise)
