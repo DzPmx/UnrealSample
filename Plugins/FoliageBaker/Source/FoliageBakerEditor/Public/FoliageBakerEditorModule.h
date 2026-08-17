@@ -6,9 +6,9 @@
 class SDockTab;
 class SWidget;
 class SWidgetSwitcher;
+class SFoliageBakerLeafUVPreview;
 class SFoliageBakerTreeHierarchyPreview;
 class FSpawnTabArgs;
-class FFoliageBakerFeatureController;
 class FAutoConsoleCommand;
 class UFoliageBakerTreeHierarchySettings;
 struct FToolMenuContext;
@@ -25,16 +25,23 @@ public:
 private:
 	void RegisterEditorPreferences();
 	void UnregisterEditorPreferences();
+	void HandleEditorPreExit();
+	void ReleaseToolResources();
 	void RegisterMenus();
 	void ExecuteOpenTool(const FToolMenuContext& MenuContext);
 	TSharedRef<SDockTab> SpawnToolTab(const FSpawnTabArgs& SpawnTabArgs);
 	TSharedRef<SWidget> CreateDataBakePanel();
 	void EnsureDataBakeSettings();
-	bool CanBakeTreeHierarchyColors() const;
-	void BakeTreeHierarchyColors();
+	bool CanAnalyzeTreeHierarchy() const;
+	void AnalyzeTreeHierarchy();
+	bool CanResolveDataBakeLeafOwnership() const;
+	void ResolveDataBakeLeafOwnership();
+	bool CanBakeWindData() const;
+	void BakeWindData();
+	void RefreshDataBakeSourceInput();
+	void HandleDataBakeLeafMaterialChanged(int32 LeafMaterialIndex);
 	void RefreshDataBakeBranchOptions();
 	void RefreshDataBakeBranchSelection();
-	void MarkSelectedHierarchyBranchAsTrunk();
 	FText GetActiveFeatureTitle() const;
 	FText GetActiveFeatureDescription() const;
 	FText GetActiveFeatureMetadata() const;
@@ -47,8 +54,8 @@ private:
 	int32 ActiveFeatureIndex = 0;
 	TArray<FName> RegisteredPreferenceClassNames;
 	TStrongObjectPtr<UFoliageBakerTreeHierarchySettings> DataBakeSettings;
-	TSharedPtr<FFoliageBakerFeatureController> DataBakeController;
 	TSharedPtr<SFoliageBakerTreeHierarchyPreview> DataBakePreview;
+	TSharedPtr<SFoliageBakerLeafUVPreview> DataBakeLeafUVPreview;
 	TSharedPtr<FFoliageBakerTreeHierarchyPreviewData> DataBakePreviewData;
 	TArray<TSharedPtr<int32>> DataBakeBranchOptions;
 	TSet<int32> SelectedDataBakeBranchIDs;

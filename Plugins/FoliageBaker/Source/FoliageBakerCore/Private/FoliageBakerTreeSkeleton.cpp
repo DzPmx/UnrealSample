@@ -19,7 +19,6 @@ namespace
 
 	constexpr int32 TargetVoxelResolution = 800;
 	constexpr int32 CpuFallbackVoxelResolution = 800;
-	constexpr bool bUseGpuSkeleton = true;
 	constexpr double OccupancyExpansionCellScale = 0.0;
 	constexpr double CoverageRadiusScale = 1.6;
 	constexpr double MinimumExtractedPathCellCount = 4.0;
@@ -475,71 +474,6 @@ namespace
 		}
 	}
 
-	void MarkPathNeighborhoodCovered(
-		const TArray<int32>& Path,
-		const FVector3i& Dimensions,
-		const TArray<int32>& ComponentIDs,
-		const TBitArray<>& ConnectedComponents,
-		const TBitArray<>& Interior,
-		const TSweepingMeshSDF<FDynamicMesh3>& SDF,
-		const double CellSize,
-		TBitArray<>& Covered)
-	{
-		for (const int32 PathCellIndex : Path)
-		{
-			const double Radius = FMath::Max(
-				CellSize,
-				-static_cast<double>(SDF.Grid[PathCellIndex]));
-			const int32 CoverageCells = FMath::Clamp(
-				FMath::CeilToInt(
-					Radius / CellSize * CoverageRadiusScale),
-				1,
-				24);
-			const FVector3i Center = GridCoordinate(
-				PathCellIndex,
-				Dimensions);
-			for (int32 OffsetZ = -CoverageCells;
-				OffsetZ <= CoverageCells;
-				++OffsetZ)
-			{
-				for (int32 OffsetY = -CoverageCells;
-					OffsetY <= CoverageCells;
-					++OffsetY)
-				{
-					for (int32 OffsetX = -CoverageCells;
-						OffsetX <= CoverageCells;
-						++OffsetX)
-					{
-						if (OffsetX * OffsetX
-							+ OffsetY * OffsetY
-							+ OffsetZ * OffsetZ
-							> CoverageCells * CoverageCells)
-						{
-							continue;
-						}
-						const FVector3i CoveredCoordinate = Center
-							+ FVector3i(OffsetX, OffsetY, OffsetZ);
-						if (!IsInsideGrid(CoveredCoordinate, Dimensions))
-						{
-							continue;
-						}
-						const int32 CoveredIndex = GridIndex(
-							CoveredCoordinate,
-							Dimensions);
-						const int32 ComponentID = ComponentIDs[CoveredIndex];
-						if (ComponentID >= 0
-							&& ComponentID < ConnectedComponents.Num()
-							&& ConnectedComponents[ComponentID]
-							&& Interior[CoveredIndex])
-						{
-							Covered[CoveredIndex] = true;
-						}
-					}
-				}
-			}
-		}
-	}
-
 	double PointSegmentDistanceSquared(
 		const FVector& Point,
 		const FVector& Start,
@@ -650,460 +584,9 @@ namespace
 		return Length;
 	}
 
-	struct FSurfaceVertex
-	{
-		FVector Position = FVector::ZeroVector;
-		TArray<int32> Neighbors;
-		TArray<int32> IncidentTriangles;
-		TArray<int32> BoundaryNeighbors;
-	};
-
-	struct FSurfaceTriangle
-	{
-		TStaticArray<int32, 3> VertexIndices;
-		int32 SourceTriangleID = INDEX_NONE;
-		int32 BandIndex = INDEX_NONE;
-		int32 ClusterIndex = INDEX_NONE;
-	};
-
-	struct FSurfaceQueueEntry
-	{
-		int32 Index = INDEX_NONE;
-		double Distance = TNumericLimits<double>::Max();
-	};
-
-	struct FSurfaceQueueEntryLess
-	{
-		bool operator()(
-			const FSurfaceQueueEntry& First,
-			const FSurfaceQueueEntry& Second) const
-		{
-			return First.Distance < Second.Distance;
-		}
-	};
-
-	struct FSurfaceCluster
-	{
-		TArray<int32> TriangleIndices;
-		TArray<int32> Neighbors;
-		FVector Center = FVector::ZeroVector;
-		double Radius = 0.0;
-		int32 MinimumSourceTriangleID = MAX_int32;
-		int32 ParentIndex = INDEX_NONE;
-		TArray<int32> ChildIndices;
-		double RootDistance = TNumericLimits<double>::Max();
-	};
-
-	class FSurfaceDisjointSet final
-	{
-	public:
-		explicit FSurfaceDisjointSet(const int32 Count)
-		{
-			Parents.SetNumUninitialized(Count);
-			Ranks.Init(0, Count);
-			for (int32 Index = 0; Index < Count; ++Index)
-			{
-				Parents[Index] = Index;
-			}
-		}
-
-		int32 Find(const int32 Index)
-		{
-			int32 Root = Index;
-			while (Parents[Root] != Root)
-			{
-				Root = Parents[Root];
-			}
-			int32 Current = Index;
-			while (Parents[Current] != Current)
-			{
-				const int32 Parent = Parents[Current];
-				Parents[Current] = Root;
-				Current = Parent;
-			}
-			return Root;
-		}
-
-		void Union(const int32 First, const int32 Second)
-		{
-			int32 FirstRoot = Find(First);
-			int32 SecondRoot = Find(Second);
-			if (FirstRoot == SecondRoot)
-			{
-				return;
-			}
-			if (Ranks[FirstRoot] < Ranks[SecondRoot])
-			{
-				Swap(FirstRoot, SecondRoot);
-			}
-			Parents[SecondRoot] = FirstRoot;
-			if (Ranks[FirstRoot] == Ranks[SecondRoot])
-			{
-				++Ranks[FirstRoot];
-			}
-		}
-
-	private:
-		TArray<int32> Parents;
-		TArray<uint8> Ranks;
-	};
-
-	uint64 SurfaceEdgeKey(const int32 First, const int32 Second)
-	{
-		const uint32 MinimumIndex = static_cast<uint32>(FMath::Min(First, Second));
-		const uint32 MaximumIndex = static_cast<uint32>(FMath::Max(First, Second));
-		return (static_cast<uint64>(MinimumIndex) << 32)
-			| static_cast<uint64>(MaximumIndex);
-	}
-
-	uint64 SurfaceClusterPairKey(const int32 First, const int32 Second)
-	{
-		return SurfaceEdgeKey(First, Second);
-	}
-
-	int32 AddSurfaceVertex(
-		const FVector& Position,
-		TMap<FVector3f, int32>& VertexIndexByPosition,
-		TArray<FSurfaceVertex>& Vertices)
-	{
-		const FVector3f PositionKey(Position);
-		const int32 ExistingIndexPlusOne = VertexIndexByPosition.FindRef(PositionKey);
-		if (ExistingIndexPlusOne > 0)
-		{
-			return ExistingIndexPlusOne - 1;
-		}
-		const int32 NewIndex = Vertices.Num();
-		FSurfaceVertex& Vertex = Vertices.AddDefaulted_GetRef();
-		Vertex.Position = Position;
-		VertexIndexByPosition.Add(PositionKey, NewIndex + 1);
-		return NewIndex;
-	}
-
-	void AddSurfaceNeighbor(
-		const int32 First,
-		const int32 Second,
-		TArray<FSurfaceVertex>& Vertices)
-	{
-		if (First == Second
-			|| !Vertices.IsValidIndex(First)
-			|| !Vertices.IsValidIndex(Second))
-		{
-			return;
-		}
-		Vertices[First].Neighbors.AddUnique(Second);
-		Vertices[Second].Neighbors.AddUnique(First);
-	}
-
-	TArray<int32> SelectSurfaceRootVertices(
-		const TArray<FSurfaceVertex>& Vertices,
-		const TMap<uint64, int32>& EdgeUseCounts,
-		const FVector& Pivot,
-		const double GeometryScale)
-	{
-		TArray<int32> RootVertices;
-		TBitArray<> BoundaryVertices(false, Vertices.Num());
-		for (const TPair<uint64, int32>& EdgeUseCount : EdgeUseCounts)
-		{
-			if (EdgeUseCount.Value != 1)
-			{
-				continue;
-			}
-			const int32 First = static_cast<int32>(EdgeUseCount.Key >> 32);
-			const int32 Second = static_cast<int32>(EdgeUseCount.Key & 0xffffffffu);
-			if (BoundaryVertices.IsValidIndex(First)
-				&& BoundaryVertices.IsValidIndex(Second))
-			{
-				BoundaryVertices[First] = true;
-				BoundaryVertices[Second] = true;
-			}
-		}
-
-		struct FBoundaryLoop
-		{
-			TArray<int32> VertexIndices;
-			double Perimeter = 0.0;
-			FVector Center = FVector::ZeroVector;
-		};
-		TArray<FBoundaryLoop> BoundaryLoops;
-		TBitArray<> Visited(false, Vertices.Num());
-		for (int32 SeedIndex = 0; SeedIndex < Vertices.Num(); ++SeedIndex)
-		{
-			if (!BoundaryVertices[SeedIndex] || Visited[SeedIndex])
-			{
-				continue;
-			}
-			FBoundaryLoop& Loop = BoundaryLoops.AddDefaulted_GetRef();
-			TArray<int32> Queue;
-			Queue.Add(SeedIndex);
-			Visited[SeedIndex] = true;
-			for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
-			{
-				const int32 VertexIndex = Queue[QueueIndex];
-				Loop.VertexIndices.Add(VertexIndex);
-				Loop.Center += Vertices[VertexIndex].Position;
-				for (const int32 NeighborIndex : Vertices[VertexIndex].BoundaryNeighbors)
-				{
-					if (VertexIndex < NeighborIndex)
-					{
-						Loop.Perimeter += FVector::Distance(
-							Vertices[VertexIndex].Position,
-							Vertices[NeighborIndex].Position);
-					}
-					if (!Visited[NeighborIndex])
-					{
-						Visited[NeighborIndex] = true;
-						Queue.Add(NeighborIndex);
-					}
-				}
-			}
-			if (!Loop.VertexIndices.IsEmpty())
-			{
-				Loop.Center /= static_cast<double>(Loop.VertexIndices.Num());
-			}
-		}
-
-		double MaximumPerimeter = 0.0;
-		for (const FBoundaryLoop& Loop : BoundaryLoops)
-		{
-			if (Loop.VertexIndices.Num() >= 3)
-			{
-				MaximumPerimeter = FMath::Max(MaximumPerimeter, Loop.Perimeter);
-			}
-		}
-		double BestDistanceSquared = TNumericLimits<double>::Max();
-		int32 BestLoopIndex = INDEX_NONE;
-		for (int32 LoopIndex = 0; LoopIndex < BoundaryLoops.Num(); ++LoopIndex)
-		{
-			const FBoundaryLoop& Loop = BoundaryLoops[LoopIndex];
-			if (Loop.VertexIndices.Num() < 3
-				|| Loop.Perimeter < MaximumPerimeter * 0.55)
-			{
-				continue;
-			}
-			const double DistanceSquared = FVector::DistSquared(Loop.Center, Pivot);
-			if (DistanceSquared < BestDistanceSquared)
-			{
-				BestDistanceSquared = DistanceSquared;
-				BestLoopIndex = LoopIndex;
-			}
-		}
-		if (BoundaryLoops.IsValidIndex(BestLoopIndex))
-		{
-			return BoundaryLoops[BestLoopIndex].VertexIndices;
-		}
-
-		int32 NearestVertexIndex = INDEX_NONE;
-		for (int32 VertexIndex = 0; VertexIndex < Vertices.Num(); ++VertexIndex)
-		{
-			const double DistanceSquared = FVector::DistSquared(
-				Vertices[VertexIndex].Position,
-				Pivot);
-			if (DistanceSquared < BestDistanceSquared)
-			{
-				BestDistanceSquared = DistanceSquared;
-				NearestVertexIndex = VertexIndex;
-			}
-		}
-		if (Vertices.IsValidIndex(NearestVertexIndex))
-		{
-			const double PatchRadiusSquared = FMath::Square(
-				FMath::Max(GeometryScale * 2.5, UE_DOUBLE_SMALL_NUMBER));
-			const FVector RootPosition = Vertices[NearestVertexIndex].Position;
-			for (int32 VertexIndex = 0; VertexIndex < Vertices.Num(); ++VertexIndex)
-			{
-				if (FVector::DistSquared(Vertices[VertexIndex].Position, RootPosition)
-					<= PatchRadiusSquared)
-				{
-					RootVertices.Add(VertexIndex);
-				}
-			}
-			if (RootVertices.IsEmpty())
-			{
-				RootVertices.Add(NearestVertexIndex);
-			}
-		}
-		return RootVertices;
-	}
-
-	void MeasureSurfaceRootDistances(
-		const TArray<FSurfaceVertex>& Vertices,
-		const TArray<int32>& RootVertices,
-		TArray<double>& OutDistances)
-	{
-		OutDistances.Init(TNumericLimits<double>::Max(), Vertices.Num());
-		TArray<FSurfaceQueueEntry> Queue;
-		const FSurfaceQueueEntryLess QueueEntryLess;
-		for (const int32 RootVertexIndex : RootVertices)
-		{
-			if (!Vertices.IsValidIndex(RootVertexIndex))
-			{
-				continue;
-			}
-			OutDistances[RootVertexIndex] = 0.0;
-			Queue.HeapPush(
-				FSurfaceQueueEntry{RootVertexIndex, 0.0},
-				QueueEntryLess);
-		}
-		while (!Queue.IsEmpty())
-		{
-			FSurfaceQueueEntry Entry;
-			Queue.HeapPop(Entry, QueueEntryLess, EAllowShrinking::No);
-			if (!OutDistances.IsValidIndex(Entry.Index)
-				|| Entry.Distance > OutDistances[Entry.Index])
-			{
-				continue;
-			}
-			for (const int32 NeighborIndex : Vertices[Entry.Index].Neighbors)
-			{
-				const double EdgeLength = FMath::Max(
-					FVector::Distance(
-						Vertices[Entry.Index].Position,
-						Vertices[NeighborIndex].Position),
-					UE_DOUBLE_SMALL_NUMBER);
-				const double CandidateDistance = Entry.Distance + EdgeLength;
-				if (CandidateDistance >= OutDistances[NeighborIndex])
-				{
-					continue;
-				}
-				OutDistances[NeighborIndex] = CandidateDistance;
-				Queue.HeapPush(
-					FSurfaceQueueEntry{NeighborIndex, CandidateDistance},
-					QueueEntryLess);
-			}
-		}
-	}
-
-	void BuildSurfaceClusterGeometry(
-		const TArray<FSurfaceTriangle>& Triangles,
-		const TArray<FSurfaceVertex>& Vertices,
-		FSurfaceCluster& Cluster)
-	{
-		TSet<int32> UniqueVertexIndices;
-		for (const int32 TriangleIndex : Cluster.TriangleIndices)
-		{
-			if (!Triangles.IsValidIndex(TriangleIndex))
-			{
-				continue;
-			}
-			const FSurfaceTriangle& Triangle = Triangles[TriangleIndex];
-			Cluster.MinimumSourceTriangleID = FMath::Min(
-				Cluster.MinimumSourceTriangleID,
-				Triangle.SourceTriangleID);
-			for (const int32 VertexIndex : Triangle.VertexIndices)
-			{
-				UniqueVertexIndices.Add(VertexIndex);
-			}
-		}
-		if (UniqueVertexIndices.IsEmpty())
-		{
-			return;
-		}
-		for (const int32 VertexIndex : UniqueVertexIndices)
-		{
-			Cluster.Center += Vertices[VertexIndex].Position;
-		}
-		Cluster.Center /= static_cast<double>(UniqueVertexIndices.Num());
-		TArray<double> RadialDistances;
-		RadialDistances.Reserve(UniqueVertexIndices.Num());
-		for (const int32 VertexIndex : UniqueVertexIndices)
-		{
-			RadialDistances.Add(FVector::Distance(
-				Vertices[VertexIndex].Position,
-				Cluster.Center));
-		}
-		RadialDistances.Sort();
-		Cluster.Radius = RadialDistances[RadialDistances.Num() / 4];
-	}
-
-	FVector FindSurfaceTerminalCenter(
-		const int32 ClusterIndex,
-		const TArray<FSurfaceCluster>& Clusters,
-		const TArray<FSurfaceTriangle>& Triangles,
-		const TArray<FSurfaceVertex>& Vertices,
-		const double GeometryScale)
-	{
-		if (!Clusters.IsValidIndex(ClusterIndex))
-		{
-			return FVector::ZeroVector;
-		}
-		const FSurfaceCluster& Cluster = Clusters[ClusterIndex];
-		if (!Clusters.IsValidIndex(Cluster.ParentIndex))
-		{
-			return Cluster.Center;
-		}
-		const FVector Direction = (
-			Cluster.Center - Clusters[Cluster.ParentIndex].Center).GetSafeNormal();
-		if (Direction.IsNearlyZero())
-		{
-			return Cluster.Center;
-		}
-
-		TSet<int32> UniqueVertexIndices;
-		double MaximumProjection = TNumericLimits<double>::Lowest();
-		for (const int32 TriangleIndex : Cluster.TriangleIndices)
-		{
-			if (!Triangles.IsValidIndex(TriangleIndex))
-			{
-				continue;
-			}
-			for (const int32 VertexIndex : Triangles[TriangleIndex].VertexIndices)
-			{
-				if (!Vertices.IsValidIndex(VertexIndex))
-				{
-					continue;
-				}
-				UniqueVertexIndices.Add(VertexIndex);
-				MaximumProjection = FMath::Max(
-					MaximumProjection,
-					FVector::DotProduct(Vertices[VertexIndex].Position, Direction));
-			}
-		}
-		if (UniqueVertexIndices.IsEmpty()
-			|| !FMath::IsFinite(MaximumProjection))
-		{
-			return Cluster.Center;
-		}
-
-		const double ProjectionTolerance = FMath::Max3(
-			Cluster.Radius * 0.35,
-			GeometryScale * 0.05,
-			UE_DOUBLE_SMALL_NUMBER);
-		FVector TerminalCenter = FVector::ZeroVector;
-		int32 TerminalVertexCount = 0;
-		for (const int32 VertexIndex : UniqueVertexIndices)
-		{
-			const FVector& Position = Vertices[VertexIndex].Position;
-			const double Projection = FVector::DotProduct(Position, Direction);
-			if (Projection < MaximumProjection - ProjectionTolerance)
-			{
-				continue;
-			}
-			TerminalCenter += Position;
-			++TerminalVertexCount;
-		}
-		return TerminalVertexCount > 0
-			? TerminalCenter / static_cast<double>(TerminalVertexCount)
-			: Cluster.Center;
-	}
-
-	void AddDistinctSurfaceGuidePoint(
-		TArray<FVector>& Polyline,
-		const FVector& Point,
-		const double GeometryScale)
-	{
-		if (Polyline.IsEmpty()
-			|| FVector::DistSquared(Polyline.Last(), Point)
-				> FMath::Square(FMath::Max(GeometryScale * 0.1, UE_DOUBLE_SMALL_NUMBER)))
-		{
-			Polyline.Add(Point);
-		}
-	}
-
 	struct FSkeletonEdgeLocation
 	{
 		int32 EdgeIndex = INDEX_NONE;
-		int32 SegmentIndex = INDEX_NONE;
-		FVector Position = FVector::ZeroVector;
 		double DistanceSquared = TNumericLimits<double>::Max();
 	};
 
@@ -1129,22 +612,11 @@ namespace
 				if (DistanceSquared < Result.DistanceSquared)
 				{
 					Result.EdgeIndex = EdgeIndex;
-					Result.SegmentIndex = SegmentIndex;
-					Result.Position = Candidate;
 					Result.DistanceSquared = DistanceSquared;
 				}
 			}
 		}
 		return Result;
-	}
-
-	double GuideCoverageDistance(
-		const double GuideRadius,
-		const double CellSize)
-	{
-		return FMath::Max(
-			CellSize * 0.75,
-			FMath::Min(GuideRadius * 0.5, CellSize * 1.25));
 	}
 
 	double MeasureDominantPathScore(
@@ -1516,101 +988,6 @@ namespace
 		}
 
 		return NextBranchID;
-	}
-
-	TBitArray<> ThinSparseSkeletonVolume(
-		const int32 RootSparseIndex,
-		const FVector3i& Dimensions,
-		const TArray<int32>& VoxelIndices,
-		const TMap<int32, int32>& SparseIndexByVoxel,
-		const TArray<double>& Radii)
-	{
-		const int32 GridCellCount = Dimensions.X * Dimensions.Y * Dimensions.Z;
-		TBitArray<> Volume(false, GridCellCount);
-		for (const int32 VoxelIndex : VoxelIndices)
-		{
-			Volume[VoxelIndex] = true;
-		}
-		const int32 RootVoxelIndex = VoxelIndices[RootSparseIndex];
-		TBitArray<> Queued(false, GridCellCount);
-		TArray<FQueueEntry> Queue;
-		const FQueueEntryLess QueueEntryLess;
-		for (int32 SparseIndex = 0; SparseIndex < VoxelIndices.Num(); ++SparseIndex)
-		{
-			const int32 VoxelIndex = VoxelIndices[SparseIndex];
-			if (VoxelIndex == RootVoxelIndex
-				|| !IsVolumeBoundaryCell(VoxelIndex, Dimensions, Volume))
-			{
-				continue;
-			}
-			Queue.HeapPush(
-				FQueueEntry{VoxelIndex, Radii[SparseIndex]},
-				QueueEntryLess);
-			Queued[VoxelIndex] = true;
-		}
-
-		while (!Queue.IsEmpty())
-		{
-			FQueueEntry Entry;
-			Queue.HeapPop(Entry, QueueEntryLess, EAllowShrinking::No);
-			Queued[Entry.Index] = false;
-			if (!Volume[Entry.Index]
-				|| Entry.Index == RootVoxelIndex
-				|| !IsVolumeBoundaryCell(Entry.Index, Dimensions, Volume)
-				|| !IsSimpleVolumeCell(Entry.Index, Dimensions, Volume))
-			{
-				continue;
-			}
-			Volume[Entry.Index] = false;
-			const FVector3i Coordinate = GridCoordinate(Entry.Index, Dimensions);
-			for (int32 OffsetZ = -1; OffsetZ <= 1; ++OffsetZ)
-			{
-				for (int32 OffsetY = -1; OffsetY <= 1; ++OffsetY)
-				{
-					for (int32 OffsetX = -1; OffsetX <= 1; ++OffsetX)
-					{
-						if (OffsetX == 0 && OffsetY == 0 && OffsetZ == 0)
-						{
-							continue;
-						}
-						const FVector3i NeighborCoordinate = Coordinate
-							+ FVector3i(OffsetX, OffsetY, OffsetZ);
-						if (!IsInsideGrid(NeighborCoordinate, Dimensions))
-						{
-							continue;
-						}
-						const int32 NeighborVoxelIndex = GridIndex(
-							NeighborCoordinate,
-							Dimensions);
-						if (!Volume[NeighborVoxelIndex]
-							|| NeighborVoxelIndex == RootVoxelIndex
-							|| Queued[NeighborVoxelIndex]
-							|| !IsVolumeBoundaryCell(
-								NeighborVoxelIndex,
-								Dimensions,
-								Volume))
-						{
-							continue;
-						}
-						const int32 NeighborSparseIndex = SparseIndexByVoxel.FindRef(
-							NeighborVoxelIndex);
-						Queue.HeapPush(
-							FQueueEntry{
-								NeighborVoxelIndex,
-								Radii[NeighborSparseIndex]},
-							QueueEntryLess);
-						Queued[NeighborVoxelIndex] = true;
-					}
-				}
-			}
-		}
-
-		TBitArray<> Retained(false, VoxelIndices.Num());
-		for (int32 SparseIndex = 0; SparseIndex < VoxelIndices.Num(); ++SparseIndex)
-		{
-			Retained[SparseIndex] = Volume[VoxelIndices[SparseIndex]];
-		}
-		return Retained;
 	}
 
 	bool BuildSparseGpuSkeletonGraph(
@@ -2119,403 +1496,8 @@ namespace
 	}
 }
 
-TArray<FFoliageBakerTreeSkeletonGuide>
-FFoliageBakerTreeSkeleton::BuildSurfaceGuides(
-	const TArray<FFoliageBakerTreeSkeletonTriangle>& Triangles,
-	const int32 SourceComponentID,
-	const double GeometryScale,
-	const FVector& Pivot)
-{
-	TArray<FFoliageBakerTreeSkeletonGuide> Result;
-	if (Triangles.IsEmpty() || GeometryScale <= UE_DOUBLE_SMALL_NUMBER)
-	{
-		return Result;
-	}
-
-	TArray<int32> TriangleOrder;
-	TriangleOrder.Reserve(Triangles.Num());
-	for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
-	{
-		if (!Triangles[TriangleIndex].A.ContainsNaN()
-			&& !Triangles[TriangleIndex].B.ContainsNaN()
-			&& !Triangles[TriangleIndex].C.ContainsNaN())
-		{
-			TriangleOrder.Add(TriangleIndex);
-		}
-	}
-	TriangleOrder.Sort(
-		[&Triangles](const int32 First, const int32 Second)
-		{
-			return Triangles[First].SourceTriangleID
-				< Triangles[Second].SourceTriangleID;
-		});
-	if (TriangleOrder.IsEmpty())
-	{
-		return Result;
-	}
-
-	TMap<FVector3f, int32> VertexIndexByPosition;
-	TArray<FSurfaceVertex> Vertices;
-	TArray<FSurfaceTriangle> SurfaceTriangles;
-	SurfaceTriangles.Reserve(TriangleOrder.Num());
-	TMap<uint64, int32> EdgeUseCounts;
-	TMap<uint64, TArray<int32>> TriangleIndicesByEdge;
-	for (const int32 SourceTriangleIndex : TriangleOrder)
-	{
-		const FFoliageBakerTreeSkeletonTriangle& SourceTriangle =
-			Triangles[SourceTriangleIndex];
-		FSurfaceTriangle& Triangle = SurfaceTriangles.AddDefaulted_GetRef();
-		Triangle.SourceTriangleID = SourceTriangle.SourceTriangleID;
-		Triangle.VertexIndices[0] = AddSurfaceVertex(
-			SourceTriangle.A,
-			VertexIndexByPosition,
-			Vertices);
-		Triangle.VertexIndices[1] = AddSurfaceVertex(
-			SourceTriangle.B,
-			VertexIndexByPosition,
-			Vertices);
-		Triangle.VertexIndices[2] = AddSurfaceVertex(
-			SourceTriangle.C,
-			VertexIndexByPosition,
-			Vertices);
-		const int32 LocalTriangleIndex = SurfaceTriangles.Num() - 1;
-		for (const int32 VertexIndex : Triangle.VertexIndices)
-		{
-			Vertices[VertexIndex].IncidentTriangles.Add(LocalTriangleIndex);
-		}
-		for (int32 EdgeIndex = 0; EdgeIndex < 3; ++EdgeIndex)
-		{
-			const int32 First = Triangle.VertexIndices[EdgeIndex];
-			const int32 Second = Triangle.VertexIndices[(EdgeIndex + 1) % 3];
-			if (First == Second)
-			{
-				continue;
-			}
-			AddSurfaceNeighbor(First, Second, Vertices);
-			const uint64 EdgeKey = SurfaceEdgeKey(First, Second);
-			EdgeUseCounts.FindOrAdd(EdgeKey) += 1;
-			TriangleIndicesByEdge.FindOrAdd(EdgeKey).Add(LocalTriangleIndex);
-		}
-	}
-	if (Vertices.Num() < 2 || SurfaceTriangles.IsEmpty())
-	{
-		return Result;
-	}
-	for (const TPair<uint64, int32>& EdgeUseCount : EdgeUseCounts)
-	{
-		if (EdgeUseCount.Value != 1)
-		{
-			continue;
-		}
-		const int32 First = static_cast<int32>(EdgeUseCount.Key >> 32);
-		const int32 Second = static_cast<int32>(EdgeUseCount.Key & 0xffffffffu);
-		if (Vertices.IsValidIndex(First) && Vertices.IsValidIndex(Second))
-		{
-			Vertices[First].BoundaryNeighbors.AddUnique(Second);
-			Vertices[Second].BoundaryNeighbors.AddUnique(First);
-		}
-	}
-
-	const TArray<int32> RootVertices = SelectSurfaceRootVertices(
-		Vertices,
-		EdgeUseCounts,
-		Pivot,
-		GeometryScale);
-	if (RootVertices.IsEmpty())
-	{
-		return Result;
-	}
-	TArray<double> VertexRootDistances;
-	MeasureSurfaceRootDistances(Vertices, RootVertices, VertexRootDistances);
-	double MaximumRootDistance = 0.0;
-	for (const double Distance : VertexRootDistances)
-	{
-		if (FMath::IsFinite(Distance))
-		{
-			MaximumRootDistance = FMath::Max(MaximumRootDistance, Distance);
-		}
-	}
-	if (MaximumRootDistance <= UE_DOUBLE_SMALL_NUMBER)
-	{
-		return Result;
-	}
-	const double BandSize = FMath::Max(
-		GeometryScale * 2.0,
-		MaximumRootDistance / 160.0);
-	for (FSurfaceTriangle& Triangle : SurfaceTriangles)
-	{
-		TStaticArray<double, 3> Distances = {
-			VertexRootDistances[Triangle.VertexIndices[0]],
-			VertexRootDistances[Triangle.VertexIndices[1]],
-			VertexRootDistances[Triangle.VertexIndices[2]]};
-		if (Distances[0] > Distances[1])
-		{
-			Swap(Distances[0], Distances[1]);
-		}
-		if (Distances[1] > Distances[2])
-		{
-			Swap(Distances[1], Distances[2]);
-		}
-		if (Distances[0] > Distances[1])
-		{
-			Swap(Distances[0], Distances[1]);
-		}
-		Triangle.BandIndex = FMath::Max(
-			0,
-			FMath::FloorToInt(Distances[1] / BandSize));
-	}
-
-	FSurfaceDisjointSet TriangleSets(SurfaceTriangles.Num());
-	for (const FSurfaceVertex& Vertex : Vertices)
-	{
-		for (int32 FirstIndex = 0;
-			FirstIndex < Vertex.IncidentTriangles.Num();
-			++FirstIndex)
-		{
-			const int32 FirstTriangleIndex =
-				Vertex.IncidentTriangles[FirstIndex];
-			for (int32 SecondIndex = FirstIndex + 1;
-				SecondIndex < Vertex.IncidentTriangles.Num();
-				++SecondIndex)
-			{
-				const int32 SecondTriangleIndex =
-					Vertex.IncidentTriangles[SecondIndex];
-				if (SurfaceTriangles[FirstTriangleIndex].BandIndex
-					== SurfaceTriangles[SecondTriangleIndex].BandIndex)
-				{
-					TriangleSets.Union(FirstTriangleIndex, SecondTriangleIndex);
-				}
-			}
-		}
-	}
-
-	TMap<int32, int32> ClusterIndexBySetRoot;
-	TArray<FSurfaceCluster> Clusters;
-	for (int32 TriangleIndex = 0;
-		TriangleIndex < SurfaceTriangles.Num();
-		++TriangleIndex)
-	{
-		const int32 SetRoot = TriangleSets.Find(TriangleIndex);
-		int32 ClusterIndexPlusOne = ClusterIndexBySetRoot.FindRef(SetRoot);
-		if (ClusterIndexPlusOne == 0)
-		{
-			ClusterIndexPlusOne = Clusters.Num() + 1;
-			Clusters.AddDefaulted();
-			ClusterIndexBySetRoot.Add(SetRoot, ClusterIndexPlusOne);
-		}
-		const int32 ClusterIndex = ClusterIndexPlusOne - 1;
-		SurfaceTriangles[TriangleIndex].ClusterIndex = ClusterIndex;
-		Clusters[ClusterIndex].TriangleIndices.Add(TriangleIndex);
-	}
-	for (FSurfaceCluster& Cluster : Clusters)
-	{
-		BuildSurfaceClusterGeometry(SurfaceTriangles, Vertices, Cluster);
-	}
-
-	TMap<uint64, int32> ClusterPairSupport;
-	for (const FSurfaceVertex& Vertex : Vertices)
-	{
-		TArray<int32> IncidentClusters;
-		for (const int32 TriangleIndex : Vertex.IncidentTriangles)
-		{
-			IncidentClusters.AddUnique(
-				SurfaceTriangles[TriangleIndex].ClusterIndex);
-		}
-		IncidentClusters.Sort();
-		for (int32 FirstIndex = 0;
-			FirstIndex < IncidentClusters.Num();
-			++FirstIndex)
-		{
-			for (int32 SecondIndex = FirstIndex + 1;
-				SecondIndex < IncidentClusters.Num();
-				++SecondIndex)
-			{
-				const int32 FirstClusterIndex = IncidentClusters[FirstIndex];
-				const int32 SecondClusterIndex = IncidentClusters[SecondIndex];
-				if (FirstClusterIndex == SecondClusterIndex)
-				{
-					continue;
-				}
-				const uint64 PairKey = SurfaceClusterPairKey(
-					FirstClusterIndex,
-					SecondClusterIndex);
-				ClusterPairSupport.FindOrAdd(PairKey) += 1;
-			}
-		}
-	}
-	for (const TPair<uint64, int32>& PairSupport : ClusterPairSupport)
-	{
-		const int32 First = static_cast<int32>(PairSupport.Key >> 32);
-		const int32 Second = static_cast<int32>(PairSupport.Key & 0xffffffffu);
-		if (Clusters.IsValidIndex(First) && Clusters.IsValidIndex(Second))
-		{
-			Clusters[First].Neighbors.AddUnique(Second);
-			Clusters[Second].Neighbors.AddUnique(First);
-		}
-	}
-
-	int32 RootClusterIndex = INDEX_NONE;
-	int32 RootClusterTriangleID = MAX_int32;
-	for (const int32 RootVertexIndex : RootVertices)
-	{
-		for (const int32 TriangleIndex : Vertices[RootVertexIndex].IncidentTriangles)
-		{
-			const int32 ClusterIndex = SurfaceTriangles[TriangleIndex].ClusterIndex;
-			if (Clusters[ClusterIndex].MinimumSourceTriangleID < RootClusterTriangleID)
-			{
-				RootClusterTriangleID = Clusters[ClusterIndex].MinimumSourceTriangleID;
-				RootClusterIndex = ClusterIndex;
-			}
-		}
-	}
-	if (!Clusters.IsValidIndex(RootClusterIndex))
-	{
-		return Result;
-	}
-
-	TArray<FSurfaceQueueEntry> ClusterQueue;
-	const FSurfaceQueueEntryLess QueueEntryLess;
-	Clusters[RootClusterIndex].RootDistance = 0.0;
-	ClusterQueue.HeapPush(
-		FSurfaceQueueEntry{RootClusterIndex, 0.0},
-		QueueEntryLess);
-	while (!ClusterQueue.IsEmpty())
-	{
-		FSurfaceQueueEntry Entry;
-		ClusterQueue.HeapPop(Entry, QueueEntryLess, EAllowShrinking::No);
-		if (Entry.Distance > Clusters[Entry.Index].RootDistance)
-		{
-			continue;
-		}
-		for (const int32 NeighborIndex : Clusters[Entry.Index].Neighbors)
-		{
-			const double StepLength = FMath::Max(
-				FVector::Distance(
-					Clusters[Entry.Index].Center,
-					Clusters[NeighborIndex].Center),
-				GeometryScale * 0.1);
-			const double CandidateDistance = Entry.Distance + StepLength;
-			const bool bShorter = CandidateDistance
-				< Clusters[NeighborIndex].RootDistance - UE_DOUBLE_SMALL_NUMBER;
-			const bool bStableTie = FMath::IsNearlyEqual(
-				CandidateDistance,
-				Clusters[NeighborIndex].RootDistance,
-				UE_DOUBLE_SMALL_NUMBER)
-				&& (Clusters[NeighborIndex].ParentIndex == INDEX_NONE
-					|| Clusters[Entry.Index].MinimumSourceTriangleID
-						< Clusters[Clusters[NeighborIndex].ParentIndex]
-							.MinimumSourceTriangleID);
-			if (!bShorter && !bStableTie)
-			{
-				continue;
-			}
-			Clusters[NeighborIndex].RootDistance = CandidateDistance;
-			Clusters[NeighborIndex].ParentIndex = Entry.Index;
-			ClusterQueue.HeapPush(
-				FSurfaceQueueEntry{NeighborIndex, CandidateDistance},
-				QueueEntryLess);
-		}
-	}
-	for (int32 ClusterIndex = 0; ClusterIndex < Clusters.Num(); ++ClusterIndex)
-	{
-		const int32 ParentIndex = Clusters[ClusterIndex].ParentIndex;
-		if (Clusters.IsValidIndex(ParentIndex))
-		{
-			Clusters[ParentIndex].ChildIndices.Add(ClusterIndex);
-		}
-	}
-	for (FSurfaceCluster& Cluster : Clusters)
-	{
-		Cluster.ChildIndices.Sort(
-			[&Clusters](const int32 First, const int32 Second)
-			{
-				return Clusters[First].MinimumSourceTriangleID
-					< Clusters[Second].MinimumSourceTriangleID;
-			});
-	}
-
-	TArray<int32> PendingForkIndices;
-	PendingForkIndices.Add(RootClusterIndex);
-	for (int32 PendingIndex = 0;
-		PendingIndex < PendingForkIndices.Num();
-		++PendingIndex)
-	{
-		const int32 ForkClusterIndex = PendingForkIndices[PendingIndex];
-		for (const int32 FirstChildIndex :
-			Clusters[ForkClusterIndex].ChildIndices)
-		{
-			TArray<FVector> Polyline;
-			TArray<double> Radii;
-			AddDistinctSurfaceGuidePoint(
-				Polyline,
-				Clusters[ForkClusterIndex].Center,
-				GeometryScale);
-			Radii.Add(Clusters[ForkClusterIndex].Radius);
-			int32 CurrentClusterIndex = FirstChildIndex;
-			while (Clusters.IsValidIndex(CurrentClusterIndex))
-			{
-				const FVector GuidePoint =
-					Clusters[CurrentClusterIndex].ChildIndices.IsEmpty()
-						? FindSurfaceTerminalCenter(
-							CurrentClusterIndex,
-							Clusters,
-							SurfaceTriangles,
-							Vertices,
-							GeometryScale)
-						: Clusters[CurrentClusterIndex].Center;
-				AddDistinctSurfaceGuidePoint(
-					Polyline,
-					GuidePoint,
-					GeometryScale);
-				Radii.Add(Clusters[CurrentClusterIndex].Radius);
-				if (Clusters[CurrentClusterIndex].ChildIndices.Num() != 1)
-				{
-					break;
-				}
-				CurrentClusterIndex =
-					Clusters[CurrentClusterIndex].ChildIndices[0];
-			}
-			if (Clusters.IsValidIndex(CurrentClusterIndex)
-				&& !Clusters[CurrentClusterIndex].ChildIndices.IsEmpty())
-			{
-				PendingForkIndices.Add(CurrentClusterIndex);
-			}
-			if (Polyline.Num() < 2)
-			{
-				continue;
-			}
-			SmoothAndSimplifyPolyline(Polyline, GeometryScale);
-			const double Length = PolylineLength(Polyline);
-			if (!FMath::IsFinite(Length)
-				|| Length < GeometryScale * 0.5)
-			{
-				continue;
-			}
-			const double RootRadius = Radii[0];
-			const double TipRadius = Radii.Last();
-			Radii.Sort();
-			FFoliageBakerTreeSkeletonGuide& Guide =
-				Result.AddDefaulted_GetRef();
-			Guide.SourceComponentID = SourceComponentID;
-			Guide.bRooted = true;
-			Guide.EndpointRadii[0] = FMath::Max(
-				GeometryScale,
-				RootRadius);
-			Guide.EndpointRadii[1] = FMath::Max(
-				GeometryScale,
-				TipRadius);
-			Guide.Radius = FMath::Max(
-				GeometryScale,
-				Radii[Radii.Num() / 2]);
-			Guide.Polyline = MoveTemp(Polyline);
-		}
-	}
-	return Result;
-}
-
 FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 	const TArray<FFoliageBakerTreeSkeletonTriangle>& Triangles,
-	const TArray<FFoliageBakerTreeSkeletonGuide>& Guides,
 	const FVector& Pivot)
 {
 	FFoliageBakerTreeSkeletonResult Result;
@@ -2533,11 +1515,6 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 		FVector WorstPosition = FVector::ZeroVector;
 	};
 	TMap<int32, FCoverageDiagnostic> CoverageByComponent;
-	TMap<int32, int32> GuideCountByComponent;
-	for (const FFoliageBakerTreeSkeletonGuide& Guide : Guides)
-	{
-		GuideCountByComponent.FindOrAdd(Guide.SourceComponentID) += 1;
-	}
 	for (const FFoliageBakerTreeSkeletonTriangle& Triangle : Triangles)
 	{
 		if (Triangle.A.ContainsNaN()
@@ -2596,52 +1573,19 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 		SolidTriangle.C = FVector(SolidMesh.GetVertex(Triangle.C));
 	}
 
-	FFoliageBakerGpuTreeSkeletonResult GpuSkeleton;
-	if (bUseGpuSkeleton)
-	{
-		GpuSkeleton = FFoliageBakerTreeSkeletonGpu::Build(
+	const FFoliageBakerGpuTreeSkeletonResult GpuSkeleton =
+		FFoliageBakerTreeSkeletonGpu::Build(
 			SolidTriangles,
 			FBox(FVector(SourceBounds.Min), FVector(SourceBounds.Max)),
 			Pivot,
 			TargetVoxelResolution);
-	}
-	if (bUseGpuSkeleton
-		&& GpuSkeleton.bSucceeded
+	if (GpuSkeleton.bSucceeded
 		&& BuildSparseGpuSkeletonGraph(
 			GpuSkeleton,
 			Pivot,
 			SourceSpatial,
 			Result))
 	{
-		for (const FFoliageBakerTreeSkeletonGuide& Guide : Guides)
-		{
-			if (Guide.Polyline.IsEmpty())
-			{
-				continue;
-			}
-			const double CoverageDistance = GuideCoverageDistance(
-				FMath::Max(Guide.Radius, Result.CellSize * 0.1),
-				Result.CellSize);
-			const TStaticArray<FVector, 2> Endpoints{
-				Guide.Polyline[0],
-				Guide.Polyline.Last()};
-			const FSkeletonEdgeLocation TerminalLocation =
-				FindClosestSkeletonEdgeLocation(Guide.Polyline.Last(), Result.Edges);
-			Result.UncoveredGuideTerminalCount +=
-				TerminalLocation.DistanceSquared > FMath::Square(CoverageDistance)
-					? 1
-					: 0;
-			for (const FVector& Endpoint : Endpoints)
-			{
-				const FSkeletonEdgeLocation Location =
-					FindClosestSkeletonEdgeLocation(Endpoint, Result.Edges);
-				Result.UncoveredGuideEndpointCount +=
-					Location.DistanceSquared > FMath::Square(CoverageDistance)
-						? 1
-						: 0;
-			}
-		}
-
 		for (const FFoliageBakerTreeSkeletonTriangle& Triangle : Triangles)
 		{
 			if (Triangle.A.ContainsNaN()
@@ -2677,19 +1621,17 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 			if (TriangleMaximumRatio > 1.75)
 			{
 				++Result.UncoveredWoodTriangleCount;
-				Result.UncoveredWoodSourceTriangleIDs.Add(Triangle.SourceTriangleID);
 			}
 		}
 
 		const int32 BranchCount = ApplyTreeSemantics(Pivot, Result);
 		Result.bSucceeded = !Result.Nodes.IsEmpty() && !Result.Edges.IsEmpty();
 		Result.Report = FString::Printf(
-			TEXT("%s %d node(s), %d edge(s), %d branch group(s), %d uncovered guide terminal(s), %d uncovered wood triangle(s), %.2f maximum wood coverage ratio."),
+			TEXT("%s %d node(s), %d edge(s), %d branch group(s), %d uncovered wood triangle(s), %.2f maximum wood coverage ratio."),
 			*GpuSkeleton.Report,
 			Result.Nodes.Num(),
 			Result.Edges.Num(),
 			BranchCount,
-			Result.UncoveredGuideTerminalCount,
 			Result.UncoveredWoodTriangleCount,
 			Result.MaximumWoodCoverageRatio);
 		return Result;
@@ -3295,37 +2237,6 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 			Result.Nodes[Edge.EndNodeID].ParentNodeID = StartNodeID;
 		}
 	}
-	// Surface guides are diagnostics for this high-resolution voxel pass. They must
-	// not create topology by connecting to the nearest existing skeleton edge.
-	for (const FFoliageBakerTreeSkeletonGuide& Guide : Guides)
-	{
-		const double CoverageDistance = GuideCoverageDistance(
-			FMath::Max(Guide.Radius, CellSize * 0.1),
-			CellSize);
-		if (Guide.Polyline.IsEmpty())
-		{
-			continue;
-		}
-		const TStaticArray<FVector, 2> Endpoints{
-			Guide.Polyline[0],
-			Guide.Polyline.Last()};
-		const FSkeletonEdgeLocation TerminalLocation =
-			FindClosestSkeletonEdgeLocation(Guide.Polyline.Last(), Result.Edges);
-		Result.UncoveredGuideTerminalCount +=
-			TerminalLocation.DistanceSquared > FMath::Square(CoverageDistance)
-				? 1
-				: 0;
-		for (const FVector& Endpoint : Endpoints)
-		{
-			const FSkeletonEdgeLocation Location =
-				FindClosestSkeletonEdgeLocation(Endpoint, Result.Edges);
-			Result.UncoveredGuideEndpointCount +=
-				Location.DistanceSquared > FMath::Square(CoverageDistance)
-					? 1
-					: 0;
-		}
-	}
-
 	const int32 BranchCount = ApplyTreeSemantics(Pivot, Result);
 
 	for (const FFoliageBakerTreeSkeletonTriangle& Triangle : Triangles)
@@ -3366,8 +2277,6 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 		if (TriangleMaximumRatio > 1.75)
 		{
 			++Result.UncoveredWoodTriangleCount;
-			Result.UncoveredWoodSourceTriangleIDs.Add(
-				Triangle.SourceTriangleID);
 			FCoverageDiagnostic& Diagnostic =
 				CoverageByComponent.FindOrAdd(Triangle.SourceComponentID);
 			++Diagnostic.TriangleCount;
@@ -3403,26 +2312,20 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 		const FCoverageDiagnostic Diagnostic =
 			CoverageByComponent.FindRef(ComponentID);
 		CoverageDiagnostics.Add(FString::Printf(
-			TEXT("%d:%d/%.2f/g%d@%s"),
+			TEXT("%d:%d/%.2f@%s"),
 			ComponentID,
 			Diagnostic.TriangleCount,
 			Diagnostic.MaximumRatio,
-			GuideCountByComponent.FindRef(ComponentID),
 			*Diagnostic.WorstPosition.ToCompactString()));
 	}
 
 	Result.bSucceeded = !Result.Nodes.IsEmpty() && !Result.Edges.IsEmpty();
 	Result.Report = FString::Printf(
-		TEXT("hybrid skeleton: %d occupied cell(s), %d volume component(s), %d connected component(s), %d connected interior cell(s), %d recovered local guide(s), %d unresolved local guide(s) [%s], %d uncovered local guide terminal(s), %d uncovered local guide endpoint(s), %d uncovered wood triangle(s) [%s], %.2f maximum wood coverage ratio, %d node(s), %d edge(s), %d branch group(s), %.3f cm global cell size"),
+		TEXT("fallback voxel skeleton: %d occupied cell(s), %d volume component(s), %d connected component(s), %d connected interior cell(s), %d uncovered wood triangle(s) [%s], %.2f maximum wood coverage ratio, %d node(s), %d edge(s), %d branch group(s), %.3f cm global cell size"),
 		Result.OccupiedVoxelCount,
 		Result.OccupiedComponentCount,
 		Result.ConnectedComponentCount,
 		Result.ConnectedInteriorVoxelCount,
-		Result.RecoveredGuideCount,
-		Result.UnresolvedGuideCount,
-		*FString::Join(Result.UnresolvedGuideDiagnostics, TEXT(",")),
-		Result.UncoveredGuideTerminalCount,
-		Result.UncoveredGuideEndpointCount,
 		Result.UncoveredWoodTriangleCount,
 		*FString::Join(CoverageDiagnostics, TEXT(",")),
 		Result.MaximumWoodCoverageRatio,

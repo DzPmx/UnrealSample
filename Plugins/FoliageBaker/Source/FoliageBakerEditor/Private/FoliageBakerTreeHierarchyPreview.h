@@ -5,6 +5,7 @@
 #include "SEditorViewport.h"
 
 class FFoliageBakerTreeHierarchyViewportClient;
+struct FFoliageBakerResolvedLeafCluster;
 struct FFoliageBakerTreeHierarchyPreviewData;
 
 class SFoliageBakerTreeHierarchyPreview final : public SEditorViewport
@@ -22,6 +23,8 @@ public:
 		TSharedPtr<const FFoliageBakerTreeHierarchyPreviewData> InPreviewData,
 		bool bFrameCamera = true);
 	void SetHighlightedBranchIDs(const TSet<int32>& InBranchIDs);
+	void SetResolvedLeaves(
+		const TArray<FFoliageBakerResolvedLeafCluster>& InResolvedLeaves);
 	void SetDebugDrawingEnabled(bool bInEnabled);
 	void ClearPreview();
 

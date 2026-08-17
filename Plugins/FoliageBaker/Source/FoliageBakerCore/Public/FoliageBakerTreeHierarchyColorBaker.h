@@ -1,9 +1,6 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/StrongObjectPtr.h"
-
-class UObject;
 class UStaticMesh;
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewCylinder
@@ -47,10 +44,24 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewJoint
 	double Radius = 1.0;
 };
 
+struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyBoneRecord
+{
+	int32 BakeID = INDEX_NONE;
+	int32 ParentBakeID = INDEX_NONE;
+	FVector PivotPosition = FVector::ZeroVector;
+	FVector Axis = FVector::ZeroVector;
+	double MinimumAxisProjection = 0.0;
+	double PositiveAxisExtent = 0.0;
+	double AxisExtent = 0.0;
+};
+
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewBranch
 {
 	int32 BranchID = INDEX_NONE;
 	int32 ParentBranchID = INDEX_NONE;
+	FFoliageBakerTreeHierarchyBoneRecord BoneRecord;
+	FVector StartPosition = FVector::ZeroVector;
+	FVector EndPosition = FVector::ZeroVector;
 	FLinearColor Color = FLinearColor::White;
 	FString Label;
 	FVector LabelPosition = FVector::ZeroVector;
@@ -59,12 +70,21 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewBranch
 	TArray<int32> SourceTriangleIDs;
 };
 
-struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewLeafCluster
+struct FOLIAGEBAKERCORE_API FFoliageBakerLeafTemplateAnnotation
 {
-	int32 ParentBranchID = INDEX_NONE;
-	FBox Bounds = FBox(EForceInit::ForceInit);
+	FString UVIslandSignature;
+	TSet<FString> TriangleSignatures;
+	FVector2f PivotUV = FVector2f::ZeroVector;
+	FVector2f TipUV = FVector2f::ZeroVector;
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerResolvedLeafCluster
+{
+	FString UVIslandSignature;
 	TArray<int32> SourceTriangleIDs;
-	TArray<FVector3f> TrianglePositions;
+	FVector PivotPosition = FVector::ZeroVector;
+	FVector TipPosition = FVector::ZeroVector;
+	int32 ParentBranchID = INDEX_NONE;
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewData
@@ -76,34 +96,60 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewData
 	int32 RootNodeID = INDEX_NONE;
 	double SkeletonCellSize = 0.0;
 	int32 WoodVolumeComponentCount = 0;
-	int32 UncoveredGuideTerminalCount = 0;
 	TArray<FFoliageBakerTreeHierarchyPreviewNode> SkeletonNodes;
 	TArray<FFoliageBakerTreeHierarchyPreviewEdge> SkeletonEdges;
 	TArray<FFoliageBakerTreeHierarchyPreviewBranch> Branches;
-	TArray<FFoliageBakerTreeHierarchyPreviewLeafCluster> LeafClusters;
 };
 
-struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyColorBakeResult
+struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyAnalysisResult
 {
 	bool bSucceeded = false;
 	bool bCancelled = false;
 	int32 BranchCount = 0;
-	int32 LeafClusterCount = 0;
 	TSharedPtr<FFoliageBakerTreeHierarchyPreviewData> PreviewData;
-	TArray<TStrongObjectPtr<UObject>> CreatedAssets;
+	FString Report;
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerLeafOwnershipResolveResult
+{
+	bool bSucceeded = false;
+	int32 PhysicalLeafClusterCount = 0;
+	int32 ResolvedLeafClusterCount = 0;
+	int32 UnresolvedLeafClusterCount = 0;
+	TArray<FFoliageBakerResolvedLeafCluster> ResolvedLeafClusters;
+	FString Report;
+};
+
+struct FOLIAGEBAKERCORE_API FFoliageBakerWindDataBakeResult
+{
+	bool bSucceeded = false;
+	int32 BoneRecordCount = 0;
+	int32 BranchBoneCount = 0;
+	int32 LeafBoneCount = 0;
+	int32 UnassignedTriangleCount = 0;
+	FString PivotPositionTexturePath;
+	FString PivotAxisTexturePath;
 	FString Report;
 };
 
 class FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyColorBaker final
 {
 public:
-	static FFoliageBakerTreeHierarchyColorBakeResult Bake(
-		UStaticMesh& StaticMesh,
-		int32 SourceLODIndex);
-
-	static bool MarkBranchAsTrunk(
+	static FFoliageBakerTreeHierarchyAnalysisResult Analyze(
 		UStaticMesh& StaticMesh,
 		int32 SourceLODIndex,
-		const TArray<int32>& SourceTriangleIDs,
-		FString& OutError);
+		int32 LeafMaterialIndex);
+
+	static FFoliageBakerLeafOwnershipResolveResult ResolveLeafOwnership(
+		const UStaticMesh& StaticMesh,
+		int32 SourceLODIndex,
+		int32 LeafMaterialIndex,
+		const FFoliageBakerTreeHierarchyPreviewData& AnalysisData,
+		const TArray<FFoliageBakerLeafTemplateAnnotation>& Annotations);
+
+	static FFoliageBakerWindDataBakeResult BakeWindData(
+		UStaticMesh& StaticMesh,
+		int32 SourceLODIndex,
+		const FFoliageBakerTreeHierarchyPreviewData& AnalysisData,
+		const TArray<FFoliageBakerResolvedLeafCluster>& ResolvedLeafClusters);
 };

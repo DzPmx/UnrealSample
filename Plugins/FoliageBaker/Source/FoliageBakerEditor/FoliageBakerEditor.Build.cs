@@ -19,11 +19,13 @@ public class FoliageBakerEditor : ModuleRules
 			new string[]
 			{
 				"InputCore",
+				"MeshDescription",
 				"RenderCore",
 				"Slate",
 				"SlateCore",
 				"ToolMenus",
 				"Settings",
+				"StaticMeshDescription",
 				"PropertyEditor",
 				"EditorFramework",
 				"UnrealEd",

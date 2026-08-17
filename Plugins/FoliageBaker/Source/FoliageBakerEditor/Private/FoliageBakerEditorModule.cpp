@@ -7,19 +7,21 @@
 #include "FoliageBakerImpostorModule.h"
 #include "FoliageBakerImpostorSettings.h"
 #include "FoliageBakerFeatureTool.h"
+#include "FoliageBakerLeafUVPreview.h"
 #include "FoliageBakerTreeHierarchyColorBaker.h"
 #include "FoliageBakerTreeHierarchyPreview.h"
 #include "FoliageBakerTreeHierarchySettings.h"
+#include "AssetRegistry/AssetData.h"
 #include "DetailLayoutBuilder.h"
+#include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "HAL/IConsoleManager.h"
 #include "IDetailCustomization.h"
 #include "ISettingsModule.h"
-#include "Misc/MessageDialog.h"
+#include "PropertyCustomizationHelpers.h"
 #include "PropertyEditorModule.h"
-#include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
 #include "Templates/SubclassOf.h"
 #include "ToolMenus.h"
@@ -29,13 +31,16 @@
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SNumericEntryBox.h"
 #include "Widgets/Input/SSegmentedControl.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSplitter.h"
+#include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SNullWidget.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Views/SListView.h"
 
@@ -217,6 +222,9 @@ namespace
 void FFoliageBakerEditorModule::StartupModule()
 {
 	RegisterEditorPreferences();
+	FEditorDelegates::OnEditorPreExit.AddRaw(
+		this,
+		&FFoliageBakerEditorModule::HandleEditorPreExit);
 
 	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
 		FoliageBakerToolTabName,
@@ -229,7 +237,7 @@ void FFoliageBakerEditorModule::StartupModule()
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FFoliageBakerEditorModule::RegisterMenus));
 	DebugPreviewCommand = MakeUnique<FAutoConsoleCommand>(
 		TEXT("FoliageBaker.DebugPreview"),
-		TEXT("Bake one Static Mesh object path and open the hierarchy tool for visual debugging."),
+		TEXT("Open one Static Mesh object path in the hierarchy tool. Select the Leaf Material Section, then run Analyze Hierarchy."),
 		FConsoleCommandWithArgsDelegate::CreateLambda(
 			[this](const TArray<FString>& Arguments)
 			{
@@ -242,31 +250,16 @@ void FFoliageBakerEditorModule::StartupModule()
 				{
 					return;
 				}
-				EnsureDataBakeSettings();
-				DataBakeSettings->SourceStaticMeshes.Reset();
-				DataBakeSettings->SourceStaticMeshes.Add(StaticMesh);
-				const FFoliageBakerTreeHierarchyColorBakeResult Result =
-					FFoliageBakerTreeHierarchyColorBaker::Bake(
-						*StaticMesh,
-						DataBakeSettings->SourceLODIndex);
-				if (!Result.bSucceeded || !Result.PreviewData.IsValid())
-				{
-					return;
-				}
 				FGlobalTabmanager::Get()->TryInvokeTab(FoliageBakerToolTabName);
-				DataBakeSettings->SourceStaticMeshes.Reset();
-				DataBakeSettings->SourceStaticMeshes.Add(StaticMesh);
-				DataBakePreviewData = Result.PreviewData;
-				RefreshDataBakeBranchOptions();
-				if (DataBakePreview.IsValid())
-				{
-					DataBakePreview->SetPreviewData(Result.PreviewData);
-				}
+				EnsureDataBakeSettings();
+				DataBakeSettings->SourceStaticMesh = StaticMesh;
+				RefreshDataBakeSourceInput();
 			}));
 }
 
 void FFoliageBakerEditorModule::ShutdownModule()
 {
+	FEditorDelegates::OnEditorPreExit.RemoveAll(this);
 	UnregisterEditorPreferences();
 	DebugPreviewCommand.Reset();
 
@@ -280,10 +273,20 @@ void FFoliageBakerEditorModule::ShutdownModule()
 		}
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(FoliageBakerToolTabName);
 	}
+	ReleaseToolResources();
+}
+
+void FFoliageBakerEditorModule::HandleEditorPreExit()
+{
+	ReleaseToolResources();
+}
+
+void FFoliageBakerEditorModule::ReleaseToolResources()
+{
 	WorkflowSwitcher.Reset();
 	FeatureSwitcher.Reset();
-	DataBakeController.Reset();
 	DataBakePreview.Reset();
+	DataBakeLeafUVPreview.Reset();
 	DataBakePreviewData.Reset();
 	DataBakeBranchOptions.Reset();
 	SelectedDataBakeBranchIDs.Reset();
@@ -594,50 +597,31 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 {
 	EnsureDataBakeSettings();
-	DataBakeSettings->SourceStaticMeshes.Reset();
+	DataBakeSettings->SourceStaticMesh = nullptr;
 	DataBakePreviewData.Reset();
 	DataBakeBranchOptions.Reset();
 	SelectedDataBakeBranchIDs.Reset();
 	DataBakeBranchList.Reset();
 
-	FFoliageBakerFeatureControllerArgs ControllerArgs;
-	ControllerArgs.SettingsObject.Reset(DataBakeSettings.Get());
-	ControllerArgs.GetSourceStaticMeshes =
-		[Settings = DataBakeSettings]() -> TArray<TObjectPtr<UStaticMesh>>&
-		{
-			return Settings->SourceStaticMeshes;
-		};
-	ControllerArgs.BakeButtonText = LOCTEXT(
-		"BakeTreeHierarchyColorsButton",
-		"Write Test Vertex Colors");
-	ControllerArgs.BakeButtonTooltip = LOCTEXT(
-		"BakeTreeHierarchyColorsTooltip",
-		"Recognize the three-level tree hierarchy, overwrite the selected source LOD vertex colors, and refresh the Hierarchy View.");
-	ControllerArgs.RequirementsHint = LOCTEXT(
-		"TreeHierarchyColorsRequirements",
-		"Queue at least one Static Mesh. The selected source LOD must contain separate card-foliage and wood materials.");
-	ControllerArgs.AddMeshesTransactionText = LOCTEXT(
-		"AddTreeHierarchySourceMeshesTransaction",
-		"Add Tree Hierarchy Test Source Meshes");
-	ControllerArgs.ClearMeshesTransactionText = LOCTEXT(
-		"ClearTreeHierarchySourceMeshesTransaction",
-		"Clear Tree Hierarchy Test Source Meshes");
-	ControllerArgs.CanBake =
-		FFoliageBakerFeaturePredicateDelegate::CreateLambda(
-			[this]()
-			{
-				return CanBakeTreeHierarchyColors();
-			});
-	ControllerArgs.Bake =
-		FFoliageBakerFeatureActionDelegate::CreateLambda(
-			[this]()
-			{
-				BakeTreeHierarchyColors();
-			});
-	DataBakeController = FFoliageBakerFeatureController::Create(ControllerArgs);
 	SAssignNew(DataBakePreview, SFoliageBakerTreeHierarchyPreview);
 	const TWeakPtr<SFoliageBakerTreeHierarchyPreview> WeakDataBakePreview =
 		DataBakePreview;
+	SAssignNew(DataBakeLeafUVPreview, SFoliageBakerLeafUVPreview)
+		.OnResolvedLeavesChanged_Lambda(
+			[WeakDataBakePreview](
+				const TArray<FFoliageBakerResolvedLeafCluster>& ResolvedLeaves)
+			{
+				if (const TSharedPtr<SFoliageBakerTreeHierarchyPreview> Preview =
+					WeakDataBakePreview.Pin())
+				{
+					Preview->SetResolvedLeaves(ResolvedLeaves);
+				}
+			})
+		.OnLeafMaterialChanged_Lambda(
+			[this](const int32 LeafMaterialIndex)
+			{
+				HandleDataBakeLeafMaterialChanged(LeafMaterialIndex);
+			});
 
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
@@ -646,36 +630,232 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 		[
 			SNew(SBorder)
 			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(FMargin(14.0f, 10.0f))
+			.Padding(FMargin(12.0f, 10.0f))
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
 				.AutoHeight()
 				[
-					SNew(STextBlock)
-					.Text(LOCTEXT(
-						"TreeHierarchyColorsTitle",
-						"Tree Hierarchy Test Colors"))
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT(
+							"TreeHierarchyDataBakeTitle",
+							"Tree Data Bake"))
+						.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT(
+							"TreeHierarchySingleMeshMode",
+							"Single Static Mesh workflow"))
+						.TextStyle(FAppStyle::Get(), "SmallText")
+					]
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(0.0f, 3.0f, 0.0f, 0.0f)
+				.Padding(0.0f, 8.0f, 0.0f, 0.0f)
+				[
+					SNew(SWrapBox)
+					.UseAllottedSize(true)
+					.InnerSlotPadding(FVector2D(10.0f, 6.0f))
+					+ SWrapBox::Slot()
+					.FillEmptySpace(true)
+					.FillLineWhenSizeLessThan(760.0f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT(
+								"TreeHierarchySourceMeshLabel",
+								"Static Mesh"))
+						]
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						[
+							SNew(SObjectPropertyEntryBox)
+							.AllowedClass(UStaticMesh::StaticClass())
+							.AllowClear(true)
+							.DisplayUseSelected(true)
+							.DisplayBrowse(true)
+							.DisplayCompactSize(true)
+							.DisplayThumbnail(false)
+							.ObjectPath_Lambda(
+								[this]()
+								{
+									return DataBakeSettings.IsValid()
+										&& DataBakeSettings->SourceStaticMesh
+										? DataBakeSettings->SourceStaticMesh->GetPathName()
+										: FString();
+								})
+							.OnObjectChanged_Lambda(
+								[this](const FAssetData& AssetData)
+								{
+									EnsureDataBakeSettings();
+									const TObjectPtr<UStaticMesh> SourceStaticMesh =
+										Cast<UStaticMesh>(AssetData.GetAsset());
+									DataBakeSettings->SourceStaticMesh = SourceStaticMesh;
+									RefreshDataBakeSourceInput();
+								})
+						]
+					]
+					+ SWrapBox::Slot()
+					.VAlign(VAlign_Center)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(0.0f, 0.0f, 6.0f, 0.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT(
+								"TreeHierarchySourceLODLabel",
+								"LOD"))
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						[
+							SNew(SBox)
+							.WidthOverride(72.0f)
+							[
+								SNew(SNumericEntryBox<int32>)
+								.AllowSpin(true)
+								.MinValue(0)
+								.MaxValue(7)
+								.MinSliderValue(0)
+								.MaxSliderValue(7)
+								.Value_Lambda(
+									[this]() -> TOptional<int32>
+									{
+										return DataBakeSettings.IsValid()
+											? TOptional<int32>(DataBakeSettings->SourceLODIndex)
+											: TOptional<int32>();
+									})
+								.OnValueCommitted_Lambda(
+									[this](
+										const int32 SourceLODIndex,
+										const ETextCommit::Type CommitType)
+									{
+										(void)CommitType;
+										EnsureDataBakeSettings();
+										DataBakeSettings->SourceLODIndex = FMath::Clamp(
+											SourceLODIndex,
+											0,
+											7);
+										RefreshDataBakeSourceInput();
+									})
+							]
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 8.0f, 0.0f, 0.0f)
+				[
+					SNew(SWrapBox)
+					.UseAllottedSize(true)
+					.InnerSlotPadding(FVector2D(8.0f, 6.0f))
+					+ SWrapBox::Slot()
+					[
+						SNew(SBox)
+						.MinDesiredWidth(180.0f)
+						[
+							SNew(SButton)
+							.HAlign(HAlign_Center)
+							.Text(LOCTEXT(
+								"AnalyzeTreeHierarchyButton",
+								"1  Analyze Hierarchy"))
+							.ToolTipText(LOCTEXT(
+								"AnalyzeTreeHierarchyTooltip",
+								"Analyze trunk and branch geometry after excluding the selected Leaf Material Section. The Static Mesh asset is not modified."))
+							.IsEnabled_Lambda(
+								[this]()
+								{
+									return CanAnalyzeTreeHierarchy();
+								})
+							.OnClicked_Lambda(
+								[this]()
+								{
+									AnalyzeTreeHierarchy();
+									return FReply::Handled();
+								})
+						]
+					]
+					+ SWrapBox::Slot()
+					[
+						SNew(SBox)
+						.MinDesiredWidth(180.0f)
+						[
+							SNew(SButton)
+							.HAlign(HAlign_Center)
+							.Text(LOCTEXT(
+								"ResolveDataBakeLeafOwnershipButton",
+								"2  Resolve Leaves"))
+							.ToolTipText(LOCTEXT(
+								"ResolveDataBakeLeafOwnershipTooltip",
+								"Resolve complete UV0 Pivot/Tip templates onto physical leaf geometry and assign each leaf record to its nearest analyzed trunk or branch surface."))
+							.IsEnabled_Lambda(
+								[this]()
+								{
+									return CanResolveDataBakeLeafOwnership();
+								})
+							.OnClicked_Lambda(
+								[this]()
+								{
+									ResolveDataBakeLeafOwnership();
+									return FReply::Handled();
+								})
+						]
+					]
+					+ SWrapBox::Slot()
+					[
+						SNew(SBox)
+						.MinDesiredWidth(180.0f)
+						[
+							SNew(SButton)
+							.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
+							.HAlign(HAlign_Center)
+							.Text(LOCTEXT(
+								"BakeWindDataButton",
+								"3  Bake Wind Data"))
+							.ToolTipText(LOCTEXT(
+								"BakeWindDataTooltip",
+								"Write bone texel centers to UV1 and create the linked PivPos/PivAxis data textures beside the selected Static Mesh."))
+							.IsEnabled_Lambda(
+								[this]()
+								{
+									return CanBakeWindData();
+								})
+							.OnClicked_Lambda(
+								[this]()
+								{
+									BakeWindData();
+									return FReply::Handled();
+								})
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
 				[
 					SNew(STextBlock)
 					.Text(LOCTEXT(
-						"TreeHierarchyColorsDescription",
-						"Recognize one trunk, first-level branch chains, and card foliage, then write validation colors and draw the collapsed hierarchy over the source mesh."))
+						"TreeHierarchyDataBakeWorkflowHint",
+						"Choose Leaf Material before Analyze. Mark UV0 Pivot/Tip templates, Resolve Leaves, then Bake Wind Data. Bake writes UV1 plus PivPos/PivAxis assets."))
 					.AutoWrapText(true)
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 5.0f, 0.0f, 0.0f)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT(
-						"TreeHierarchyColorsMetadata",
-						"Trunk: white  |  Card foliage: black  |  Each Branch ID: one stable pseudo-random color"))
 					.TextStyle(FAppStyle::Get(), "SmallText")
 				]
 			]
@@ -684,63 +864,44 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 		.FillHeight(1.0f)
 		.Padding(10.0f, 0.0f, 10.0f, 10.0f)
 		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(1.0f)
+			SNew(SSplitter)
+			.Orientation(Orient_Horizontal)
+			.PhysicalSplitterHandleSize(4.0f)
+			+ SSplitter::Slot()
+			.Value(0.55f)
+			.MinSize(420.0f)
 			[
-				SNew(SSplitter)
-				.Orientation(Orient_Horizontal)
-				.PhysicalSplitterHandleSize(3.0f)
-				+ SSplitter::Slot()
-				.Value(0.45f)
-				.MinSize(280.0f)
-				[
-					DataBakeController->GetWidget()
-				]
-				+ SSplitter::Slot()
-				.Value(0.55f)
-				.MinSize(320.0f)
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(1.0f)
 				[
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot()
 					.AutoHeight()
-					.Padding(8.0f, 6.0f)
+					.Padding(10.0f, 8.0f)
 					[
 						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot()
-						.FillWidth(1.0f)
+						.AutoWidth()
 						.VAlign(VAlign_Center)
 						[
 							SNew(STextBlock)
 							.Text(LOCTEXT(
 								"TreeHierarchyPreviewTitle",
-								"Hierarchy View"))
+								"Hierarchy"))
 							.Font(FAppStyle::GetFontStyle("NormalFontBold"))
 						]
 						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+						.FillWidth(1.0f)
+						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
 						.VAlign(VAlign_Center)
 						[
-							SNew(SButton)
+							SNew(STextBlock)
 							.Text(LOCTEXT(
-								"TreeHierarchySetAsTrunk",
-								"Set as Trunk"))
-							.ToolTipText(LOCTEXT(
-								"TreeHierarchySetAsTrunkTooltip",
-								"Write all selected Branch IDs and their associated cap geometry as trunk-white vertex colors."))
-							.IsEnabled_Lambda(
-								[this]()
-								{
-									return DataBakePreviewData.IsValid()
-										&& !SelectedDataBakeBranchIDs.IsEmpty();
-								})
-							.OnClicked_Lambda(
-								[this]()
-								{
-									MarkSelectedHierarchyBranchAsTrunk();
-									return FReply::Handled();
-								})
+								"TreeHierarchyPreviewSubtitle",
+								"Trunk, branches, and resolved leaf axes"))
+							.AutoWrapText(true)
+							.TextStyle(FAppStyle::Get(), "SmallText")
 						]
 						+ SHorizontalBox::Slot()
 						.AutoWidth()
@@ -751,7 +912,7 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 							.IsChecked(ECheckBoxState::Checked)
 							.ToolTipText(LOCTEXT(
 								"TreeHierarchyShowDebugTooltip",
-								"Show trunk and branch cylinders, joints, and labels in the Hierarchy View."))
+								"Show trunk, branch, and selected leaf-axis debug drawing."))
 							.OnCheckStateChanged_Lambda(
 								[WeakDataBakePreview](const ECheckBoxState NewState)
 								{
@@ -766,7 +927,7 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 								SNew(STextBlock)
 								.Text(LOCTEXT(
 									"TreeHierarchyShowDebug",
-									"Show Debug"))
+									"Debug"))
 							]
 						]
 					]
@@ -779,18 +940,32 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 						.Padding(6.0f, 0.0f, 4.0f, 6.0f)
 						[
 							SNew(SBox)
-							.WidthOverride(140.0f)
+							.WidthOverride(150.0f)
 							[
 								SNew(SVerticalBox)
 								+ SVerticalBox::Slot()
 								.AutoHeight()
 								.Padding(2.0f, 2.0f, 2.0f, 4.0f)
 								[
-									SNew(STextBlock)
-									.Text(LOCTEXT(
-										"TreeHierarchyBranchListTitle",
-										"Branches (Ctrl/Shift to multi-select)"))
-									.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+									SNew(SVerticalBox)
+									+ SVerticalBox::Slot()
+									.AutoHeight()
+									[
+										SNew(STextBlock)
+										.Text(LOCTEXT(
+											"TreeHierarchyBranchListTitle",
+											"Branches"))
+										.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+									]
+									+ SVerticalBox::Slot()
+									.AutoHeight()
+									[
+										SNew(STextBlock)
+										.Text(LOCTEXT(
+											"TreeHierarchyBranchListHint",
+											"Ctrl / Shift: multi-select"))
+										.TextStyle(FAppStyle::Get(), "SmallText")
+									]
 								]
 								+ SVerticalBox::Slot()
 								.FillHeight(1.0f)
@@ -832,14 +1007,58 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 												RefreshDataBakeBranchSelection();
 											})
 									]
+								]
 							]
-						]
 						]
 						+ SHorizontalBox::Slot()
 						.FillWidth(1.0f)
 						[
 							DataBakePreview.ToSharedRef()
 						]
+					]
+				]
+			]
+			+ SSplitter::Slot()
+			.Value(0.45f)
+			.MinSize(420.0f)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(1.0f)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(10.0f, 8.0f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT(
+								"LeafUVPreviewTitle",
+								"Leaf UV & Ownership"))
+							.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+						]
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT(
+								"LeafUVPreviewSubtitle",
+								"UV0 templates  |  Pivot / Tip  |  Parent Branch"))
+							.AutoWrapText(true)
+							.TextStyle(FAppStyle::Get(), "SmallText")
+						]
+					]
+					+ SVerticalBox::Slot()
+					.FillHeight(1.0f)
+					[
+						DataBakeLeafUVPreview.ToSharedRef()
 					]
 				]
 			]
@@ -853,44 +1072,67 @@ void FFoliageBakerEditorModule::EnsureDataBakeSettings()
 		FName(TEXT("FoliageBakerTreeHierarchySettings")));
 }
 
-bool FFoliageBakerEditorModule::CanBakeTreeHierarchyColors() const
+bool FFoliageBakerEditorModule::CanAnalyzeTreeHierarchy() const
 {
 	return DataBakeSettings.IsValid()
-		&& FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
-			DataBakeSettings->SourceStaticMeshes);
+		&& DataBakeLeafUVPreview.IsValid()
+		&& DataBakeLeafUVPreview->GetSelectedMaterialIndex() != INDEX_NONE
+		&& DataBakeSettings->SourceStaticMesh != nullptr;
 }
 
-void FFoliageBakerEditorModule::BakeTreeHierarchyColors()
+void FFoliageBakerEditorModule::AnalyzeTreeHierarchy()
 {
 	EnsureDataBakeSettings();
+	const int32 LeafMaterialIndex = DataBakeLeafUVPreview.IsValid()
+		? DataBakeLeafUVPreview->GetSelectedMaterialIndex()
+		: INDEX_NONE;
 	DataBakePreviewData.Reset();
 	RefreshDataBakeBranchOptions();
 	if (DataBakePreview.IsValid())
 	{
 		DataBakePreview->ClearPreview();
 	}
+	if (DataBakeLeafUVPreview.IsValid())
+	{
+		DataBakeLeafUVPreview->SetPreviewData(nullptr);
+	}
 	const TWeakPtr<SFoliageBakerTreeHierarchyPreview> WeakPreview =
 		DataBakePreview;
-	const FScopedTransaction Transaction(LOCTEXT(
-		"BakeTreeHierarchyColorsTransaction",
-		"Write Tree Hierarchy Test Vertex Colors"));
+	const TWeakPtr<SFoliageBakerLeafUVPreview> WeakLeafUVPreview =
+		DataBakeLeafUVPreview;
+	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
+	if (DataBakeSettings->SourceStaticMesh)
+	{
+		SourceStaticMeshes.Add(DataBakeSettings->SourceStaticMesh);
+	}
+	const FString PreviewSourcePath = DataBakeSettings->SourceStaticMesh
+		? DataBakeSettings->SourceStaticMesh->GetPathName()
+		: FString();
 	const FFoliageBakerFeatureBatchResult BatchResult =
 		FFoliageBakerFeatureTool::RunBakeBatch(
-			DataBakeSettings->SourceStaticMeshes,
+			SourceStaticMeshes,
 			LOCTEXT(
-				"BakeTreeHierarchyColorsSlowTask",
-				"Writing tree hierarchy test vertex colors..."),
+				"AnalyzeTreeHierarchySlowTask",
+				"Analyzing trunk and branch hierarchy..."),
 			true,
 			TEXT("\n"),
 			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
-				[this, Settings = DataBakeSettings, WeakPreview](
+				[this,
+					Settings = DataBakeSettings,
+					WeakPreview,
+					WeakLeafUVPreview,
+					LeafMaterialIndex,
+					PreviewSourcePath](
 					UStaticMesh& StaticMesh)
 				{
-					const FFoliageBakerTreeHierarchyColorBakeResult Result =
-						FFoliageBakerTreeHierarchyColorBaker::Bake(
+					const FFoliageBakerTreeHierarchyAnalysisResult Result =
+						FFoliageBakerTreeHierarchyColorBaker::Analyze(
 							StaticMesh,
-							Settings->SourceLODIndex);
-					if (Result.bSucceeded && Result.PreviewData.IsValid())
+							Settings->SourceLODIndex,
+							LeafMaterialIndex);
+					if (Result.bSucceeded
+						&& Result.PreviewData.IsValid()
+						&& StaticMesh.GetPathName() == PreviewSourcePath)
 					{
 						DataBakePreviewData = Result.PreviewData;
 						RefreshDataBakeBranchOptions();
@@ -899,17 +1141,232 @@ void FFoliageBakerEditorModule::BakeTreeHierarchyColors()
 						{
 							Preview->SetPreviewData(Result.PreviewData);
 						}
+						if (const TSharedPtr<SFoliageBakerLeafUVPreview> LeafUVPreview =
+							WeakLeafUVPreview.Pin())
+						{
+							LeafUVPreview->SetPreviewData(Result.PreviewData);
+						}
 					}
-					return FFoliageBakerFeatureTool::MakeBakeItemResult(Result);
+					FFoliageBakerFeatureBakeItemResult ItemResult;
+					ItemResult.bSucceeded = Result.bSucceeded;
+					ItemResult.bCancelled = Result.bCancelled;
+					ItemResult.Report = Result.Report;
+					return ItemResult;
+				}));
+
+	FFoliageBakerFeatureTool::ShowBatchSummary(
+		BatchResult,
+		LOCTEXT(
+			"AnalyzeTreeHierarchySummary",
+			"Hierarchy analysis finished for {0} of {1} Static Mesh. No asset data was written.\n\n{2}"));
+}
+
+bool FFoliageBakerEditorModule::CanResolveDataBakeLeafOwnership() const
+{
+	return DataBakeLeafUVPreview.IsValid()
+		&& DataBakeLeafUVPreview->CanResolveLeafOwnership();
+}
+
+void FFoliageBakerEditorModule::ResolveDataBakeLeafOwnership()
+{
+	if (DataBakeLeafUVPreview.IsValid())
+	{
+		DataBakeLeafUVPreview->ResolveLeafOwnership();
+	}
+}
+
+bool FFoliageBakerEditorModule::CanBakeWindData() const
+{
+	return DataBakeSettings.IsValid()
+		&& DataBakeSettings->SourceStaticMesh != nullptr
+		&& DataBakePreviewData.IsValid()
+		&& DataBakePreviewData->SourceStaticMesh.Get()
+			== DataBakeSettings->SourceStaticMesh.Get()
+		&& DataBakePreviewData->SourceLODIndex
+			== DataBakeSettings->SourceLODIndex
+		&& DataBakeLeafUVPreview.IsValid()
+		&& DataBakeLeafUVPreview->HasResolvedLeafOwnership();
+}
+
+void FFoliageBakerEditorModule::BakeWindData()
+{
+	if (!CanBakeWindData())
+	{
+		return;
+	}
+
+	const TSharedPtr<const FFoliageBakerTreeHierarchyPreviewData> AnalysisData =
+		DataBakePreviewData;
+	const TArray<FFoliageBakerResolvedLeafCluster> ResolvedLeafClusters =
+		DataBakeLeafUVPreview->GetResolvedLeafClusters();
+	const int32 SourceLODIndex = DataBakeSettings->SourceLODIndex;
+	int32 UnassignedTriangleCount = 0;
+	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
+	SourceStaticMeshes.Add(DataBakeSettings->SourceStaticMesh);
+	const FFoliageBakerFeatureBatchResult BatchResult =
+		FFoliageBakerFeatureTool::RunBakeBatch(
+			SourceStaticMeshes,
+			LOCTEXT(
+				"BakeWindDataSlowTask",
+				"Baking linked tree wind data..."),
+			false,
+			TEXT("\n"),
+			FFoliageBakerBakeStaticMeshDelegate::CreateLambda(
+				[AnalysisData,
+					ResolvedLeafClusters,
+					SourceLODIndex,
+					&UnassignedTriangleCount](
+					UStaticMesh& StaticMesh)
+				{
+					const FFoliageBakerWindDataBakeResult Result =
+						FFoliageBakerTreeHierarchyColorBaker::BakeWindData(
+							StaticMesh,
+							SourceLODIndex,
+							*AnalysisData,
+							ResolvedLeafClusters);
+					FFoliageBakerFeatureBakeItemResult ItemResult;
+					ItemResult.bSucceeded = Result.bSucceeded;
+					ItemResult.Report = Result.Report;
+					UnassignedTriangleCount = Result.UnassignedTriangleCount;
+					if (Result.bSucceeded)
+					{
+						TStrongObjectPtr<UObject> PivotPositionTexture(
+							StaticLoadObject(
+								UObject::StaticClass(),
+								nullptr,
+								*Result.PivotPositionTexturePath));
+						if (PivotPositionTexture)
+						{
+							ItemResult.CreatedAssets.Add(
+								MoveTemp(PivotPositionTexture));
+						}
+						TStrongObjectPtr<UObject> PivotAxisTexture(
+							StaticLoadObject(
+								UObject::StaticClass(),
+								nullptr,
+								*Result.PivotAxisTexturePath));
+						if (PivotAxisTexture)
+						{
+							ItemResult.CreatedAssets.Add(
+								MoveTemp(PivotAxisTexture));
+						}
+					}
+					return ItemResult;
 				}));
 
 	FFoliageBakerFeatureTool::SyncCreatedAssetsToContentBrowser(
 		BatchResult.CreatedAssets);
-	FFoliageBakerFeatureTool::ShowBatchSummary(
-		BatchResult,
+	const FText SummaryFormat = LOCTEXT(
+		"BakeWindDataSummary",
+		"Wind Data bake finished for {0} of {1} Static Mesh.\n\n{2}");
+	if (UnassignedTriangleCount <= 0)
+	{
+		FFoliageBakerFeatureTool::ShowBatchSummary(
+			BatchResult,
+			SummaryFormat);
+		return;
+	}
+
+	const FText SummaryText = FText::Format(
+		SummaryFormat,
+		FText::AsNumber(BatchResult.SuccessCount),
+		FText::AsNumber(BatchResult.TotalCount),
+		FText::FromString(BatchResult.Report));
+	const FText UnassignedGeometryWarning = FText::Format(
 		LOCTEXT(
-			"BakeTreeHierarchyColorsSummary",
-			"Foliage Baker wrote hierarchy test colors to {0} of {1} Static Mesh asset(s).\n\n{2}"));
+			"BakeWindDataUnassignedGeometryWarning",
+			"{0} source triangle(s) had no hierarchy ownership and were mapped to Trunk BoneID 0."),
+		FText::AsNumber(UnassignedTriangleCount));
+	const TSharedRef<SWindow> SummaryWindow =
+		SNew(SWindow)
+		.Title(LOCTEXT("BakeWindDataSummaryTitle", "Foliage Baker - Wind Data Bake"))
+		.SizingRule(ESizingRule::Autosized)
+		.SupportsMaximize(false)
+		.SupportsMinimize(false);
+	const TWeakPtr<SWindow> WeakSummaryWindow = SummaryWindow;
+	SummaryWindow->SetContent(
+		SNew(SBorder)
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+		.Padding(16.0f)
+		[
+			SNew(SBox)
+			.MaxDesiredWidth(760.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text(SummaryText)
+					.AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 12.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(UnassignedGeometryWarning)
+					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					.AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.HAlign(HAlign_Right)
+				.Padding(0.0f, 16.0f, 0.0f, 0.0f)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("BakeWindDataSummaryOk", "OK"))
+					.OnClicked_Lambda([WeakSummaryWindow]()
+					{
+						if (const TSharedPtr<SWindow> Window =
+							WeakSummaryWindow.Pin())
+						{
+							Window->RequestDestroyWindow();
+						}
+						return FReply::Handled();
+					})
+				]
+			]
+		]);
+	FSlateApplication::Get().AddModalWindow(
+		SummaryWindow,
+		FSlateApplication::Get().GetActiveTopLevelWindow());
+}
+
+void FFoliageBakerEditorModule::RefreshDataBakeSourceInput()
+{
+	DataBakePreviewData.Reset();
+	RefreshDataBakeBranchOptions();
+	if (DataBakePreview.IsValid())
+	{
+		DataBakePreview->ClearPreview();
+	}
+	TWeakObjectPtr<UStaticMesh> SourceStaticMesh;
+	if (DataBakeSettings.IsValid()
+		&& DataBakeSettings->SourceStaticMesh)
+	{
+		SourceStaticMesh = DataBakeSettings->SourceStaticMesh.Get();
+	}
+	if (DataBakeLeafUVPreview.IsValid())
+	{
+		DataBakeLeafUVPreview->SetSourceMesh(
+			SourceStaticMesh,
+			DataBakeSettings.IsValid()
+				? DataBakeSettings->SourceLODIndex
+				: 0);
+	}
+}
+
+void FFoliageBakerEditorModule::HandleDataBakeLeafMaterialChanged(
+	const int32 LeafMaterialIndex)
+{
+	(void)LeafMaterialIndex;
+	DataBakePreviewData.Reset();
+	RefreshDataBakeBranchOptions();
+	if (DataBakePreview.IsValid())
+	{
+		DataBakePreview->ClearPreview();
+	}
 }
 
 void FFoliageBakerEditorModule::RefreshDataBakeBranchOptions()
@@ -962,97 +1419,6 @@ void FFoliageBakerEditorModule::RefreshDataBakeBranchSelection()
 	{
 		DataBakePreview->SetHighlightedBranchIDs(
 			SelectedDataBakeBranchIDs);
-	}
-}
-
-void FFoliageBakerEditorModule::MarkSelectedHierarchyBranchAsTrunk()
-{
-	if (!DataBakePreviewData.IsValid()
-		|| SelectedDataBakeBranchIDs.IsEmpty()
-		|| !DataBakePreviewData->SourceStaticMesh.IsValid())
-	{
-		return;
-	}
-
-	TArray<int32> SelectedBranchIndices;
-	TArray<int32> SelectedSourceTriangleIDs;
-	int32 TrunkBranchIndex = INDEX_NONE;
-	for (int32 BranchIndex = 0;
-		BranchIndex < DataBakePreviewData->Branches.Num();
-		++BranchIndex)
-	{
-		const int32 BranchID =
-			DataBakePreviewData->Branches[BranchIndex].BranchID;
-		if (DataBakePreviewData->Branches[BranchIndex].Label == TEXT("Trunk"))
-		{
-			TrunkBranchIndex = BranchIndex;
-		}
-		else if (SelectedDataBakeBranchIDs.Contains(BranchID))
-		{
-			SelectedBranchIndices.Add(BranchIndex);
-			SelectedSourceTriangleIDs.Append(
-				DataBakePreviewData->Branches[BranchIndex].SourceTriangleIDs);
-		}
-	}
-	if (SelectedBranchIndices.IsEmpty()
-		|| !DataBakePreviewData->Branches.IsValidIndex(TrunkBranchIndex))
-	{
-		return;
-	}
-
-	UStaticMesh& StaticMesh =
-		*DataBakePreviewData->SourceStaticMesh.Get();
-	const FScopedTransaction Transaction(LOCTEXT(
-		"MarkTreeHierarchyBranchesAsTrunkTransaction",
-		"Mark Tree Hierarchy Branches as Trunk"));
-	FString Error;
-	if (!FFoliageBakerTreeHierarchyColorBaker::MarkBranchAsTrunk(
-			StaticMesh,
-			DataBakePreviewData->SourceLODIndex,
-			SelectedSourceTriangleIDs,
-			Error))
-	{
-		FMessageDialog::Open(
-			EAppMsgType::Ok,
-			FText::Format(
-				LOCTEXT(
-					"MarkTreeHierarchyBranchesAsTrunkFailed",
-					"Could not mark the selected branches as trunk.\n\n{0}"),
-				FText::FromString(Error)));
-		return;
-	}
-
-	FFoliageBakerTreeHierarchyPreviewBranch& TrunkBranch =
-		DataBakePreviewData->Branches[TrunkBranchIndex];
-	for (const int32 SelectedBranchIndex : SelectedBranchIndices)
-	{
-		const FFoliageBakerTreeHierarchyPreviewBranch& SelectedBranch =
-			DataBakePreviewData->Branches[SelectedBranchIndex];
-		TrunkBranch.Cylinders.Append(SelectedBranch.Cylinders);
-		TrunkBranch.Joints.Append(SelectedBranch.Joints);
-		TrunkBranch.SourceTriangleIDs.Append(SelectedBranch.SourceTriangleIDs);
-	}
-	SelectedBranchIndices.Sort(
-		[](const int32 First, const int32 Second)
-		{
-			return First > Second;
-		});
-	for (const int32 SelectedBranchIndex : SelectedBranchIndices)
-	{
-		DataBakePreviewData->Branches.RemoveAt(SelectedBranchIndex);
-	}
-	for (FFoliageBakerTreeHierarchyPreviewLeafCluster& LeafCluster :
-		DataBakePreviewData->LeafClusters)
-	{
-		if (SelectedDataBakeBranchIDs.Contains(LeafCluster.ParentBranchID))
-		{
-			LeafCluster.ParentBranchID = INDEX_NONE;
-		}
-	}
-	RefreshDataBakeBranchOptions();
-	if (DataBakePreview.IsValid())
-	{
-		DataBakePreview->SetPreviewData(DataBakePreviewData, false);
 	}
 }
 

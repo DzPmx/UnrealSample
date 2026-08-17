@@ -1,151 +1,39 @@
 #include "FoliageBakerTreeHierarchyColorBaker.h"
+#include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerTreeSkeleton.h"
 
 #include "Algo/Reverse.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/DynamicMeshAABBTree3.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
+#include "Math/Float16Color.h"
 #include "MeshDescription.h"
+#include "Misc/PackageName.h"
 #include "StaticMeshAttributes.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFoliageBakerTreeHierarchy, Log, All);
 
 namespace
 {
 	constexpr double MinimumGeometryScale = UE_DOUBLE_SMALL_NUMBER;
-	constexpr double ComponentContactScale = 2.5;
-	constexpr double MaximumContactTreeFraction = 0.025;
-	constexpr double DirectionChangeWeight = 0.5;
-	constexpr double BranchDistanceComparisonTolerance = 1.0e-9;
-	constexpr double BranchPreviewRadiusTreeFraction = 0.002;
 	constexpr double MinimumBranchPreviewRadius = 0.5;
 	constexpr double TrunkPreviewRadiusScale = 2.5;
 	constexpr double JointPreviewRadiusScale = 1.5;
-	constexpr double PreviewSliceLengthScale = 0.75;
-	constexpr int32 MaximumPreviewSliceCount = 128;
-	constexpr double PreviewCenterlineSimplificationScale = 0.75;
-	constexpr double PreviewCenterlineSimplificationLengthFraction = 0.001;
-	constexpr int32 PreviewCenterlineSmoothingPassCount = 3;
-	constexpr double PreviewJointMinimumDirectionDot = 0.984807753012208;
-	constexpr double LocalTrunkDiameterSupportLengthFraction = 0.02;
-	constexpr double LocalTrunkDiameterGeometryScale = 4.0;
-	constexpr double RootBandBaseDiameterScale = 2.0;
-	constexpr double MinimumRootBandLengthFraction = 0.02;
-	constexpr double MaximumRootBandLengthFraction = 0.08;
-	constexpr double RootMaximumRisePersistenceFraction = 0.25;
 
 	struct FTreeTriangle
 	{
 		FTriangleID TriangleID;
 		int32 MaterialIndex = INDEX_NONE;
 		TStaticArray<FVertexID, 3> VertexIDs;
+		TStaticArray<FVertexInstanceID, 3> VertexInstanceIDs;
 	};
 
 	struct FTriangleComponent
 	{
 		TArray<int32> TriangleIndices;
-	};
-
-	struct FWoodComponent
-	{
-		TArray<int32> TriangleIndices;
-		TArray<FVector> Positions;
-		TStaticArray<FVector, 2> Endpoints;
-		FBox Bounds = FBox(EForceInit::ForceInit);
-		FVector PrincipalAxis = FVector::UpVector;
-		double GeometryScale = 0.0;
-		int32 MinimumTriangleID = MAX_int32;
-	};
-
-	struct FWoodContact
-	{
-		int32 NeighborIndex = INDEX_NONE;
-		double InheritanceCost = 0.0;
-	};
-
-	struct FClosestCenterlineLocation
-	{
-		FVector Position = FVector::ZeroVector;
-		double DistanceAlong = 0.0;
-		double DistanceSquared = TNumericLimits<double>::Max();
-	};
-
-	struct FBranchAssignment
-	{
-		TArray<int32> BranchIDs;
-		int32 BranchCount = 0;
-		int32 RootSubtreeCount = 0;
-	};
-
-	struct FCenterlineRadialSample
-	{
-		double DistanceAlong = 0.0;
-		double Radius = 0.0;
-	};
-
-	struct FVertexEdgeKey
-	{
-		int32 First = INDEX_NONE;
-		int32 Second = INDEX_NONE;
-
-		friend bool operator==(
-			const FVertexEdgeKey& Left,
-			const FVertexEdgeKey& Right)
-		{
-			return Left.First == Right.First && Left.Second == Right.Second;
-		}
-
-		friend uint32 GetTypeHash(const FVertexEdgeKey& Key)
-		{
-			return HashCombineFast(
-				::GetTypeHash(Key.First),
-				::GetTypeHash(Key.Second));
-		}
-	};
-
-	struct FPositionKey
-	{
-		uint32 X = 0;
-		uint32 Y = 0;
-		uint32 Z = 0;
-
-		friend bool operator==(
-			const FPositionKey& Left,
-			const FPositionKey& Right)
-		{
-			return Left.X == Right.X
-				&& Left.Y == Right.Y
-				&& Left.Z == Right.Z;
-		}
-
-		friend uint32 GetTypeHash(const FPositionKey& Key)
-		{
-			return HashCombineFast(
-				HashCombineFast(
-					::GetTypeHash(Key.X),
-					::GetTypeHash(Key.Y)),
-				::GetTypeHash(Key.Z));
-		}
-	};
-
-	struct FWoodCapIsland
-	{
-		TArray<int32> TriangleIndices;
-		int32 OwnerComponentIndex = INDEX_NONE;
-	};
-
-	struct FLeafBranchAssignment
-	{
-		TArray<int32> TriangleIndices;
-		TArray<FVector3f> TrianglePositions;
-		int32 ParentComponentIndex = INDEX_NONE;
-		FBox Bounds = FBox(EForceInit::ForceInit);
-	};
-
-	struct FMaterialTopology
-	{
-		int32 MaterialIndex = INDEX_NONE;
-		int32 TriangleCount = 0;
-		int32 ComponentCount = 0;
-		int32 MedianComponentTriangleCount = 0;
 	};
 
 	class FDisjointSet final
@@ -222,7 +110,10 @@ namespace
 		{
 			const TArrayView<const FVertexID> TriangleVertexIDs =
 				MeshDescription.GetTriangleVertices(TriangleID);
-			if (TriangleVertexIDs.Num() != 3)
+			const TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs =
+				MeshDescription.GetTriangleVertexInstances(TriangleID);
+			if (TriangleVertexIDs.Num() != 3
+				|| TriangleVertexInstanceIDs.Num() != 3)
 			{
 				continue;
 			}
@@ -258,6 +149,8 @@ namespace
 			for (int32 CornerIndex = 0; CornerIndex < 3; ++CornerIndex)
 			{
 				Triangle.VertexIDs[CornerIndex] = TriangleVertexIDs[CornerIndex];
+				Triangle.VertexInstanceIDs[CornerIndex] =
+					TriangleVertexInstanceIDs[CornerIndex];
 			}
 		}
 
@@ -326,552 +219,107 @@ namespace
 		return Components;
 	}
 
-	FMaterialTopology MeasureMaterialTopology(
-		const int32 MaterialIndex,
-		const TArray<FTreeTriangle>& Triangles)
+	FString MakeUVPointToken(const FVector2f& UV)
 	{
-		TArray<int32> SelectedTriangleIndices;
-		for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
-		{
-			if (Triangles[TriangleIndex].MaterialIndex == MaterialIndex)
-			{
-				SelectedTriangleIndices.Add(TriangleIndex);
-			}
-		}
-
-		const TArray<FTriangleComponent> Components =
-			BuildTriangleComponents(Triangles, SelectedTriangleIndices);
-		TArray<int32> ComponentSizes;
-		ComponentSizes.Reserve(Components.Num());
-		for (const FTriangleComponent& Component : Components)
-		{
-			ComponentSizes.Add(Component.TriangleIndices.Num());
-		}
-		ComponentSizes.Sort();
-
-		FMaterialTopology Topology;
-		Topology.MaterialIndex = MaterialIndex;
-		Topology.TriangleCount = SelectedTriangleIndices.Num();
-		Topology.ComponentCount = Components.Num();
-		Topology.MedianComponentTriangleCount = ComponentSizes.IsEmpty()
-			? 0
-			: ComponentSizes[ComponentSizes.Num() / 2];
-		return Topology;
+		const float CanonicalU = UV.X == 0.0f ? 0.0f : UV.X;
+		const float CanonicalV = UV.Y == 0.0f ? 0.0f : UV.Y;
+		return FString::Printf(
+			TEXT("%08x,%08x"),
+			FMath::AsUInt(CanonicalU),
+			FMath::AsUInt(CanonicalV));
 	}
 
-	bool IsMoreCardLike(
-		const FMaterialTopology& Candidate,
-		const FMaterialTopology& Current)
+	FString MakeUVTriangleSignature(
+		const FVector2f& FirstUV,
+		const FVector2f& SecondUV,
+		const FVector2f& ThirdUV)
 	{
-		const int64 CandidateDensity =
-			static_cast<int64>(Candidate.ComponentCount) * Current.TriangleCount;
-		const int64 CurrentDensity =
-			static_cast<int64>(Current.ComponentCount) * Candidate.TriangleCount;
-		if (CandidateDensity != CurrentDensity)
+		FString PointTokens[3] =
 		{
-			return CandidateDensity > CurrentDensity;
-		}
-		if (Candidate.MedianComponentTriangleCount !=
-			Current.MedianComponentTriangleCount)
+			MakeUVPointToken(FirstUV),
+			MakeUVPointToken(SecondUV),
+			MakeUVPointToken(ThirdUV)
+		};
+		if (PointTokens[1] < PointTokens[0])
 		{
-			return Candidate.MedianComponentTriangleCount
-				< Current.MedianComponentTriangleCount;
+			Swap(PointTokens[0], PointTokens[1]);
 		}
-		return Candidate.MaterialIndex < Current.MaterialIndex;
+		if (PointTokens[2] < PointTokens[1])
+		{
+			Swap(PointTokens[1], PointTokens[2]);
+		}
+		if (PointTokens[1] < PointTokens[0])
+		{
+			Swap(PointTokens[0], PointTokens[1]);
+		}
+		return PointTokens[0]
+			+ TEXT("|")
+			+ PointTokens[1]
+			+ TEXT("|")
+			+ PointTokens[2];
 	}
 
-	bool FindLeafMaterialIndex(
-		const TArray<FTreeTriangle>& Triangles,
-		int32& OutLeafMaterialIndex,
-		FString& OutError)
+	bool IsPointInsideUVTriangle(
+		const FVector2f& Point,
+		const TStaticArray<FVector2f, 3>& TriangleUVs)
 	{
-		TSet<int32> ReferencedMaterials;
-		for (const FTreeTriangle& Triangle : Triangles)
+		const float FirstCross = FVector2f::CrossProduct(
+			TriangleUVs[1] - TriangleUVs[0],
+			Point - TriangleUVs[0]);
+		const float SecondCross = FVector2f::CrossProduct(
+			TriangleUVs[2] - TriangleUVs[1],
+			Point - TriangleUVs[1]);
+		const float ThirdCross = FVector2f::CrossProduct(
+			TriangleUVs[0] - TriangleUVs[2],
+			Point - TriangleUVs[2]);
+		const bool bHasNegative =
+			FirstCross < -UE_KINDA_SMALL_NUMBER
+			|| SecondCross < -UE_KINDA_SMALL_NUMBER
+			|| ThirdCross < -UE_KINDA_SMALL_NUMBER;
+		const bool bHasPositive =
+			FirstCross > UE_KINDA_SMALL_NUMBER
+			|| SecondCross > UE_KINDA_SMALL_NUMBER
+			|| ThirdCross > UE_KINDA_SMALL_NUMBER;
+		return !(bHasNegative && bHasPositive);
+	}
+
+	bool ResolveUVPointPosition(
+		const FVector2f& Point,
+		const TStaticArray<FVector2f, 3>& TriangleUVs,
+		const TStaticArray<FVector, 3>& TrianglePositions,
+		FVector& OutPosition)
+	{
+		if (!IsPointInsideUVTriangle(Point, TriangleUVs))
 		{
-			ReferencedMaterials.Add(Triangle.MaterialIndex);
-		}
-		if (ReferencedMaterials.Num() < 2)
-		{
-			OutError = TEXT("Tree hierarchy recognition requires at least two referenced materials so card foliage can be separated from wood by topology.");
 			return false;
 		}
 
-		TArray<int32> SortedMaterials = ReferencedMaterials.Array();
-		SortedMaterials.Sort();
-		FMaterialTopology BestTopology =
-			MeasureMaterialTopology(SortedMaterials[0], Triangles);
-		for (int32 MaterialListIndex = 1;
-			MaterialListIndex < SortedMaterials.Num();
-			++MaterialListIndex)
+		const double Denominator =
+			static_cast<double>(TriangleUVs[1].Y - TriangleUVs[2].Y)
+				* static_cast<double>(TriangleUVs[0].X - TriangleUVs[2].X)
+			+ static_cast<double>(TriangleUVs[2].X - TriangleUVs[1].X)
+				* static_cast<double>(TriangleUVs[0].Y - TriangleUVs[2].Y);
+		if (FMath::IsNearlyZero(Denominator))
 		{
-			const FMaterialTopology Candidate =
-				MeasureMaterialTopology(SortedMaterials[MaterialListIndex], Triangles);
-			if (IsMoreCardLike(Candidate, BestTopology))
-			{
-				BestTopology = Candidate;
-			}
+			return false;
 		}
-		OutLeafMaterialIndex = BestTopology.MaterialIndex;
+		const double FirstWeight =
+			(static_cast<double>(TriangleUVs[1].Y - TriangleUVs[2].Y)
+					* static_cast<double>(Point.X - TriangleUVs[2].X)
+				+ static_cast<double>(TriangleUVs[2].X - TriangleUVs[1].X)
+					* static_cast<double>(Point.Y - TriangleUVs[2].Y))
+			/ Denominator;
+		const double SecondWeight =
+			(static_cast<double>(TriangleUVs[2].Y - TriangleUVs[0].Y)
+					* static_cast<double>(Point.X - TriangleUVs[2].X)
+				+ static_cast<double>(TriangleUVs[0].X - TriangleUVs[2].X)
+					* static_cast<double>(Point.Y - TriangleUVs[2].Y))
+			/ Denominator;
+		const double ThirdWeight = 1.0 - FirstWeight - SecondWeight;
+		OutPosition = TrianglePositions[0] * FirstWeight
+			+ TrianglePositions[1] * SecondWeight
+			+ TrianglePositions[2] * ThirdWeight;
 		return true;
-	}
-
-	double Median(TArray<double>& Values)
-	{
-		if (Values.IsEmpty())
-		{
-			return 0.0;
-		}
-		Values.Sort();
-		return Values[Values.Num() / 2];
-	}
-
-	double FindClosestPositionDistanceSquared(
-		const FVector& Target,
-		const TArray<FVector>& Positions);
-
-	FVector FindPrincipalAxis(
-		const TArray<FVector>& Positions,
-		const FBox& Bounds)
-	{
-		const FVector Extent = Bounds.GetExtent();
-		FVector Axis = FVector::ForwardVector;
-		if (Extent.Y >= Extent.X && Extent.Y >= Extent.Z)
-		{
-			Axis = FVector::RightVector;
-		}
-		else if (Extent.Z >= Extent.X && Extent.Z >= Extent.Y)
-		{
-			Axis = FVector::UpVector;
-		}
-
-		const FVector Center = Bounds.GetCenter();
-		for (int32 Iteration = 0; Iteration < 8; ++Iteration)
-		{
-			FVector NextAxis = FVector::ZeroVector;
-			for (const FVector& Position : Positions)
-			{
-				const FVector Delta = Position - Center;
-				NextAxis += Delta * FVector::DotProduct(Delta, Axis);
-			}
-			if (!NextAxis.Normalize())
-			{
-				break;
-			}
-			Axis = NextAxis;
-		}
-		return Axis;
-	}
-
-	FWoodComponent BuildWoodComponent(
-		const FTriangleComponent& Component,
-		const TArray<FTreeTriangle>& Triangles,
-		const TVertexAttributesConstRef<FVector3f>& VertexPositions)
-	{
-		FWoodComponent Result;
-		Result.TriangleIndices = Component.TriangleIndices;
-		TSet<FVertexID> UniqueVertexIDs;
-		TArray<double> EdgeLengths;
-		EdgeLengths.Reserve(Component.TriangleIndices.Num() * 3);
-		for (const int32 TriangleIndex : Component.TriangleIndices)
-		{
-			const FTreeTriangle& Triangle = Triangles[TriangleIndex];
-			Result.MinimumTriangleID = FMath::Min(
-				Result.MinimumTriangleID,
-				Triangle.TriangleID.GetValue());
-			for (const FVertexID VertexID : Triangle.VertexIDs)
-			{
-				UniqueVertexIDs.Add(VertexID);
-			}
-			for (int32 EdgeIndex = 0; EdgeIndex < 3; ++EdgeIndex)
-			{
-				const FVector FirstPosition(
-					VertexPositions[Triangle.VertexIDs[EdgeIndex]]);
-				const FVector SecondPosition(
-					VertexPositions[Triangle.VertexIDs[(EdgeIndex + 1) % 3]]);
-				const double EdgeLength = FVector::Distance(
-					FirstPosition,
-					SecondPosition);
-				if (EdgeLength > MinimumGeometryScale)
-				{
-					EdgeLengths.Add(EdgeLength);
-				}
-			}
-		}
-
-		TArray<FVertexID> SortedVertexIDs = UniqueVertexIDs.Array();
-		SortedVertexIDs.Sort(
-			[](const FVertexID First, const FVertexID Second)
-			{
-				return First.GetValue() < Second.GetValue();
-			});
-		Result.Positions.Reserve(SortedVertexIDs.Num());
-		for (const FVertexID VertexID : SortedVertexIDs)
-		{
-			const FVector Position(VertexPositions[VertexID]);
-			Result.Positions.Add(Position);
-			Result.Bounds += Position;
-		}
-		Result.GeometryScale = Median(EdgeLengths);
-
-		Result.PrincipalAxis = FindPrincipalAxis(
-			Result.Positions,
-			Result.Bounds);
-		double MinimumProjection = TNumericLimits<double>::Max();
-		double MaximumProjection = TNumericLimits<double>::Lowest();
-		for (const FVector& Position : Result.Positions)
-		{
-			const double Projection = FVector::DotProduct(
-				Position,
-				Result.PrincipalAxis);
-			if (Projection < MinimumProjection)
-			{
-				MinimumProjection = Projection;
-				Result.Endpoints[0] = Position;
-			}
-			if (Projection > MaximumProjection)
-			{
-				MaximumProjection = Projection;
-				Result.Endpoints[1] = Position;
-			}
-		}
-		return Result;
-	}
-
-	double BoxDistanceSquared(const FBox& First, const FBox& Second)
-	{
-		double DistanceSquared = 0.0;
-		for (int32 AxisIndex = 0; AxisIndex < 3; ++AxisIndex)
-		{
-			double AxisDistance = 0.0;
-			if (First.Max[AxisIndex] < Second.Min[AxisIndex])
-			{
-				AxisDistance = Second.Min[AxisIndex] - First.Max[AxisIndex];
-			}
-			else if (Second.Max[AxisIndex] < First.Min[AxisIndex])
-			{
-				AxisDistance = First.Min[AxisIndex] - Second.Max[AxisIndex];
-			}
-			DistanceSquared += AxisDistance * AxisDistance;
-		}
-		return DistanceSquared;
-	}
-
-	double EndpointSurfaceDistanceSquared(
-		const FWoodComponent& First,
-		const FWoodComponent& Second)
-	{
-		double MinimumDistanceSquared = TNumericLimits<double>::Max();
-		for (const FVector& Endpoint : First.Endpoints)
-		{
-			for (const FVector& Position : Second.Positions)
-			{
-				MinimumDistanceSquared = FMath::Min(
-					MinimumDistanceSquared,
-					FVector::DistSquared(Endpoint, Position));
-			}
-		}
-		for (const FVector& Endpoint : Second.Endpoints)
-		{
-			for (const FVector& Position : First.Positions)
-			{
-				MinimumDistanceSquared = FMath::Min(
-					MinimumDistanceSquared,
-					FVector::DistSquared(Endpoint, Position));
-			}
-		}
-		return MinimumDistanceSquared;
-	}
-
-	TArray<TArray<FWoodContact>> BuildWoodContactGraph(
-		const TArray<FWoodComponent>& Components,
-		const double TreeDiagonal)
-	{
-		TArray<TArray<FWoodContact>> Adjacency;
-		Adjacency.SetNum(Components.Num());
-		for (int32 FirstIndex = 0; FirstIndex < Components.Num(); ++FirstIndex)
-		{
-			for (int32 SecondIndex = FirstIndex + 1;
-				SecondIndex < Components.Num();
-				++SecondIndex)
-			{
-				const FWoodComponent& First = Components[FirstIndex];
-				const FWoodComponent& Second = Components[SecondIndex];
-				if (First.GeometryScale <= MinimumGeometryScale
-					|| Second.GeometryScale <= MinimumGeometryScale)
-				{
-					continue;
-				}
-				const double ScaleThreshold = ComponentContactScale
-					* FMath::Sqrt(First.GeometryScale * Second.GeometryScale);
-				const double ContactThreshold = FMath::Min(
-					ScaleThreshold,
-					TreeDiagonal * MaximumContactTreeFraction);
-				const double ContactThresholdSquared =
-					ContactThreshold * ContactThreshold;
-				const double EndpointDistanceSquared =
-					EndpointSurfaceDistanceSquared(First, Second);
-				if (BoxDistanceSquared(First.Bounds, Second.Bounds)
-						> ContactThresholdSquared
-					|| EndpointDistanceSquared > ContactThresholdSquared)
-				{
-					continue;
-				}
-				const double SharedGeometryScale = FMath::Sqrt(
-					First.GeometryScale * Second.GeometryScale);
-				const double NormalizedDistance =
-					FMath::Sqrt(EndpointDistanceSquared) / SharedGeometryScale;
-				const double AxisAlignment = FMath::Abs(FVector::DotProduct(
-					First.PrincipalAxis,
-					Second.PrincipalAxis));
-				const double InheritanceCost = NormalizedDistance
-					+ (1.0 - AxisAlignment) * DirectionChangeWeight
-					+ UE_DOUBLE_SMALL_NUMBER;
-				Adjacency[FirstIndex].Add(FWoodContact{
-					SecondIndex,
-					InheritanceCost});
-				Adjacency[SecondIndex].Add(FWoodContact{
-					FirstIndex,
-					InheritanceCost});
-			}
-		}
-		for (TArray<FWoodContact>& Contacts : Adjacency)
-		{
-			Contacts.Sort(
-				[](const FWoodContact& First, const FWoodContact& Second)
-				{
-					return First.NeighborIndex < Second.NeighborIndex;
-				});
-		}
-		return Adjacency;
-	}
-
-	int32 FindTrunkComponent(const TArray<FWoodComponent>& Components)
-	{
-		check(!Components.IsEmpty());
-		double TreeMinimumZ = TNumericLimits<double>::Max();
-		double TreeMaximumZ = TNumericLimits<double>::Lowest();
-		for (const FWoodComponent& Component : Components)
-		{
-			TreeMinimumZ = FMath::Min(TreeMinimumZ, Component.Bounds.Min.Z);
-			TreeMaximumZ = FMath::Max(TreeMaximumZ, Component.Bounds.Max.Z);
-		}
-		const double RootBandMaximumZ =
-			TreeMinimumZ + (TreeMaximumZ - TreeMinimumZ) * 0.05;
-
-		int32 TrunkIndex = INDEX_NONE;
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < Components.Num();
-			++ComponentIndex)
-		{
-			const FWoodComponent& Candidate = Components[ComponentIndex];
-			if (Candidate.Bounds.Min.Z > RootBandMaximumZ)
-			{
-				continue;
-			}
-			if (TrunkIndex == INDEX_NONE)
-			{
-				TrunkIndex = ComponentIndex;
-				continue;
-			}
-			const FWoodComponent& Current = Components[TrunkIndex];
-			const double CandidateHeight = Candidate.Bounds.GetSize().Z;
-			const double CurrentHeight = Current.Bounds.GetSize().Z;
-			if (CandidateHeight > CurrentHeight
-				|| (FMath::IsNearlyEqual(CandidateHeight, CurrentHeight)
-					&& Candidate.TriangleIndices.Num() > Current.TriangleIndices.Num())
-				|| (FMath::IsNearlyEqual(CandidateHeight, CurrentHeight)
-					&& Candidate.TriangleIndices.Num() == Current.TriangleIndices.Num()
-					&& Candidate.MinimumTriangleID < Current.MinimumTriangleID))
-			{
-				TrunkIndex = ComponentIndex;
-			}
-		}
-		check(TrunkIndex != INDEX_NONE);
-		return TrunkIndex;
-	}
-
-	void PropagateWoodParentTree(
-		const TArray<TArray<FWoodContact>>& Adjacency,
-		const TArray<bool>& LockedParentRoots,
-		TArray<bool>& ProcessedComponents,
-		TArray<double>& Distances,
-		TArray<int32>& ParentComponentIndices)
-	{
-		while (true)
-		{
-			int32 CurrentIndex = INDEX_NONE;
-			for (int32 ComponentIndex = 0;
-				ComponentIndex < Adjacency.Num();
-				++ComponentIndex)
-			{
-				if (ProcessedComponents[ComponentIndex]
-					|| Distances[ComponentIndex]
-						== TNumericLimits<double>::Max())
-				{
-					continue;
-				}
-				if (CurrentIndex == INDEX_NONE
-					|| Distances[ComponentIndex] < Distances[CurrentIndex]
-					|| (FMath::IsNearlyEqual(
-							Distances[ComponentIndex],
-							Distances[CurrentIndex],
-							BranchDistanceComparisonTolerance)
-						&& ComponentIndex < CurrentIndex))
-				{
-					CurrentIndex = ComponentIndex;
-				}
-			}
-			if (CurrentIndex == INDEX_NONE)
-			{
-				break;
-			}
-
-			ProcessedComponents[CurrentIndex] = true;
-			for (const FWoodContact& Contact : Adjacency[CurrentIndex])
-			{
-				const int32 NeighborIndex = Contact.NeighborIndex;
-				if (ProcessedComponents[NeighborIndex]
-					|| LockedParentRoots[NeighborIndex])
-				{
-					continue;
-				}
-
-				const double CandidateDistance = Distances[CurrentIndex]
-					+ Contact.InheritanceCost;
-				const bool bHasNoParent =
-					ParentComponentIndices[NeighborIndex] == INDEX_NONE;
-				const bool bHasShorterPath = CandidateDistance
-					+ BranchDistanceComparisonTolerance
-					< Distances[NeighborIndex];
-				const bool bWinsEqualDistanceTie = FMath::IsNearlyEqual(
-						CandidateDistance,
-						Distances[NeighborIndex],
-						BranchDistanceComparisonTolerance)
-					&& CurrentIndex
-						< ParentComponentIndices[NeighborIndex];
-				if (bHasNoParent || bHasShorterPath || bWinsEqualDistanceTie)
-				{
-					Distances[NeighborIndex] = CandidateDistance;
-					ParentComponentIndices[NeighborIndex] = CurrentIndex;
-				}
-			}
-		}
-	}
-
-	TArray<int32> BuildWoodParentTree(
-		const TArray<FWoodComponent>& Components,
-		const TArray<TArray<FWoodContact>>& Adjacency,
-		const int32 TrunkComponentIndex)
-	{
-		check(Adjacency.IsValidIndex(TrunkComponentIndex));
-		TArray<int32> ParentComponentIndices;
-		ParentComponentIndices.Init(INDEX_NONE, Adjacency.Num());
-		TArray<double> Distances;
-		Distances.Init(TNumericLimits<double>::Max(), Adjacency.Num());
-		TArray<bool> LockedParentRoots;
-		LockedParentRoots.Init(false, Adjacency.Num());
-		TArray<bool> ProcessedComponents;
-		ProcessedComponents.Init(false, Adjacency.Num());
-		ProcessedComponents[TrunkComponentIndex] = true;
-
-		for (const FWoodContact& Contact : Adjacency[TrunkComponentIndex])
-		{
-			LockedParentRoots[Contact.NeighborIndex] = true;
-			Distances[Contact.NeighborIndex] = Contact.InheritanceCost;
-			ParentComponentIndices[Contact.NeighborIndex] = TrunkComponentIndex;
-		}
-		PropagateWoodParentTree(
-			Adjacency,
-			LockedParentRoots,
-			ProcessedComponents,
-			Distances,
-			ParentComponentIndices);
-
-		// The strict contact graph also has a whole-tree distance cap. Repair
-		// components that still fit the existing local geometry threshold;
-		// otherwise seed an independent branch root and keep its chain intact.
-		while (true)
-		{
-			int32 FirstUnprocessedIndex = INDEX_NONE;
-			int32 RepairRootIndex = INDEX_NONE;
-			int32 RepairParentIndex = INDEX_NONE;
-			double BestNormalizedDistance = TNumericLimits<double>::Max();
-			for (int32 ComponentIndex = 0;
-				ComponentIndex < Components.Num();
-				++ComponentIndex)
-			{
-				if (ProcessedComponents[ComponentIndex])
-				{
-					continue;
-				}
-				if (FirstUnprocessedIndex == INDEX_NONE)
-				{
-					FirstUnprocessedIndex = ComponentIndex;
-				}
-				for (int32 ParentIndex = 0;
-					ParentIndex < Components.Num();
-					++ParentIndex)
-				{
-					if (!ProcessedComponents[ParentIndex])
-					{
-						continue;
-					}
-					const double SharedGeometryScale = FMath::Sqrt(
-						Components[ComponentIndex].GeometryScale
-							* Components[ParentIndex].GeometryScale);
-					if (SharedGeometryScale <= MinimumGeometryScale)
-					{
-						continue;
-					}
-					const double NormalizedDistance = FMath::Sqrt(
-						EndpointSurfaceDistanceSquared(
-							Components[ComponentIndex],
-							Components[ParentIndex])) / SharedGeometryScale;
-					const bool bIsCloser = NormalizedDistance
-						+ BranchDistanceComparisonTolerance
-						< BestNormalizedDistance;
-					const bool bWinsEqualDistanceTie = FMath::IsNearlyEqual(
-							NormalizedDistance,
-							BestNormalizedDistance,
-							BranchDistanceComparisonTolerance)
-						&& (ComponentIndex < RepairRootIndex
-							|| (ComponentIndex == RepairRootIndex
-								&& ParentIndex < RepairParentIndex));
-					if (RepairRootIndex == INDEX_NONE
-						|| bIsCloser
-						|| bWinsEqualDistanceTie)
-					{
-						RepairRootIndex = ComponentIndex;
-						RepairParentIndex = ParentIndex;
-						BestNormalizedDistance = NormalizedDistance;
-					}
-				}
-			}
-			if (FirstUnprocessedIndex == INDEX_NONE)
-			{
-				break;
-			}
-
-			const bool bHasReliableRepairParent =
-				RepairRootIndex != INDEX_NONE
-				&& BestNormalizedDistance <= ComponentContactScale;
-			const int32 NewRootIndex = bHasReliableRepairParent
-				? RepairRootIndex
-				: FirstUnprocessedIndex;
-			if (bHasReliableRepairParent)
-			{
-				ParentComponentIndices[NewRootIndex] = RepairParentIndex;
-			}
-			LockedParentRoots[NewRootIndex] = true;
-			Distances[NewRootIndex] = 0.0;
-			PropagateWoodParentTree(
-				Adjacency,
-				LockedParentRoots,
-				ProcessedComponents,
-				Distances,
-				ParentComponentIndices);
-		}
-		return ParentComponentIndices;
 	}
 
 	FVector4f MakeBranchColor(
@@ -898,317 +346,8 @@ namespace
 		return FVector4f(Red, Green, Blue, 1.0f);
 	}
 
-	double FindClosestPositionDistanceSquared(
-		const FVector& Target,
-		const TArray<FVector>& Positions)
-	{
-		check(!Positions.IsEmpty());
-		double ClosestDistanceSquared = TNumericLimits<double>::Max();
-		for (const FVector& Position : Positions)
-		{
-			const double DistanceSquared = FVector::DistSquared(
-				Target,
-				Position);
-			if (DistanceSquared < ClosestDistanceSquared)
-			{
-				ClosestDistanceSquared = DistanceSquared;
-			}
-		}
-		return ClosestDistanceSquared;
-	}
-
-	FVector FindAveragePosition(const TArray<FVector>& Positions)
-	{
-		check(!Positions.IsEmpty());
-		FVector Average = FVector::ZeroVector;
-		for (const FVector& Position : Positions)
-		{
-			Average += Position;
-		}
-		return Average / static_cast<double>(Positions.Num());
-	}
-
-	FVector FindPreviewPrincipalAxis(
-		const FWoodComponent& Component,
-		const FVector& Center)
-	{
-		FVector Axis = Component.PrincipalAxis;
-		for (int32 Iteration = 0; Iteration < 8; ++Iteration)
-		{
-			FVector NextAxis = FVector::ZeroVector;
-			for (const FVector& Position : Component.Positions)
-			{
-				const FVector Delta = Position - Center;
-				NextAxis += Delta * FVector::DotProduct(Delta, Axis);
-			}
-			if (!NextAxis.Normalize())
-			{
-				break;
-			}
-			Axis = NextAxis;
-		}
-		return Axis;
-	}
-
-	double FindCoordinateMedian(
-		const TArray<FVector>& Positions,
-		const int32 AxisIndex)
-	{
-		check(!Positions.IsEmpty());
-		TArray<double> Coordinates;
-		Coordinates.Reserve(Positions.Num());
-		for (const FVector& Position : Positions)
-		{
-			Coordinates.Add(Position[AxisIndex]);
-		}
-		Coordinates.Sort();
-		return Coordinates[Coordinates.Num() / 2];
-	}
-
-	FVector FindMedianPosition(const TArray<FVector>& Positions)
-	{
-		return FVector(
-			FindCoordinateMedian(Positions, 0),
-			FindCoordinateMedian(Positions, 1),
-			FindCoordinateMedian(Positions, 2));
-	}
-
-	double FindMedianProjection(
-		const TArray<FVector>& Positions,
-		const FVector& Center,
-		const FVector& Axis)
-	{
-		check(!Positions.IsEmpty());
-		TArray<double> Projections;
-		Projections.Reserve(Positions.Num());
-		for (const FVector& Position : Positions)
-		{
-			Projections.Add(FVector::DotProduct(Position - Center, Axis));
-		}
-		Projections.Sort();
-		return Projections[Projections.Num() / 2];
-	}
-
-	void MarkCenterlinePointsToKeep(
-		const TArray<FVector>& Points,
-		const int32 FirstIndex,
-		const int32 LastIndex,
-		const double ToleranceSquared,
-		TArray<bool>& KeepPoints)
-	{
-		check(FirstIndex >= 0);
-		check(LastIndex < Points.Num());
-		check(FirstIndex < LastIndex);
-		if (LastIndex == FirstIndex + 1)
-		{
-			return;
-		}
-
-		int32 FurthestIndex = INDEX_NONE;
-		double FurthestDistanceSquared = 0.0;
-		for (int32 PointIndex = FirstIndex + 1;
-			PointIndex < LastIndex;
-			++PointIndex)
-		{
-			const FVector ClosestPoint = FMath::ClosestPointOnSegment(
-				Points[PointIndex],
-				Points[FirstIndex],
-				Points[LastIndex]);
-			const double DistanceSquared = FVector::DistSquared(
-				Points[PointIndex],
-				ClosestPoint);
-			if (DistanceSquared > FurthestDistanceSquared)
-			{
-				FurthestDistanceSquared = DistanceSquared;
-				FurthestIndex = PointIndex;
-			}
-		}
-		if (FurthestIndex == INDEX_NONE
-			|| FurthestDistanceSquared <= ToleranceSquared)
-		{
-			return;
-		}
-
-		KeepPoints[FurthestIndex] = true;
-		MarkCenterlinePointsToKeep(
-			Points,
-			FirstIndex,
-			FurthestIndex,
-			ToleranceSquared,
-			KeepPoints);
-		MarkCenterlinePointsToKeep(
-			Points,
-			FurthestIndex,
-			LastIndex,
-			ToleranceSquared,
-			KeepPoints);
-	}
-
-	TArray<FVector> SimplifyCenterline(
-		const TArray<FVector>& Points,
-		const double Tolerance)
-	{
-		check(Points.Num() >= 2);
-		TArray<bool> KeepPoints;
-		KeepPoints.Init(false, Points.Num());
-		KeepPoints[0] = true;
-		KeepPoints.Last() = true;
-		MarkCenterlinePointsToKeep(
-			Points,
-			0,
-			Points.Num() - 1,
-			Tolerance * Tolerance,
-			KeepPoints);
-
-		TArray<FVector> Result;
-		for (int32 PointIndex = 0; PointIndex < Points.Num(); ++PointIndex)
-		{
-			if (KeepPoints[PointIndex])
-			{
-				Result.Add(Points[PointIndex]);
-			}
-		}
-		return Result;
-	}
-
-	TArray<FVector> SmoothCenterline(
-		const TArray<FVector>& Centerline,
-		const int32 PassCount)
-	{
-		check(PassCount > 0);
-		if (Centerline.Num() <= 2)
-		{
-			return Centerline;
-		}
-		TArray<FVector> Result = Centerline;
-		for (int32 PassIndex = 0; PassIndex < PassCount; ++PassIndex)
-		{
-			const TArray<FVector> Previous = Result;
-			for (int32 PointIndex = 1;
-				PointIndex < Previous.Num() - 1;
-				++PointIndex)
-			{
-				Result[PointIndex] =
-					Previous[PointIndex - 1] * 0.2
-					+ Previous[PointIndex] * 0.6
-					+ Previous[PointIndex + 1] * 0.2;
-			}
-		}
-		return Result;
-	}
-
-	TArray<FVector> BuildPreviewCenterline(
-		const FWoodComponent& Component,
-		const bool bIsTrunk)
-	{
-		check(Component.Positions.Num() >= 2);
-		const FVector Center = FindAveragePosition(Component.Positions);
-		const FVector Axis = bIsTrunk
-			? FVector::UpVector
-			: FindPreviewPrincipalAxis(Component, Center);
-		double MinimumProjection = TNumericLimits<double>::Max();
-		double MaximumProjection = TNumericLimits<double>::Lowest();
-		for (const FVector& Position : Component.Positions)
-		{
-			const double Projection = FVector::DotProduct(Position - Center, Axis);
-			MinimumProjection = FMath::Min(MinimumProjection, Projection);
-			MaximumProjection = FMath::Max(MaximumProjection, Projection);
-		}
-
-		TArray<FVector> PrincipalLine;
-		PrincipalLine.Add(Center + Axis * MinimumProjection);
-		PrincipalLine.Add(Center + Axis * MaximumProjection);
-		const double AxialLength = MaximumProjection - MinimumProjection;
-		if (AxialLength <= MinimumGeometryScale)
-		{
-			return PrincipalLine;
-		}
-
-		const double TargetSliceLength = FMath::Max(
-			Component.GeometryScale * PreviewSliceLengthScale,
-			MinimumGeometryScale);
-		const int32 SliceCount = FMath::Clamp(
-			FMath::CeilToInt(AxialLength / TargetSliceLength),
-			2,
-			MaximumPreviewSliceCount);
-		TArray<TArray<FVector>> SlicePositions;
-		SlicePositions.SetNum(SliceCount);
-		for (const FVector& Position : Component.Positions)
-		{
-			const double Projection = FVector::DotProduct(Position - Center, Axis);
-			const double NormalizedPosition =
-				(Projection - MinimumProjection) / AxialLength;
-			const int32 SliceIndex = FMath::Clamp(
-				FMath::FloorToInt(NormalizedPosition * SliceCount),
-				0,
-				SliceCount - 1);
-			SlicePositions[SliceIndex].Add(Position);
-		}
-
-		TArray<FVector> SlicedCenterline;
-		for (const TArray<FVector>& Positions : SlicePositions)
-		{
-			if (!Positions.IsEmpty())
-			{
-				FVector SliceCenter = FindMedianPosition(Positions);
-				const double SliceProjection = FindMedianProjection(
-					Positions,
-					Center,
-					Axis);
-				SliceCenter += Axis * (
-					SliceProjection
-					- FVector::DotProduct(SliceCenter - Center, Axis));
-				SlicedCenterline.Add(SliceCenter);
-			}
-		}
-		if (SlicedCenterline.Num() < 2)
-		{
-			return PrincipalLine;
-		}
-
-		SlicedCenterline[0] += Axis * (
-			MinimumProjection
-			- FVector::DotProduct(SlicedCenterline[0] - Center, Axis));
-		SlicedCenterline.Last() += Axis * (
-			MaximumProjection
-			- FVector::DotProduct(SlicedCenterline.Last() - Center, Axis));
-		SlicedCenterline = SmoothCenterline(
-			SlicedCenterline,
-			PreviewCenterlineSmoothingPassCount);
-
-		const double SimplificationTolerance = FMath::Max(
-			Component.GeometryScale * PreviewCenterlineSimplificationScale,
-			AxialLength * PreviewCenterlineSimplificationLengthFraction);
-		return SimplifyCenterline(
-			SlicedCenterline,
-			SimplificationTolerance);
-	}
-
-	void AnchorTrunkCenterlineToPivot(TArray<FVector>& Centerline)
-	{
-		check(Centerline.Num() >= 2);
-		TArray<FVector> AnchoredCenterline;
-		AnchoredCenterline.Reserve(Centerline.Num() + 1);
-		AnchoredCenterline.Add(FVector::ZeroVector);
-		for (const FVector& Point : Centerline)
-		{
-			if (Point.Z <= MinimumGeometryScale)
-			{
-				continue;
-			}
-			AnchoredCenterline.Add(Point);
-		}
-		if (AnchoredCenterline.Num() == 1)
-		{
-			AnchoredCenterline.Add(Centerline.Last());
-		}
-		Centerline = MoveTemp(AnchoredCenterline);
-		check(Centerline[0] == FVector::ZeroVector);
-	}
-
 	double MeasureCenterlineLength(const TArray<FVector>& Centerline)
 	{
-		check(Centerline.Num() >= 2);
 		double Length = 0.0;
 		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
 		{
@@ -1219,979 +358,90 @@ namespace
 		return Length;
 	}
 
-	FClosestCenterlineLocation FindClosestCenterlineLocation(
-		const FVector& Position,
-		const TArray<FVector>& Centerline)
+	struct FSkeletonClosestLocation
 	{
-		check(Centerline.Num() >= 2);
-		FClosestCenterlineLocation Result;
-		double TraversedLength = 0.0;
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			const double SegmentLength = FVector::Distance(
-				Centerline[PointIndex - 1],
-				Centerline[PointIndex]);
-			const FVector Candidate = FMath::ClosestPointOnSegment(
-				Position,
-				Centerline[PointIndex - 1],
-				Centerline[PointIndex]);
-			const double DistanceSquared = FVector::DistSquared(
-				Position,
-				Candidate);
-			if (DistanceSquared < Result.DistanceSquared)
-			{
-				const double SegmentFraction = SegmentLength
-					> MinimumGeometryScale
-					? FVector::Distance(
-							Centerline[PointIndex - 1],
-							Candidate) / SegmentLength
-					: 0.0;
-				Result.Position = Candidate;
-				Result.DistanceAlong = TraversedLength
-					+ SegmentLength * SegmentFraction;
-				Result.DistanceSquared = DistanceSquared;
-			}
-			TraversedLength += SegmentLength;
-		}
-		return Result;
-	}
+		int32 EdgeIndex = INDEX_NONE;
+		double DistanceSquared = TNumericLimits<double>::Max();
+	};
 
-	FVector FindClosestPointOnCenterline(
-		const FVector& Position,
-		const TArray<FVector>& Centerline)
+	struct FTrunkSkeletonPath
 	{
-		return FindClosestCenterlineLocation(Position, Centerline).Position;
-	}
+		int32 TerminalEdgeIndex = INDEX_NONE;
+		FVector StartPosition = FVector::ZeroVector;
+		FVector EndPosition = FVector::ZeroVector;
+		TArray<FVector> Polyline;
+	};
 
-	FVector FindPointAlongCenterline(
-		const TArray<FVector>& Centerline,
-		const double Fraction)
+	FVector CalculateTriangleAreaWeightedCenter(
+		const TArray<FTreeTriangle>& Triangles,
+		const TVertexAttributesConstRef<FVector3f>& VertexPositions,
+		const TArray<int32>& TriangleIndices,
+		const FVector& DefaultCenter)
 	{
-		check(Centerline.Num() >= 2);
-		double TotalLength = 0.0;
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			TotalLength += FVector::Distance(
-				Centerline[PointIndex - 1],
-				Centerline[PointIndex]);
-		}
-		const double TargetLength = TotalLength * Fraction;
-		double TraversedLength = 0.0;
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			const double SegmentLength = FVector::Distance(
-				Centerline[PointIndex - 1],
-				Centerline[PointIndex]);
-			if (TraversedLength + SegmentLength >= TargetLength)
-			{
-				const double SegmentFraction = SegmentLength > MinimumGeometryScale
-					? (TargetLength - TraversedLength) / SegmentLength
-					: 0.0;
-				return FMath::Lerp(
-					Centerline[PointIndex - 1],
-					Centerline[PointIndex],
-					SegmentFraction);
-			}
-			TraversedLength += SegmentLength;
-		}
-		return Centerline.Last();
-	}
-
-	void RetargetCenterlineStart(
-		TArray<FVector>& Centerline,
-		const FVector& TargetStart)
-	{
-		check(Centerline.Num() >= 2);
-		const FVector AttachmentOffset = TargetStart - Centerline[0];
-		if (AttachmentOffset.IsNearlyZero())
-		{
-			Centerline[0] = TargetStart;
-			return;
-		}
-
-		double TotalLength = 0.0;
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			TotalLength += FVector::Distance(
-				Centerline[PointIndex - 1],
-				Centerline[PointIndex]);
-		}
-		if (TotalLength <= MinimumGeometryScale)
-		{
-			Centerline[0] = TargetStart;
-			return;
-		}
-
-		if (Centerline.Num() == 2
-			&& AttachmentOffset.Size() > TotalLength * 0.1)
-		{
-			const FVector Start = Centerline[0];
-			const FVector End = Centerline[1];
-			Centerline.Insert(FMath::Lerp(Start, End, 1.0 / 3.0), 1);
-			Centerline.Insert(FMath::Lerp(Start, End, 2.0 / 3.0), 2);
-		}
-
-		TArray<double> PointFractions;
-		PointFractions.Init(0.0, Centerline.Num());
-		double TraversedLength = 0.0;
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			TraversedLength += FVector::Distance(
-				Centerline[PointIndex - 1],
-				Centerline[PointIndex]);
-			PointFractions[PointIndex] = FMath::Clamp(
-				TraversedLength / TotalLength,
-				0.0,
-				1.0);
-		}
-		for (int32 PointIndex = 0; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			const double Fraction = PointFractions[PointIndex];
-			const double SmoothFraction =
-				Fraction * Fraction * (3.0 - 2.0 * Fraction);
-			Centerline[PointIndex] +=
-				AttachmentOffset * (1.0 - SmoothFraction);
-		}
-		Centerline[0] = TargetStart;
-	}
-
-	TArray<int32> BuildHierarchyOrder(
-		const TArray<int32>& ParentComponentIndices,
-		const int32 TrunkComponentIndex)
-	{
-		check(ParentComponentIndices.IsValidIndex(TrunkComponentIndex));
-		TArray<int32> ComponentDepths;
-		ComponentDepths.Init(INDEX_NONE, ParentComponentIndices.Num());
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < ParentComponentIndices.Num();
-			++ComponentIndex)
-		{
-			if (ComponentIndex == TrunkComponentIndex
-				|| !ParentComponentIndices.IsValidIndex(
-					ParentComponentIndices[ComponentIndex]))
-			{
-				ComponentDepths[ComponentIndex] = 0;
-			}
-		}
-		for (int32 PassIndex = 0;
-			PassIndex < ParentComponentIndices.Num();
-			++PassIndex)
-		{
-			for (int32 ComponentIndex = 0;
-				ComponentIndex < ParentComponentIndices.Num();
-				++ComponentIndex)
-			{
-				if (ComponentDepths[ComponentIndex] != INDEX_NONE)
-				{
-					continue;
-				}
-				const int32 ParentIndex =
-					ParentComponentIndices[ComponentIndex];
-				check(ParentComponentIndices.IsValidIndex(ParentIndex));
-				if (ComponentDepths[ParentIndex] != INDEX_NONE)
-				{
-					ComponentDepths[ComponentIndex] =
-						ComponentDepths[ParentIndex] + 1;
-				}
-			}
-		}
-
-		TArray<int32> ComponentOrder;
-		ComponentOrder.Reserve(ParentComponentIndices.Num());
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < ParentComponentIndices.Num();
-			++ComponentIndex)
-		{
-			checkf(
-				ComponentDepths[ComponentIndex] != INDEX_NONE,
-				TEXT("Tree hierarchy parent graph contains a cycle."));
-			ComponentOrder.Add(ComponentIndex);
-		}
-		ComponentOrder.Sort(
-			[&ComponentDepths](const int32 FirstIndex, const int32 SecondIndex)
-			{
-				if (ComponentDepths[FirstIndex]
-					!= ComponentDepths[SecondIndex])
-				{
-					return ComponentDepths[FirstIndex]
-						< ComponentDepths[SecondIndex];
-				}
-				return FirstIndex < SecondIndex;
-			});
-		return ComponentOrder;
-	}
-
-	TArray<TArray<FVector>> BuildComponentCenterlines(
-		const TArray<FWoodComponent>& WoodComponents,
-		const int32 TrunkComponentIndex,
-		const TArray<int32>& ParentComponentIndices)
-	{
-		check(WoodComponents.IsValidIndex(TrunkComponentIndex));
-		check(ParentComponentIndices.Num() == WoodComponents.Num());
-		TArray<TArray<FVector>> ComponentCenterlines;
-		ComponentCenterlines.Reserve(WoodComponents.Num());
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < WoodComponents.Num();
-			++ComponentIndex)
-		{
-			ComponentCenterlines.Add(BuildPreviewCenterline(
-				WoodComponents[ComponentIndex],
-				ComponentIndex == TrunkComponentIndex));
-		}
-
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < WoodComponents.Num();
-			++ComponentIndex)
-		{
-			TArray<FVector>& Centerline = ComponentCenterlines[ComponentIndex];
-			if (ComponentIndex == TrunkComponentIndex)
-			{
-				if (Centerline[0].Z > Centerline.Last().Z)
-				{
-					Algo::Reverse(Centerline);
-				}
-				continue;
-			}
-
-			const int32 ParentIndex = ParentComponentIndices[ComponentIndex];
-			if (WoodComponents.IsValidIndex(ParentIndex))
-			{
-				const FWoodComponent& Parent = WoodComponents[ParentIndex];
-				const double FirstDistanceSquared =
-					FindClosestPositionDistanceSquared(
-						Centerline[0],
-						Parent.Positions);
-				const double SecondDistanceSquared =
-					FindClosestPositionDistanceSquared(
-						Centerline.Last(),
-						Parent.Positions);
-				if (SecondDistanceSquared < FirstDistanceSquared)
-				{
-					Algo::Reverse(Centerline);
-				}
-			}
-			else if (Centerline[0].Z > Centerline.Last().Z)
-			{
-				Algo::Reverse(Centerline);
-			}
-		}
-
-		AnchorTrunkCenterlineToPivot(
-			ComponentCenterlines[TrunkComponentIndex]);
-		check(ComponentCenterlines[TrunkComponentIndex][0]
-			== FVector::ZeroVector);
-
-		const TArray<int32> ComponentOrder = BuildHierarchyOrder(
-			ParentComponentIndices,
-			TrunkComponentIndex);
-		for (const int32 ComponentIndex : ComponentOrder)
-		{
-			if (ComponentIndex == TrunkComponentIndex)
-			{
-				continue;
-			}
-			const int32 ParentIndex = ParentComponentIndices[ComponentIndex];
-			if (!WoodComponents.IsValidIndex(ParentIndex))
-			{
-				continue;
-			}
-			const FVector AttachmentPoint = FindClosestPointOnCenterline(
-				ComponentCenterlines[ComponentIndex][0],
-				ComponentCenterlines[ParentIndex]);
-			RetargetCenterlineStart(
-				ComponentCenterlines[ComponentIndex],
-				AttachmentPoint);
-			check(ComponentCenterlines[ComponentIndex][0].Equals(
-				AttachmentPoint,
-				MinimumGeometryScale));
-		}
-		return ComponentCenterlines;
-	}
-
-	TArray<FCenterlineRadialSample> BuildCenterlineRadialSamples(
-		const FWoodComponent& Component,
-		const TArray<FVector>& Centerline)
-	{
-		TArray<FCenterlineRadialSample> Samples;
-		Samples.Reserve(Component.Positions.Num());
-		for (const FVector& Position : Component.Positions)
-		{
-			const FClosestCenterlineLocation Location =
-				FindClosestCenterlineLocation(Position, Centerline);
-			FCenterlineRadialSample& Sample = Samples.AddDefaulted_GetRef();
-			Sample.DistanceAlong = Location.DistanceAlong;
-			Sample.Radius = FMath::Sqrt(Location.DistanceSquared);
-		}
-		return Samples;
-	}
-
-	double MeasureLocalCenterlineDiameter(
-		const FWoodComponent& Component,
-		const TArray<FCenterlineRadialSample>& RadialSamples,
-		const double CenterlineLength,
-		const double DistanceAlongCenterline)
-	{
-		check(CenterlineLength > MinimumGeometryScale);
-		const double SupportLength = FMath::Max(
-			CenterlineLength * LocalTrunkDiameterSupportLengthFraction,
-			Component.GeometryScale * LocalTrunkDiameterGeometryScale);
-		TArray<double> Radii;
-		for (const FCenterlineRadialSample& Sample : RadialSamples)
-		{
-			if (FMath::Abs(Sample.DistanceAlong - DistanceAlongCenterline)
-				<= SupportLength)
-			{
-				Radii.Add(Sample.Radius);
-			}
-		}
-		const double MeasuredDiameter = Median(Radii) * 2.0;
-		return FMath::Max(
-			MeasuredDiameter,
-			Component.GeometryScale * 2.0);
-	}
-
-	FVertexEdgeKey MakeVertexEdgeKey(
-		const FVertexID FirstVertexID,
-		const FVertexID SecondVertexID)
-	{
-		const int32 FirstValue = FirstVertexID.GetValue();
-		const int32 SecondValue = SecondVertexID.GetValue();
-		return FirstValue < SecondValue
-			? FVertexEdgeKey{FirstValue, SecondValue}
-			: FVertexEdgeKey{SecondValue, FirstValue};
-	}
-
-	FPositionKey MakePositionKey(const FVector3f& Position)
-	{
-		const float X = Position.X == 0.0f ? 0.0f : Position.X;
-		const float Y = Position.Y == 0.0f ? 0.0f : Position.Y;
-		const float Z = Position.Z == 0.0f ? 0.0f : Position.Z;
-		return FPositionKey{
-			FMath::AsUInt(X),
-			FMath::AsUInt(Y),
-			FMath::AsUInt(Z)};
-	}
-
-	TArray<FVertexID> BuildBoundaryVertexIDs(
-		const FTriangleComponent& Component,
-		const TArray<FTreeTriangle>& Triangles)
-	{
-		TMap<FVertexEdgeKey, int32> EdgeUseCounts;
-		for (const int32 TriangleIndex : Component.TriangleIndices)
+		FVector WeightedCenter = FVector::ZeroVector;
+		double TotalArea = 0.0;
+		for (const int32 TriangleIndex : TriangleIndices)
 		{
 			if (!Triangles.IsValidIndex(TriangleIndex))
 			{
 				continue;
 			}
 			const FTreeTriangle& Triangle = Triangles[TriangleIndex];
-			for (int32 CornerIndex = 0; CornerIndex < 3; ++CornerIndex)
-			{
-				const FVertexEdgeKey Edge = MakeVertexEdgeKey(
-					Triangle.VertexIDs[CornerIndex],
-					Triangle.VertexIDs[(CornerIndex + 1) % 3]);
-				++EdgeUseCounts.FindOrAdd(Edge);
-			}
+			const FVector FirstPosition(VertexPositions[Triangle.VertexIDs[0]]);
+			const FVector SecondPosition(VertexPositions[Triangle.VertexIDs[1]]);
+			const FVector ThirdPosition(VertexPositions[Triangle.VertexIDs[2]]);
+			const double TriangleArea = FVector::CrossProduct(
+				SecondPosition - FirstPosition,
+				ThirdPosition - FirstPosition).Size() * 0.5;
+			WeightedCenter += (
+				FirstPosition + SecondPosition + ThirdPosition)
+				/ 3.0 * TriangleArea;
+			TotalArea += TriangleArea;
 		}
-
-		TSet<FVertexID> BoundaryVertexIDs;
-		for (const TPair<FVertexEdgeKey, int32>& EdgeUse : EdgeUseCounts)
-		{
-			if (EdgeUse.Value == 1)
-			{
-				BoundaryVertexIDs.Add(FVertexID(EdgeUse.Key.First));
-				BoundaryVertexIDs.Add(FVertexID(EdgeUse.Key.Second));
-			}
-		}
-		TArray<FVertexID> Result = BoundaryVertexIDs.Array();
-		Result.Sort(
-			[](const FVertexID First, const FVertexID Second)
-			{
-				return First.GetValue() < Second.GetValue();
-			});
-		return Result;
+		return TotalArea > MinimumGeometryScale
+			? WeightedCenter / TotalArea
+			: DefaultCenter;
 	}
 
-	void BuildWoodBoundaryOwners(
-		const TArray<FTriangleComponent>& WoodTriangleComponents,
+	void BuildHierarchyBoneRecord(
 		const TArray<FTreeTriangle>& Triangles,
 		const TVertexAttributesConstRef<FVector3f>& VertexPositions,
-		TMap<FVertexID, TArray<int32>>& OutOwnersByVertexID,
-		TMap<FPositionKey, TArray<int32>>& OutOwnersByPosition)
+		const TArray<int32>& TriangleIndices,
+		const FVector& PivotPosition,
+		FFoliageBakerTreeHierarchyBoneRecord& BoneRecord)
 	{
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < WoodTriangleComponents.Num();
-			++ComponentIndex)
-		{
-			const TArray<FVertexID> BoundaryVertexIDs = BuildBoundaryVertexIDs(
-				WoodTriangleComponents[ComponentIndex],
-				Triangles);
-			for (const FVertexID VertexID : BoundaryVertexIDs)
-			{
-				OutOwnersByVertexID.FindOrAdd(VertexID).AddUnique(ComponentIndex);
-				OutOwnersByPosition.FindOrAdd(
-					MakePositionKey(VertexPositions[VertexID])).AddUnique(
-						ComponentIndex);
-			}
-		}
-	}
-
-	int32 FindBoundaryOwnerComponent(
-		const FTriangleComponent& Island,
-		const TArray<FTreeTriangle>& Triangles,
-		const TVertexAttributesConstRef<FVector3f>& VertexPositions,
-		const TMap<FVertexID, TArray<int32>>& OwnersByVertexID,
-		const TMap<FPositionKey, TArray<int32>>& OwnersByPosition)
-	{
-		const TArray<FVertexID> BoundaryVertexIDs = BuildBoundaryVertexIDs(
-			Island,
-			Triangles);
-		if (BoundaryVertexIDs.Num() < 3)
-		{
-			return INDEX_NONE;
-		}
-
-		TMap<int32, int32> MatchCounts;
-		for (const FVertexID VertexID : BoundaryVertexIDs)
-		{
-			if (OwnersByVertexID.Contains(VertexID))
-			{
-				for (const int32 OwnerComponentIndex :
-					OwnersByVertexID.FindChecked(VertexID))
-				{
-					++MatchCounts.FindOrAdd(OwnerComponentIndex);
-				}
-				continue;
-			}
-
-			const FPositionKey PositionKey = MakePositionKey(
-				VertexPositions[VertexID]);
-			if (!OwnersByPosition.Contains(PositionKey))
-			{
-				return INDEX_NONE;
-			}
-			for (const int32 OwnerComponentIndex :
-				OwnersByPosition.FindChecked(PositionKey))
-			{
-				++MatchCounts.FindOrAdd(OwnerComponentIndex);
-			}
-		}
-
-		int32 Result = INDEX_NONE;
-		for (const TPair<int32, int32>& MatchCount : MatchCounts)
-		{
-			if (MatchCount.Value != BoundaryVertexIDs.Num())
-			{
-				continue;
-			}
-			if (Result != INDEX_NONE)
-			{
-				return INDEX_NONE;
-			}
-			Result = MatchCount.Key;
-		}
-		return Result;
-	}
-
-	TArray<FWoodCapIsland> FindTopologyOwnedWoodCapIslands(
-		const TArray<FTriangleComponent>& LeafTriangleComponents,
-		const TArray<FTriangleComponent>& WoodTriangleComponents,
-		const TArray<FTreeTriangle>& Triangles,
-		const TVertexAttributesConstRef<FVector3f>& VertexPositions)
-	{
-		TMap<FVertexID, TArray<int32>> OwnersByVertexID;
-		TMap<FPositionKey, TArray<int32>> OwnersByPosition;
-		BuildWoodBoundaryOwners(
-			WoodTriangleComponents,
+		BoneRecord.PivotPosition = PivotPosition;
+		const FVector SurfaceCenter = CalculateTriangleAreaWeightedCenter(
 			Triangles,
 			VertexPositions,
-			OwnersByVertexID,
-			OwnersByPosition);
+			TriangleIndices,
+			PivotPosition);
+		BoneRecord.Axis = (SurfaceCenter - PivotPosition).GetSafeNormal();
 
-		TArray<FWoodCapIsland> Result;
-		for (const FTriangleComponent& LeafComponent : LeafTriangleComponents)
+		double MinimumProjection = TNumericLimits<double>::Max();
+		double MaximumProjection = TNumericLimits<double>::Lowest();
+		for (const int32 TriangleIndex : TriangleIndices)
 		{
-			const int32 OwnerComponentIndex = FindBoundaryOwnerComponent(
-				LeafComponent,
-				Triangles,
-				VertexPositions,
-				OwnersByVertexID,
-				OwnersByPosition);
-			if (OwnerComponentIndex == INDEX_NONE)
+			if (!Triangles.IsValidIndex(TriangleIndex))
 			{
 				continue;
 			}
-
-			FWoodCapIsland& CapIsland = Result.AddDefaulted_GetRef();
-			CapIsland.TriangleIndices = LeafComponent.TriangleIndices;
-			CapIsland.OwnerComponentIndex = OwnerComponentIndex;
-		}
-		return Result;
-	}
-
-	TArray<FLeafBranchAssignment> AssignLeafComponentsToWood(
-		const TArray<FTriangleComponent>& LeafTriangleComponents,
-		const TArray<FWoodCapIsland>& WoodCapIslands,
-		const TArray<FWoodComponent>& WoodComponents,
-		const TArray<FTreeTriangle>& Triangles,
-		const TVertexAttributesConstRef<FVector3f>& VertexPositions)
-	{
-		TSet<int32> WoodCapTriangleIndices;
-		for (const FWoodCapIsland& WoodCapIsland : WoodCapIslands)
-		{
-			for (const int32 TriangleIndex : WoodCapIsland.TriangleIndices)
+			for (const FVertexID VertexID : Triangles[TriangleIndex].VertexIDs)
 			{
-				WoodCapTriangleIndices.Add(TriangleIndex);
+				const double Projection = FVector::DotProduct(
+					FVector(VertexPositions[VertexID]) - PivotPosition,
+					BoneRecord.Axis);
+				MinimumProjection = FMath::Min(MinimumProjection, Projection);
+				MaximumProjection = FMath::Max(MaximumProjection, Projection);
 			}
 		}
-
-		TArray<FLeafBranchAssignment> Result;
-		for (const FTriangleComponent& LeafComponent : LeafTriangleComponents)
+		if (MinimumProjection <= MaximumProjection)
 		{
-			if (LeafComponent.TriangleIndices.IsEmpty()
-				|| WoodCapTriangleIndices.Contains(
-					LeafComponent.TriangleIndices[0]))
-			{
-				continue;
-			}
-
-			FLeafBranchAssignment Assignment;
-			Assignment.TriangleIndices = LeafComponent.TriangleIndices;
-			TSet<FVertexID> UniqueLeafVertexIDs;
-			for (const int32 TriangleIndex : LeafComponent.TriangleIndices)
-			{
-				if (!Triangles.IsValidIndex(TriangleIndex))
-				{
-					continue;
-				}
-				for (const FVertexID VertexID : Triangles[TriangleIndex].VertexIDs)
-				{
-					UniqueLeafVertexIDs.Add(VertexID);
-					Assignment.TrianglePositions.Add(
-						VertexPositions[VertexID]);
-				}
-			}
-
-			TArray<FVector> LeafPositions;
-			LeafPositions.Reserve(UniqueLeafVertexIDs.Num());
-			for (const FVertexID VertexID : UniqueLeafVertexIDs)
-			{
-				const FVector Position(VertexPositions[VertexID]);
-				LeafPositions.Add(Position);
-				Assignment.Bounds += Position;
-			}
-
-			double ClosestDistanceSquared = TNumericLimits<double>::Max();
-			for (int32 ComponentIndex = 0;
-				ComponentIndex < WoodComponents.Num();
-				++ComponentIndex)
-			{
-				const FWoodComponent& WoodComponent =
-					WoodComponents[ComponentIndex];
-				if (BoxDistanceSquared(
-						Assignment.Bounds,
-						WoodComponent.Bounds)
-					> ClosestDistanceSquared)
-				{
-					continue;
-				}
-
-				for (const FVector& LeafPosition : LeafPositions)
-				{
-					for (const int32 WoodTriangleIndex :
-						WoodComponent.TriangleIndices)
-					{
-						const FTreeTriangle& WoodTriangle =
-							Triangles[WoodTriangleIndex];
-						const FVector ClosestWoodPosition =
-							FMath::ClosestPointOnTriangleToPoint(
-								LeafPosition,
-								FVector(VertexPositions[
-									WoodTriangle.VertexIDs[0]]),
-								FVector(VertexPositions[
-									WoodTriangle.VertexIDs[1]]),
-								FVector(VertexPositions[
-									WoodTriangle.VertexIDs[2]]));
-						const double DistanceSquared = FVector::DistSquared(
-							LeafPosition,
-							ClosestWoodPosition);
-						const bool bCloser = DistanceSquared
-							< ClosestDistanceSquared
-							- BranchDistanceComparisonTolerance;
-						const bool bStableTie = FMath::IsNearlyEqual(
-							DistanceSquared,
-							ClosestDistanceSquared,
-							BranchDistanceComparisonTolerance)
-							&& (Assignment.ParentComponentIndex == INDEX_NONE
-								|| ComponentIndex
-									< Assignment.ParentComponentIndex);
-						if (bCloser || bStableTie)
-						{
-							ClosestDistanceSquared = DistanceSquared;
-							Assignment.ParentComponentIndex = ComponentIndex;
-						}
-					}
-				}
-			}
-
-			if (Assignment.ParentComponentIndex != INDEX_NONE)
-			{
-				Result.Add(MoveTemp(Assignment));
-			}
-		}
-		return Result;
-	}
-
-	void MeasureComponentSubtrees(
-		const TArray<int32>& ParentComponentIndices,
-		const int32 TrunkComponentIndex,
-		const TArray<TArray<FVector>>& ComponentCenterlines,
-		TArray<double>& OutPersistenceLengths,
-		TArray<double>& OutMaximumZValues)
-	{
-		check(ParentComponentIndices.Num() == ComponentCenterlines.Num());
-		OutPersistenceLengths.SetNum(ComponentCenterlines.Num());
-		OutMaximumZValues.SetNum(ComponentCenterlines.Num());
-		TArray<double> ComponentLengths;
-		ComponentLengths.SetNum(ComponentCenterlines.Num());
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < ComponentCenterlines.Num();
-			++ComponentIndex)
-		{
-			ComponentLengths[ComponentIndex] = MeasureCenterlineLength(
-				ComponentCenterlines[ComponentIndex]);
-			OutPersistenceLengths[ComponentIndex] =
-				ComponentLengths[ComponentIndex];
-			double MaximumZ = TNumericLimits<double>::Lowest();
-			for (const FVector& Point : ComponentCenterlines[ComponentIndex])
-			{
-				MaximumZ = FMath::Max(MaximumZ, Point.Z);
-			}
-			OutMaximumZValues[ComponentIndex] = MaximumZ;
-		}
-
-		const TArray<int32> ComponentOrder = BuildHierarchyOrder(
-			ParentComponentIndices,
-			TrunkComponentIndex);
-		for (int32 OrderIndex = ComponentOrder.Num() - 1;
-			OrderIndex >= 0;
-			--OrderIndex)
-		{
-			const int32 ComponentIndex = ComponentOrder[OrderIndex];
-			const int32 ParentIndex = ParentComponentIndices[ComponentIndex];
-			if (!ParentComponentIndices.IsValidIndex(ParentIndex))
-			{
-				continue;
-			}
-			OutPersistenceLengths[ParentIndex] = FMath::Max(
-				OutPersistenceLengths[ParentIndex],
-				ComponentLengths[ParentIndex]
-					+ OutPersistenceLengths[ComponentIndex]);
-			OutMaximumZValues[ParentIndex] = FMath::Max(
-				OutMaximumZValues[ParentIndex],
-				OutMaximumZValues[ComponentIndex]);
+			BoneRecord.MinimumAxisProjection = MinimumProjection;
+			BoneRecord.PositiveAxisExtent = MaximumProjection;
+			BoneRecord.AxisExtent = MaximumProjection - MinimumProjection;
 		}
 	}
-
-	FBranchAssignment AssignBranchIDs(
-		const TArray<FWoodComponent>& WoodComponents,
-		const int32 TrunkComponentIndex,
-		const TArray<int32>& ParentComponentIndices,
-		const TArray<TArray<FVector>>& ComponentCenterlines)
-	{
-		check(WoodComponents.IsValidIndex(TrunkComponentIndex));
-		check(ParentComponentIndices.Num() == WoodComponents.Num());
-		check(ComponentCenterlines.Num() == WoodComponents.Num());
-		FBranchAssignment Result;
-		Result.BranchIDs.Init(INDEX_NONE, WoodComponents.Num());
-
-		const TArray<FVector>& TrunkCenterline =
-			ComponentCenterlines[TrunkComponentIndex];
-		const double TrunkLength = MeasureCenterlineLength(TrunkCenterline);
-		check(TrunkLength > MinimumGeometryScale);
-		const TArray<FCenterlineRadialSample> TrunkRadialSamples =
-			BuildCenterlineRadialSamples(
-				WoodComponents[TrunkComponentIndex],
-				TrunkCenterline);
-		const double BaseTrunkDiameter = MeasureLocalCenterlineDiameter(
-			WoodComponents[TrunkComponentIndex],
-			TrunkRadialSamples,
-			TrunkLength,
-			0.0);
-		const double RootBandLength = FMath::Clamp(
-			BaseTrunkDiameter * RootBandBaseDiameterScale,
-			TrunkLength * MinimumRootBandLengthFraction,
-			TrunkLength * MaximumRootBandLengthFraction);
-
-		TArray<double> PersistenceLengths;
-		TArray<double> MaximumZValues;
-		MeasureComponentSubtrees(
-			ParentComponentIndices,
-			TrunkComponentIndex,
-			ComponentCenterlines,
-			PersistenceLengths,
-			MaximumZValues);
-
-		// H (trunk length), D (local trunk diameter), and P (subtree
-		// persistence) make root recognition scale-independent. Every other
-		// direct trunk child is a distinct wind branch; trunk stubs remain
-		// manually editable branches instead of relying on a fragile guess.
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < WoodComponents.Num();
-			++ComponentIndex)
-		{
-			if (ParentComponentIndices[ComponentIndex]
-				!= TrunkComponentIndex)
-			{
-				continue;
-			}
-			const TArray<FVector>& Centerline =
-				ComponentCenterlines[ComponentIndex];
-			const FClosestCenterlineLocation Attachment =
-				FindClosestCenterlineLocation(Centerline[0], TrunkCenterline);
-			const double PersistenceLength =
-				PersistenceLengths[ComponentIndex];
-			const double InitialRise =
-				Centerline.Last().Z - Centerline[0].Z;
-			const bool bIsRoot =
-				Attachment.DistanceAlong <= RootBandLength
-				&& MaximumZValues[ComponentIndex] <= RootBandLength
-				&& InitialRise <= PersistenceLength
-					* RootMaximumRisePersistenceFraction;
-			if (bIsRoot)
-			{
-				++Result.RootSubtreeCount;
-			}
-			else
-			{
-				Result.BranchIDs[ComponentIndex] = Result.BranchCount;
-				++Result.BranchCount;
-			}
-		}
-
-		const TArray<int32> ComponentOrder = BuildHierarchyOrder(
-			ParentComponentIndices,
-			TrunkComponentIndex);
-		for (const int32 ComponentIndex : ComponentOrder)
-		{
-			if (ComponentIndex == TrunkComponentIndex
-				|| ParentComponentIndices[ComponentIndex]
-					== TrunkComponentIndex)
-			{
-				continue;
-			}
-			const int32 ParentIndex = ParentComponentIndices[ComponentIndex];
-			if (ParentComponentIndices.IsValidIndex(ParentIndex))
-			{
-				Result.BranchIDs[ComponentIndex] = Result.BranchIDs[ParentIndex];
-			}
-			else
-			{
-				Result.BranchIDs[ComponentIndex] = Result.BranchCount;
-				++Result.BranchCount;
-			}
-		}
-		return Result;
-	}
-
-	void AddCenterlineGeometry(
-		const TArray<FVector>& Centerline,
-		const double Radius,
-		FFoliageBakerTreeHierarchyPreviewBranch& PreviewBranch)
-	{
-		check(Centerline.Num() >= 2);
-		for (int32 PointIndex = 1; PointIndex < Centerline.Num(); ++PointIndex)
-		{
-			if (Centerline[PointIndex - 1].Equals(
-					Centerline[PointIndex],
-					MinimumGeometryScale))
-			{
-				continue;
-			}
-			FFoliageBakerTreeHierarchyPreviewCylinder& Cylinder =
-				PreviewBranch.Cylinders.AddDefaulted_GetRef();
-			Cylinder.Start = Centerline[PointIndex - 1];
-			Cylinder.End = Centerline[PointIndex];
-			Cylinder.Radius = Radius;
-		}
-		for (int32 PointIndex = 1;
-			PointIndex < Centerline.Num() - 1;
-			++PointIndex)
-		{
-			const FVector IncomingDirection = (
-				Centerline[PointIndex] - Centerline[PointIndex - 1]).GetSafeNormal();
-			const FVector OutgoingDirection = (
-				Centerline[PointIndex + 1] - Centerline[PointIndex]).GetSafeNormal();
-			if (IncomingDirection.IsNearlyZero()
-				|| OutgoingDirection.IsNearlyZero()
-				|| FVector::DotProduct(IncomingDirection, OutgoingDirection)
-				> PreviewJointMinimumDirectionDot)
-			{
-				continue;
-			}
-			FFoliageBakerTreeHierarchyPreviewJoint& Joint =
-				PreviewBranch.Joints.AddDefaulted_GetRef();
-			Joint.Position = Centerline[PointIndex];
-			Joint.Radius = Radius * JointPreviewRadiusScale;
-		}
-	}
-
-	TSharedPtr<FFoliageBakerTreeHierarchyPreviewData> BuildPreviewData(
-		UStaticMesh& StaticMesh,
-		const TArray<FTreeTriangle>& Triangles,
-		const TArray<FWoodComponent>& WoodComponents,
-		const int32 TrunkComponentIndex,
-		const TArray<int32>& ParentComponentIndices,
-		const TArray<int32>& BranchIDs,
-		const TArray<TArray<FVector>>& ComponentCenterlines,
-		const TArray<FWoodCapIsland>& WoodCapIslands,
-		const TArray<FLeafBranchAssignment>& LeafBranchAssignments,
-		const FBox& WoodBounds,
-		const int32 SourceLODIndex)
-	{
-		check(WoodComponents.IsValidIndex(TrunkComponentIndex));
-		check(ParentComponentIndices.Num() == WoodComponents.Num());
-		check(BranchIDs.Num() == WoodComponents.Num());
-		check(ComponentCenterlines.Num() == WoodComponents.Num());
-
-		TSharedRef<FFoliageBakerTreeHierarchyPreviewData> PreviewData =
-			MakeShared<FFoliageBakerTreeHierarchyPreviewData>();
-		PreviewData->AssetName = StaticMesh.GetName();
-		PreviewData->Bounds = StaticMesh.GetBoundingBox();
-		PreviewData->SourceStaticMesh = &StaticMesh;
-		PreviewData->SourceLODIndex = SourceLODIndex;
-		const double BranchRadius = FMath::Max(
-			WoodBounds.GetSize().Size() * BranchPreviewRadiusTreeFraction,
-			MinimumBranchPreviewRadius);
-
-		const TArray<FVector>& TrunkCenterline =
-			ComponentCenterlines[TrunkComponentIndex];
-		FFoliageBakerTreeHierarchyPreviewBranch& TrunkBranch =
-			PreviewData->Branches.AddDefaulted_GetRef();
-		TrunkBranch.Color = FLinearColor::White;
-		TrunkBranch.Label = TEXT("Trunk");
-		TrunkBranch.LabelPosition = FindPointAlongCenterline(
-			TrunkCenterline,
-			0.55);
-		AddCenterlineGeometry(
-			TrunkCenterline,
-			BranchRadius * TrunkPreviewRadiusScale,
-			TrunkBranch);
-		check(!TrunkBranch.Cylinders.IsEmpty());
-		check(TrunkBranch.Cylinders[0].Start == FVector::ZeroVector);
-
-		TMap<int32, int32> PreviewBranchIndexByID;
-
-		for (int32 ComponentIndex = 0;
-			ComponentIndex < WoodComponents.Num();
-			++ComponentIndex)
-		{
-			if (ComponentIndex == TrunkComponentIndex
-				|| BranchIDs[ComponentIndex] == INDEX_NONE)
-			{
-				continue;
-			}
-
-			const int32 ParentIndex = ParentComponentIndices[ComponentIndex];
-			const TArray<FVector>& ComponentCenterline =
-				ComponentCenterlines[ComponentIndex];
-			const FVector& ComponentStart = ComponentCenterline[0];
-
-			const int32 BranchID = BranchIDs[ComponentIndex];
-			int32& PreviewBranchIndex = PreviewBranchIndexByID.FindOrAdd(
-				BranchID,
-				INDEX_NONE);
-			if (PreviewBranchIndex == INDEX_NONE)
-			{
-				PreviewBranchIndex = PreviewData->Branches.AddDefaulted();
-				PreviewData->Branches[PreviewBranchIndex].BranchID = BranchID;
-				PreviewData->Branches[PreviewBranchIndex].Color = FLinearColor(
-					MakeBranchColor(StaticMesh, BranchID));
-			}
-			FFoliageBakerTreeHierarchyPreviewBranch& PreviewBranch =
-				PreviewData->Branches[PreviewBranchIndex];
-			AddCenterlineGeometry(
-				ComponentCenterline,
-				BranchRadius,
-				PreviewBranch);
-			for (const int32 TriangleIndex :
-				WoodComponents[ComponentIndex].TriangleIndices)
-			{
-				PreviewBranch.SourceTriangleIDs.Add(
-					Triangles[TriangleIndex].TriangleID.GetValue());
-			}
-
-			if (WoodComponents.IsValidIndex(ParentIndex)
-				&& ParentIndex != TrunkComponentIndex
-				&& BranchIDs[ParentIndex] == BranchID)
-			{
-				FFoliageBakerTreeHierarchyPreviewJoint& Joint =
-					PreviewBranch.Joints.AddDefaulted_GetRef();
-				Joint.Position = ComponentStart;
-				Joint.Radius = BranchRadius * JointPreviewRadiusScale;
-			}
-			if (ParentIndex == TrunkComponentIndex || ParentIndex == INDEX_NONE)
-			{
-				PreviewBranch.Label = FString::Printf(
-					TEXT("ID %d"),
-					BranchID);
-				PreviewBranch.LabelPosition = FindPointAlongCenterline(
-					ComponentCenterline,
-					0.55);
-			}
-		}
-
-		for (const FWoodCapIsland& CapIsland : WoodCapIslands)
-		{
-			if (!BranchIDs.IsValidIndex(CapIsland.OwnerComponentIndex))
-			{
-				continue;
-			}
-			const int32 BranchID = BranchIDs[CapIsland.OwnerComponentIndex];
-			if (!PreviewBranchIndexByID.Contains(BranchID))
-			{
-				continue;
-			}
-			const int32 PreviewBranchIndex =
-				PreviewBranchIndexByID.FindRef(BranchID);
-			if (!PreviewData->Branches.IsValidIndex(PreviewBranchIndex))
-			{
-				continue;
-			}
-			FFoliageBakerTreeHierarchyPreviewBranch& PreviewBranch =
-				PreviewData->Branches[PreviewBranchIndex];
-			for (const int32 TriangleIndex : CapIsland.TriangleIndices)
-			{
-				PreviewBranch.SourceTriangleIDs.Add(
-					Triangles[TriangleIndex].TriangleID.GetValue());
-			}
-		}
-
-		for (const FLeafBranchAssignment& Assignment : LeafBranchAssignments)
-		{
-			if (!BranchIDs.IsValidIndex(Assignment.ParentComponentIndex))
-			{
-				continue;
-			}
-			FFoliageBakerTreeHierarchyPreviewLeafCluster& LeafCluster =
-				PreviewData->LeafClusters.AddDefaulted_GetRef();
-			LeafCluster.ParentBranchID =
-				BranchIDs[Assignment.ParentComponentIndex];
-			LeafCluster.Bounds = Assignment.Bounds;
-			LeafCluster.TrianglePositions = Assignment.TrianglePositions;
-			for (const int32 TriangleIndex : Assignment.TriangleIndices)
-			{
-				LeafCluster.SourceTriangleIDs.Add(
-					Triangles[TriangleIndex].TriangleID.GetValue());
-			}
-		}
-		return PreviewData;
-	}
-
-	struct FSkeletonClosestLocation
-	{
-		int32 EdgeIndex = INDEX_NONE;
-		double DistanceSquared = TNumericLimits<double>::Max();
-	};
 
 	FSkeletonClosestLocation FindClosestSkeletonEdge(
 		const FVector& Position,
@@ -2219,18 +469,243 @@ namespace
 		return Closest;
 	}
 
-	EFoliageBakerTreeHierarchyPreviewNodeKind ConvertNodeKind(
-		const EFoliageBakerTreeSkeletonNodeKind Kind)
+	FSkeletonClosestLocation FindClosestSkeletonEdgeForBranch(
+		const FVector& Position,
+		const TArray<FFoliageBakerTreeSkeletonEdge>& Edges,
+		const bool bTrunk,
+		const int32 BranchID)
 	{
-		switch (Kind)
+		FSkeletonClosestLocation Closest;
+		for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
 		{
-		case EFoliageBakerTreeSkeletonNodeKind::Root:
-			return EFoliageBakerTreeHierarchyPreviewNodeKind::Root;
-		case EFoliageBakerTreeSkeletonNodeKind::Fork:
-			return EFoliageBakerTreeHierarchyPreviewNodeKind::Fork;
-		case EFoliageBakerTreeSkeletonNodeKind::Tip:
-		default:
-			return EFoliageBakerTreeHierarchyPreviewNodeKind::Tip;
+			const FFoliageBakerTreeSkeletonEdge& Edge = Edges[EdgeIndex];
+			if (Edge.bTrunk != bTrunk
+				|| (!bTrunk && Edge.BranchID != BranchID))
+			{
+				continue;
+			}
+			for (int32 PointIndex = 1; PointIndex < Edge.Polyline.Num(); ++PointIndex)
+			{
+				const double DistanceSquared = FVector::DistSquared(
+					Position,
+					FMath::ClosestPointOnSegment(
+						Position,
+						Edge.Polyline[PointIndex - 1],
+						Edge.Polyline[PointIndex]));
+				if (DistanceSquared < Closest.DistanceSquared)
+				{
+					Closest.EdgeIndex = EdgeIndex;
+					Closest.DistanceSquared = DistanceSquared;
+				}
+			}
+		}
+		return Closest;
+	}
+
+	bool IsSkeletonEdgeInBranch(
+		const FFoliageBakerTreeSkeletonEdge& Edge,
+		const int32 BranchID)
+	{
+		return !Edge.bTrunk && Edge.BranchID == BranchID;
+	}
+
+	bool FindBranchStartPosition(
+		const FFoliageBakerTreeSkeletonResult& Skeleton,
+		const int32 BranchID,
+		FVector& OutStartPosition)
+	{
+		TSet<int32> BranchEndNodeIDs;
+		for (const FFoliageBakerTreeSkeletonEdge& Edge : Skeleton.Edges)
+		{
+			if (IsSkeletonEdgeInBranch(Edge, BranchID))
+			{
+				BranchEndNodeIDs.Add(Edge.EndNodeID);
+			}
+		}
+		for (const FFoliageBakerTreeSkeletonEdge& Edge : Skeleton.Edges)
+		{
+			if (IsSkeletonEdgeInBranch(Edge, BranchID)
+				&& !BranchEndNodeIDs.Contains(Edge.StartNodeID)
+				&& Skeleton.Nodes.IsValidIndex(Edge.StartNodeID))
+			{
+				OutStartPosition = Skeleton.Nodes[Edge.StartNodeID].Position;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	FVector FindTerminalDirection(
+		const FFoliageBakerTreeSkeletonEdge& Edge,
+		const FVector& StartPosition,
+		const FVector& EndPosition)
+	{
+		for (int32 PointIndex = Edge.Polyline.Num() - 1;
+			PointIndex > 0;
+			--PointIndex)
+		{
+			const FVector Direction = (
+				Edge.Polyline[PointIndex]
+					- Edge.Polyline[PointIndex - 1]).GetSafeNormal();
+			if (!Direction.IsNearlyZero())
+			{
+				return Direction;
+			}
+		}
+		return (EndPosition - StartPosition).GetSafeNormal();
+	}
+
+	bool BuildTrunkSkeletonPath(
+		const FFoliageBakerTreeSkeletonResult& Skeleton,
+		FTrunkSkeletonPath& OutPath)
+	{
+		TArray<TArray<int32>> OutgoingEdgeIndices;
+		OutgoingEdgeIndices.SetNum(Skeleton.Nodes.Num());
+		TArray<int32> IncomingEdgeIndices;
+		IncomingEdgeIndices.Init(INDEX_NONE, Skeleton.Nodes.Num());
+		for (int32 EdgeIndex = 0; EdgeIndex < Skeleton.Edges.Num(); ++EdgeIndex)
+		{
+			const FFoliageBakerTreeSkeletonEdge& Edge = Skeleton.Edges[EdgeIndex];
+			if (!Edge.bTrunk)
+			{
+				continue;
+			}
+			if (OutgoingEdgeIndices.IsValidIndex(Edge.StartNodeID))
+			{
+				OutgoingEdgeIndices[Edge.StartNodeID].Add(EdgeIndex);
+			}
+			if (IncomingEdgeIndices.IsValidIndex(Edge.EndNodeID))
+			{
+				IncomingEdgeIndices[Edge.EndNodeID] = EdgeIndex;
+			}
+		}
+
+		const int32 StartNodeID = Skeleton.RootNodeID;
+		if (!Skeleton.Nodes.IsValidIndex(StartNodeID)
+			|| !OutgoingEdgeIndices.IsValidIndex(StartNodeID)
+			|| OutgoingEdgeIndices[StartNodeID].IsEmpty())
+		{
+			return false;
+		}
+
+		TArray<double> PathScoreByNode;
+		PathScoreByNode.Init(TNumericLimits<double>::Lowest(), Skeleton.Nodes.Num());
+		PathScoreByNode[StartNodeID] = 0.0;
+		TArray<int32> PendingNodeIDs;
+		PendingNodeIDs.Add(StartNodeID);
+		for (int32 PendingIndex = 0;
+			PendingIndex < PendingNodeIDs.Num();
+			++PendingIndex)
+		{
+			const int32 NodeID = PendingNodeIDs[PendingIndex];
+			for (const int32 EdgeIndex : OutgoingEdgeIndices[NodeID])
+			{
+				const FFoliageBakerTreeSkeletonEdge& Edge = Skeleton.Edges[EdgeIndex];
+				const double EdgeLength = MeasureCenterlineLength(Edge.Polyline);
+				const double CandidateScore =
+					PathScoreByNode[NodeID] + EdgeLength;
+				if (!PathScoreByNode.IsValidIndex(Edge.EndNodeID)
+					|| CandidateScore <= PathScoreByNode[Edge.EndNodeID])
+				{
+					continue;
+				}
+				PathScoreByNode[Edge.EndNodeID] = CandidateScore;
+				IncomingEdgeIndices[Edge.EndNodeID] = EdgeIndex;
+				PendingNodeIDs.Add(Edge.EndNodeID);
+			}
+		}
+
+		int32 EndNodeID = INDEX_NONE;
+		double MaximumPathScore = TNumericLimits<double>::Lowest();
+		for (const int32 NodeID : PendingNodeIDs)
+		{
+			if (!OutgoingEdgeIndices.IsValidIndex(NodeID)
+				|| !OutgoingEdgeIndices[NodeID].IsEmpty()
+				|| !PathScoreByNode.IsValidIndex(NodeID)
+				|| PathScoreByNode[NodeID] <= MaximumPathScore)
+			{
+				continue;
+			}
+			EndNodeID = NodeID;
+			MaximumPathScore = PathScoreByNode[NodeID];
+		}
+		if (!Skeleton.Nodes.IsValidIndex(EndNodeID)
+			|| !IncomingEdgeIndices.IsValidIndex(EndNodeID)
+			|| !Skeleton.Edges.IsValidIndex(IncomingEdgeIndices[EndNodeID]))
+		{
+			return false;
+		}
+
+		OutPath.TerminalEdgeIndex = IncomingEdgeIndices[EndNodeID];
+		OutPath.StartPosition = Skeleton.Nodes[StartNodeID].Position;
+		OutPath.EndPosition = Skeleton.Nodes[EndNodeID].Position;
+		TArray<int32> PathEdgeIndices;
+		int32 PathNodeID = EndNodeID;
+		while (PathNodeID != StartNodeID)
+		{
+			const int32 PathEdgeIndex = IncomingEdgeIndices[PathNodeID];
+			PathEdgeIndices.Add(PathEdgeIndex);
+			PathNodeID = Skeleton.Edges[PathEdgeIndex].StartNodeID;
+		}
+		Algo::Reverse(PathEdgeIndices);
+		for (const int32 PathEdgeIndex : PathEdgeIndices)
+		{
+			const TArray<FVector>& EdgePolyline =
+				Skeleton.Edges[PathEdgeIndex].Polyline;
+			const int32 FirstPointIndex = OutPath.Polyline.IsEmpty() ? 0 : 1;
+			for (int32 PointIndex = FirstPointIndex;
+				PointIndex < EdgePolyline.Num();
+				++PointIndex)
+			{
+				OutPath.Polyline.Add(EdgePolyline[PointIndex]);
+			}
+		}
+		return true;
+	}
+
+	void ExtendTrunkPathToSourceTerminal(
+		const TArray<FTreeTriangle>& Triangles,
+		const TVertexAttributesConstRef<FVector3f>& VertexPositions,
+		const TArray<int32>& TriangleSkeletonEdgeIndices,
+		const FFoliageBakerTreeSkeletonResult& Skeleton,
+		FTrunkSkeletonPath& Path)
+	{
+		if (!Skeleton.Edges.IsValidIndex(Path.TerminalEdgeIndex))
+		{
+			return;
+		}
+		const FVector TerminalDirection = FindTerminalDirection(
+			Skeleton.Edges[Path.TerminalEdgeIndex],
+			Path.StartPosition,
+			Path.EndPosition);
+		if (TerminalDirection.IsNearlyZero())
+		{
+			return;
+		}
+		double TerminalExtension = 0.0;
+		for (int32 TriangleIndex = 0;
+			TriangleIndex < TriangleSkeletonEdgeIndices.Num();
+			++TriangleIndex)
+		{
+			if (TriangleSkeletonEdgeIndices[TriangleIndex]
+					!= Path.TerminalEdgeIndex
+				|| !Triangles.IsValidIndex(TriangleIndex))
+			{
+				continue;
+			}
+			for (const FVertexID VertexID : Triangles[TriangleIndex].VertexIDs)
+			{
+				TerminalExtension = FMath::Max(
+					TerminalExtension,
+					FVector::DotProduct(
+						FVector(VertexPositions[VertexID]) - Path.EndPosition,
+						TerminalDirection));
+			}
+		}
+		Path.EndPosition += TerminalDirection * TerminalExtension;
+		if (!Path.Polyline.IsEmpty())
+		{
+			Path.Polyline.Last() = Path.EndPosition;
 		}
 	}
 
@@ -2240,10 +715,9 @@ namespace
 		const TArray<FTreeTriangle>& Triangles,
 		const TVertexAttributesConstRef<FVector3f>& VertexPositions,
 		const TArray<int32>& WoodTriangleIndices,
-		const TArray<FTriangleComponent>& LeafTriangleComponents,
-		const TArray<FWoodCapIsland>& WoodCapIslands,
+		const TArray<FTriangleComponent>& WoodTriangleComponents,
 		const FFoliageBakerTreeSkeletonResult& Skeleton,
-		TArray<int32>& OutTriangleBranchIDs)
+		const FVector& Pivot)
 	{
 		TSharedRef<FFoliageBakerTreeHierarchyPreviewData> PreviewData =
 			MakeShared<FFoliageBakerTreeHierarchyPreviewData>();
@@ -2261,21 +735,8 @@ namespace
 		}
 		PreviewData->SourceStaticMesh = &StaticMesh;
 		PreviewData->SourceLODIndex = SourceLODIndex;
-		PreviewData->RootNodeID = Skeleton.RootNodeID;
 		PreviewData->SkeletonCellSize = Skeleton.CellSize;
 		PreviewData->WoodVolumeComponentCount = Skeleton.OccupiedComponentCount;
-		PreviewData->UncoveredGuideTerminalCount =
-			Skeleton.UncoveredGuideTerminalCount;
-		for (const FFoliageBakerTreeSkeletonNode& SkeletonNode : Skeleton.Nodes)
-		{
-			FFoliageBakerTreeHierarchyPreviewNode& Node =
-				PreviewData->SkeletonNodes.AddDefaulted_GetRef();
-			Node.NodeID = SkeletonNode.NodeID;
-			Node.ParentNodeID = SkeletonNode.ParentNodeID;
-			Node.Position = SkeletonNode.Position;
-			Node.Radius = SkeletonNode.Radius;
-			Node.Kind = ConvertNodeKind(SkeletonNode.Kind);
-		}
 
 		TMap<int32, int32> PreviewBranchIndexByID;
 		const int32 TrunkPreviewBranchIndex = PreviewData->Branches.AddDefaulted();
@@ -2288,122 +749,47 @@ namespace
 			Skeleton.CellSize * 0.45);
 		for (const FFoliageBakerTreeSkeletonEdge& SkeletonEdge : Skeleton.Edges)
 		{
-			FFoliageBakerTreeHierarchyPreviewEdge& Edge =
-				PreviewData->SkeletonEdges.AddDefaulted_GetRef();
-			Edge.EdgeID = SkeletonEdge.EdgeID;
-			Edge.StartNodeID = SkeletonEdge.StartNodeID;
-			Edge.EndNodeID = SkeletonEdge.EndNodeID;
-			Edge.BranchID = SkeletonEdge.BranchID;
-			Edge.ParentBranchID = SkeletonEdge.ParentBranchID;
-			Edge.bTrunk = SkeletonEdge.bTrunk;
-			Edge.Polyline = SkeletonEdge.Polyline;
-
-			const int32 BranchID = SkeletonEdge.bTrunk
-				? INDEX_NONE
-				: SkeletonEdge.BranchID;
-			int32 PreviewBranchIndex = INDEX_NONE;
 			if (SkeletonEdge.bTrunk)
-			{
-				PreviewBranchIndex = TrunkPreviewBranchIndex;
-			}
-			else
-			{
-				int32& BranchIndex = PreviewBranchIndexByID.FindOrAdd(
-					BranchID,
-					INDEX_NONE);
-				if (BranchIndex == INDEX_NONE)
-				{
-					BranchIndex = PreviewData->Branches.AddDefaulted();
-					FFoliageBakerTreeHierarchyPreviewBranch& Branch =
-						PreviewData->Branches[BranchIndex];
-					Branch.BranchID = BranchID;
-					Branch.ParentBranchID = SkeletonEdge.ParentBranchID;
-					Branch.Color = FLinearColor(MakeBranchColor(StaticMesh, BranchID));
-					Branch.Label = FString::Printf(TEXT("ID %d"), BranchID);
-					Branch.LabelPosition = SkeletonEdge.Polyline.IsEmpty()
-						? FVector::ZeroVector
-						: SkeletonEdge.Polyline[SkeletonEdge.Polyline.Num() / 2];
-				}
-				PreviewBranchIndex = BranchIndex;
-			}
-			FFoliageBakerTreeHierarchyPreviewBranch& Branch =
-				PreviewData->Branches[PreviewBranchIndex];
-			const double PreviewRadius = SkeletonEdge.bTrunk
-				? MinimumPreviewRadius * TrunkPreviewRadiusScale
-				: MinimumPreviewRadius;
-			for (int32 PointIndex = 1;
-				PointIndex < SkeletonEdge.Polyline.Num();
-				++PointIndex)
-			{
-				if (SkeletonEdge.Polyline[PointIndex - 1].Equals(
-						SkeletonEdge.Polyline[PointIndex],
-						MinimumGeometryScale))
-				{
-					continue;
-				}
-				FFoliageBakerTreeHierarchyPreviewCylinder& Cylinder =
-					Branch.Cylinders.AddDefaulted_GetRef();
-				Cylinder.Start = SkeletonEdge.Polyline[PointIndex - 1];
-				Cylinder.End = SkeletonEdge.Polyline[PointIndex];
-				Cylinder.Radius = PreviewRadius;
-			}
-		}
-
-		for (const FFoliageBakerTreeSkeletonNode& SkeletonNode : Skeleton.Nodes)
-		{
-			if (SkeletonNode.Kind != EFoliageBakerTreeSkeletonNodeKind::Fork)
 			{
 				continue;
 			}
-			for (FFoliageBakerTreeHierarchyPreviewBranch& Branch : PreviewData->Branches)
+			const int32 BranchID = SkeletonEdge.BranchID;
+			int32& BranchIndex = PreviewBranchIndexByID.FindOrAdd(
+				BranchID,
+				INDEX_NONE);
+			if (BranchIndex == INDEX_NONE)
 			{
-				bool bUsesNode = false;
-				for (const FFoliageBakerTreeHierarchyPreviewEdge& Edge :
-					PreviewData->SkeletonEdges)
-				{
-					const bool bSameBranch =
-						(Branch.Label == TEXT("Trunk") && Edge.bTrunk)
-						|| (Branch.BranchID != INDEX_NONE
-							&& !Edge.bTrunk
-							&& Edge.BranchID == Branch.BranchID);
-					if (bSameBranch
-						&& (Edge.StartNodeID == SkeletonNode.NodeID
-							|| Edge.EndNodeID == SkeletonNode.NodeID))
-					{
-						bUsesNode = true;
-						break;
-					}
-				}
-				if (!bUsesNode)
-				{
-					continue;
-				}
-				FFoliageBakerTreeHierarchyPreviewJoint& Joint =
-					Branch.Joints.AddDefaulted_GetRef();
-				Joint.Position = SkeletonNode.Position;
-				Joint.Radius = MinimumPreviewRadius * JointPreviewRadiusScale;
+				BranchIndex = PreviewData->Branches.AddDefaulted();
+				FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+					PreviewData->Branches[BranchIndex];
+				Branch.BranchID = BranchID;
+				Branch.ParentBranchID = SkeletonEdge.ParentBranchID;
+				Branch.Color = FLinearColor(MakeBranchColor(StaticMesh, BranchID));
+				Branch.Label = FString::Printf(TEXT("ID %d"), BranchID);
 			}
 		}
-		FFoliageBakerTreeHierarchyPreviewBranch& FinalTrunk =
-			PreviewData->Branches[TrunkPreviewBranchIndex];
-		if (!FinalTrunk.Cylinders.IsEmpty())
+		PreviewData->Branches[TrunkPreviewBranchIndex].BoneRecord.BakeID = 0;
+		PreviewData->Branches[TrunkPreviewBranchIndex].BoneRecord.ParentBakeID = 0;
+		for (int32 PreviewBranchIndex = 0;
+			PreviewBranchIndex < PreviewData->Branches.Num();
+			++PreviewBranchIndex)
 		{
-			FinalTrunk.LabelPosition = FinalTrunk.Cylinders[
-				FinalTrunk.Cylinders.Num() / 2].Start;
-		}
-		OutTriangleBranchIDs.Init(INDEX_NONE, Triangles.Num());
-		TBitArray<> WoodOwned(false, Triangles.Num());
-		TArray<int32> SkeletonWoodTriangleIndices = WoodTriangleIndices;
-		TSet<int32> WoodCapTriangleIndices;
-		for (const FWoodCapIsland& CapIsland : WoodCapIslands)
-		{
-			for (const int32 TriangleIndex : CapIsland.TriangleIndices)
+			FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+				PreviewData->Branches[PreviewBranchIndex];
+			if (PreviewBranchIndex == TrunkPreviewBranchIndex)
 			{
-				WoodCapTriangleIndices.Add(TriangleIndex);
-				SkeletonWoodTriangleIndices.AddUnique(TriangleIndex);
+				continue;
 			}
+			Branch.BoneRecord.BakeID = Branch.BranchID + 1;
+			Branch.BoneRecord.ParentBakeID = Branch.ParentBranchID == INDEX_NONE
+				? 0
+				: Branch.ParentBranchID + 1;
 		}
-		for (const int32 TriangleIndex : SkeletonWoodTriangleIndices)
+		TArray<int32> ProvisionalPreviewBranchIndexByTriangle;
+		ProvisionalPreviewBranchIndexByTriangle.Init(INDEX_NONE, Triangles.Num());
+		TArray<int32> TriangleSkeletonEdgeIndices;
+		TriangleSkeletonEdgeIndices.Init(INDEX_NONE, Triangles.Num());
+		for (const int32 TriangleIndex : WoodTriangleIndices)
 		{
 			if (!Triangles.IsValidIndex(TriangleIndex))
 			{
@@ -2425,8 +811,6 @@ namespace
 			const int32 BranchID = Edge.bTrunk
 				? INDEX_NONE
 				: Edge.BranchID;
-			OutTriangleBranchIDs[TriangleIndex] = BranchID;
-			WoodOwned[TriangleIndex] = true;
 			int32 PreviewBranchIndex = INDEX_NONE;
 			if (Edge.bTrunk)
 			{
@@ -2438,71 +822,267 @@ namespace
 			}
 			if (PreviewData->Branches.IsValidIndex(PreviewBranchIndex))
 			{
-				PreviewData->Branches[PreviewBranchIndex].SourceTriangleIDs.Add(
-					Triangle.TriangleID.GetValue());
+				ProvisionalPreviewBranchIndexByTriangle[TriangleIndex] =
+					PreviewBranchIndex;
 			}
 		}
 
-		for (const FTriangleComponent& LeafComponent : LeafTriangleComponents)
+		TArray<TArray<double>> CandidateAreaByComponentAndPreviewBranch;
+		CandidateAreaByComponentAndPreviewBranch.SetNum(
+			WoodTriangleComponents.Num());
+		int32 PivotWoodComponentIndex = INDEX_NONE;
+		double PivotSurfaceDistanceSquared = TNumericLimits<double>::Max();
+		for (int32 ComponentIndex = 0;
+			ComponentIndex < WoodTriangleComponents.Num();
+			++ComponentIndex)
 		{
-			TArray<int32> LeafTriangles;
-			FVector Representative = FVector::ZeroVector;
-			int32 RepresentativeCount = 0;
-			FBox Bounds(EForceInit::ForceInit);
-			TArray<FVector3f> TrianglePositions;
-			for (const int32 TriangleIndex : LeafComponent.TriangleIndices)
+			TArray<double>& CandidateAreas =
+				CandidateAreaByComponentAndPreviewBranch[ComponentIndex];
+			CandidateAreas.Init(-1.0, PreviewData->Branches.Num());
+			for (const int32 TriangleIndex :
+				WoodTriangleComponents[ComponentIndex].TriangleIndices)
 			{
-				if (WoodCapTriangleIndices.Contains(TriangleIndex)
-					|| !Triangles.IsValidIndex(TriangleIndex))
+				if (!Triangles.IsValidIndex(TriangleIndex))
 				{
 					continue;
 				}
-				LeafTriangles.Add(TriangleIndex);
-				for (const FVertexID VertexID : Triangles[TriangleIndex].VertexIDs)
+				const FTreeTriangle& Triangle = Triangles[TriangleIndex];
+				const FVector A(VertexPositions[Triangle.VertexIDs[0]]);
+				const FVector B(VertexPositions[Triangle.VertexIDs[1]]);
+				const FVector C(VertexPositions[Triangle.VertexIDs[2]]);
+				const double DistanceSquared = FVector::DistSquared(
+					Pivot,
+					FMath::ClosestPointOnTriangleToPoint(Pivot, A, B, C));
+				if (DistanceSquared < PivotSurfaceDistanceSquared)
 				{
-					const FVector3f Position = VertexPositions[VertexID];
-					Representative += FVector(Position);
-					++RepresentativeCount;
-					Bounds += FVector(Position);
-					TrianglePositions.Add(Position);
+					PivotSurfaceDistanceSquared = DistanceSquared;
+					PivotWoodComponentIndex = ComponentIndex;
 				}
-			}
-			if (LeafTriangles.IsEmpty() || RepresentativeCount == 0)
-			{
-				continue;
-			}
-			Representative /= static_cast<double>(RepresentativeCount);
-			const FSkeletonClosestLocation Closest = FindClosestSkeletonEdge(
-				Representative,
-				Skeleton.Edges);
-			if (!Skeleton.Edges.IsValidIndex(Closest.EdgeIndex))
-			{
-				continue;
-			}
-			const FFoliageBakerTreeSkeletonEdge& Edge = Skeleton.Edges[Closest.EdgeIndex];
-			FFoliageBakerTreeHierarchyPreviewLeafCluster& LeafCluster =
-				PreviewData->LeafClusters.AddDefaulted_GetRef();
-			LeafCluster.ParentBranchID = Edge.bTrunk
-				? INDEX_NONE
-				: Edge.BranchID;
-			LeafCluster.Bounds = Bounds;
-			LeafCluster.TrianglePositions = MoveTemp(TrianglePositions);
-			for (const int32 TriangleIndex : LeafTriangles)
-			{
-				LeafCluster.SourceTriangleIDs.Add(
-					Triangles[TriangleIndex].TriangleID.GetValue());
+
+				const int32 PreviewBranchIndex =
+					ProvisionalPreviewBranchIndexByTriangle[TriangleIndex];
+				if (!CandidateAreas.IsValidIndex(PreviewBranchIndex))
+				{
+					continue;
+				}
+				double& CandidateArea = CandidateAreas[PreviewBranchIndex];
+				CandidateArea = FMath::Max(CandidateArea, 0.0)
+					+ FVector::CrossProduct(B - A, C - A).Size() * 0.5;
 			}
 		}
+
+		TArray<TArray<int32>> OwnedTriangleIndicesByPreviewBranchIndex;
+		OwnedTriangleIndicesByPreviewBranchIndex.SetNum(
+			PreviewData->Branches.Num());
+		int32 MixedWoodComponentCount = 0;
+		int32 ResolvedWoodComponentCount = 0;
+		int32 ReassignedWoodTriangleCount = 0;
+		for (int32 ComponentIndex = 0;
+			ComponentIndex < WoodTriangleComponents.Num();
+			++ComponentIndex)
+		{
+			const TArray<double>& CandidateAreas =
+				CandidateAreaByComponentAndPreviewBranch[ComponentIndex];
+			int32 CandidateCount = 0;
+			int32 OwnerPreviewBranchIndex = INDEX_NONE;
+			double OwnerArea = -1.0;
+			for (int32 PreviewBranchIndex = 0;
+				PreviewBranchIndex < CandidateAreas.Num();
+				++PreviewBranchIndex)
+			{
+				const double CandidateArea = CandidateAreas[PreviewBranchIndex];
+				if (CandidateArea < 0.0)
+				{
+					continue;
+				}
+				++CandidateCount;
+				if (CandidateArea > OwnerArea)
+				{
+					OwnerArea = CandidateArea;
+					OwnerPreviewBranchIndex = PreviewBranchIndex;
+				}
+			}
+			if (ComponentIndex == PivotWoodComponentIndex)
+			{
+				OwnerPreviewBranchIndex = TrunkPreviewBranchIndex;
+			}
+			if (!PreviewData->Branches.IsValidIndex(OwnerPreviewBranchIndex))
+			{
+				continue;
+			}
+			++ResolvedWoodComponentCount;
+			MixedWoodComponentCount += CandidateCount > 1 ? 1 : 0;
+			const FFoliageBakerTreeHierarchyPreviewBranch& OwnerBranch =
+				PreviewData->Branches[OwnerPreviewBranchIndex];
+			for (const int32 TriangleIndex :
+				WoodTriangleComponents[ComponentIndex].TriangleIndices)
+			{
+				if (!Triangles.IsValidIndex(TriangleIndex))
+				{
+					continue;
+				}
+				ReassignedWoodTriangleCount +=
+					ProvisionalPreviewBranchIndexByTriangle[TriangleIndex]
+						!= OwnerPreviewBranchIndex
+						? 1
+						: 0;
+				const FTreeTriangle& Triangle = Triangles[TriangleIndex];
+				PreviewData->Branches[OwnerPreviewBranchIndex].SourceTriangleIDs.Add(
+					Triangle.TriangleID.GetValue());
+				OwnedTriangleIndicesByPreviewBranchIndex[OwnerPreviewBranchIndex].Add(
+					TriangleIndex);
+				const FVector Center = (
+					FVector(VertexPositions[Triangle.VertexIDs[0]])
+						+ FVector(VertexPositions[Triangle.VertexIDs[1]])
+						+ FVector(VertexPositions[Triangle.VertexIDs[2]])) / 3.0;
+				const FSkeletonClosestLocation OwnerClosest =
+					FindClosestSkeletonEdgeForBranch(
+						Center,
+						Skeleton.Edges,
+						OwnerPreviewBranchIndex == TrunkPreviewBranchIndex,
+						OwnerBranch.BranchID);
+				TriangleSkeletonEdgeIndices[TriangleIndex] =
+					OwnerClosest.EdgeIndex;
+			}
+		}
+		UE_LOG(
+			LogFoliageBakerTreeHierarchy,
+			Display,
+			TEXT("%s: consolidated wood ownership for %d of %d topology component(s): pivot component %d at %.6f cm, %d mixed candidate component(s), %d reassigned triangle(s)."),
+			*StaticMesh.GetName(),
+			ResolvedWoodComponentCount,
+			WoodTriangleComponents.Num(),
+			PivotWoodComponentIndex,
+			FMath::Sqrt(PivotSurfaceDistanceSquared),
+			MixedWoodComponentCount,
+			ReassignedWoodTriangleCount);
+
+		for (int32 PreviewBranchIndex = 0;
+			PreviewBranchIndex < PreviewData->Branches.Num();
+			++PreviewBranchIndex)
+		{
+			FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+				PreviewData->Branches[PreviewBranchIndex];
+			const bool bTrunk = PreviewBranchIndex == TrunkPreviewBranchIndex;
+			FVector PivotPosition = FVector::ZeroVector;
+			TArray<FVector> PreviewPolyline;
+			if (bTrunk)
+			{
+				FTrunkSkeletonPath TrunkPath;
+				if (!BuildTrunkSkeletonPath(Skeleton, TrunkPath))
+				{
+					continue;
+				}
+				ExtendTrunkPathToSourceTerminal(
+					Triangles,
+					VertexPositions,
+					TriangleSkeletonEdgeIndices,
+					Skeleton,
+					TrunkPath);
+				PivotPosition = TrunkPath.StartPosition;
+				Branch.StartPosition = TrunkPath.StartPosition;
+				Branch.EndPosition = TrunkPath.EndPosition;
+				PreviewPolyline = MoveTemp(TrunkPath.Polyline);
+			}
+			else if (FindBranchStartPosition(
+				Skeleton,
+				Branch.BranchID,
+				PivotPosition))
+			{
+				Branch.StartPosition = PivotPosition;
+			}
+			else
+			{
+				continue;
+			}
+			BuildHierarchyBoneRecord(
+				Triangles,
+				VertexPositions,
+				OwnedTriangleIndicesByPreviewBranchIndex[PreviewBranchIndex],
+				PivotPosition,
+				Branch.BoneRecord);
+			if (!bTrunk)
+			{
+				Branch.EndPosition = PivotPosition
+					+ Branch.BoneRecord.Axis
+						* Branch.BoneRecord.PositiveAxisExtent;
+				PreviewPolyline.Add(Branch.StartPosition);
+				PreviewPolyline.Add(Branch.EndPosition);
+			}
+			Branch.LabelPosition =
+				(Branch.StartPosition + Branch.EndPosition) * 0.5;
+
+			FFoliageBakerTreeHierarchyPreviewNode& StartNode =
+				PreviewData->SkeletonNodes.AddDefaulted_GetRef();
+			const int32 StartNodeID = PreviewData->SkeletonNodes.Num() - 1;
+			StartNode.NodeID = StartNodeID;
+			StartNode.Position = Branch.StartPosition;
+			StartNode.Radius = MinimumPreviewRadius;
+			StartNode.Kind = bTrunk
+				? EFoliageBakerTreeHierarchyPreviewNodeKind::Root
+				: EFoliageBakerTreeHierarchyPreviewNodeKind::Fork;
+			if (bTrunk)
+			{
+				PreviewData->RootNodeID = StartNodeID;
+			}
+			FFoliageBakerTreeHierarchyPreviewNode& EndNode =
+				PreviewData->SkeletonNodes.AddDefaulted_GetRef();
+			EndNode.NodeID = PreviewData->SkeletonNodes.Num() - 1;
+			EndNode.ParentNodeID = StartNodeID;
+			EndNode.Position = Branch.EndPosition;
+			EndNode.Radius = MinimumPreviewRadius;
+			EndNode.Kind = EFoliageBakerTreeHierarchyPreviewNodeKind::Tip;
+
+			FFoliageBakerTreeHierarchyPreviewEdge& Edge =
+				PreviewData->SkeletonEdges.AddDefaulted_GetRef();
+			Edge.EdgeID = PreviewData->SkeletonEdges.Num() - 1;
+			Edge.StartNodeID = StartNodeID;
+			Edge.EndNodeID = EndNode.NodeID;
+			Edge.BranchID = Branch.BranchID;
+			Edge.ParentBranchID = Branch.ParentBranchID;
+			Edge.bTrunk = bTrunk;
+			Edge.Polyline = MoveTemp(PreviewPolyline);
+
+			const double PreviewRadius = bTrunk
+				? MinimumPreviewRadius * TrunkPreviewRadiusScale
+				: MinimumPreviewRadius;
+			for (int32 PointIndex = 1;
+				PointIndex < Edge.Polyline.Num();
+				++PointIndex)
+			{
+				const FVector& SegmentStart = Edge.Polyline[PointIndex - 1];
+				const FVector& SegmentEnd = Edge.Polyline[PointIndex];
+				if (SegmentStart.Equals(SegmentEnd, MinimumGeometryScale))
+				{
+					continue;
+				}
+				FFoliageBakerTreeHierarchyPreviewCylinder& Cylinder =
+					Branch.Cylinders.AddDefaulted_GetRef();
+				Cylinder.Start = SegmentStart;
+				Cylinder.End = SegmentEnd;
+				Cylinder.Radius = PreviewRadius;
+			}
+			FFoliageBakerTreeHierarchyPreviewJoint& StartJoint =
+				Branch.Joints.AddDefaulted_GetRef();
+			StartJoint.Position = Branch.StartPosition;
+			StartJoint.Radius = MinimumPreviewRadius * JointPreviewRadiusScale;
+			FFoliageBakerTreeHierarchyPreviewJoint& EndJoint =
+				Branch.Joints.AddDefaulted_GetRef();
+			EndJoint.Position = Branch.EndPosition;
+			EndJoint.Radius = MinimumPreviewRadius * JointPreviewRadiusScale;
+		}
+
 		return PreviewData;
 	}
 }
 
-FFoliageBakerTreeHierarchyColorBakeResult
-FFoliageBakerTreeHierarchyColorBaker::Bake(
+FFoliageBakerTreeHierarchyAnalysisResult
+FFoliageBakerTreeHierarchyColorBaker::Analyze(
 	UStaticMesh& StaticMesh,
-	const int32 SourceLODIndex)
+	const int32 SourceLODIndex,
+	const int32 LeafMaterialIndex)
 {
-	FFoliageBakerTreeHierarchyColorBakeResult Result;
+	FFoliageBakerTreeHierarchyAnalysisResult Result;
 	if (SourceLODIndex < 0
 		|| !StaticMesh.IsSourceModelValid(SourceLODIndex)
 		|| !StaticMesh.IsMeshDescriptionValid(SourceLODIndex))
@@ -2527,18 +1107,8 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 		return Result;
 	}
 
-	int32 LeafMaterialIndex = INDEX_NONE;
-	if (!FindLeafMaterialIndex(Triangles, LeafMaterialIndex, Error))
-	{
-		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: %s"),
-			*StaticMesh.GetName(),
-			*Error);
-		return Result;
-	}
-
 	TArray<int32> WoodTriangleIndices;
-	TArray<int32> LeafTriangleIndices;
+	int32 LeafTriangleCount = 0;
 	for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
 	{
 		if (Triangles[TriangleIndex].MaterialIndex != LeafMaterialIndex)
@@ -2547,8 +1117,17 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 		}
 		else
 		{
-			LeafTriangleIndices.Add(TriangleIndex);
+			++LeafTriangleCount;
 		}
+	}
+	if (LeafMaterialIndex == INDEX_NONE || LeafTriangleCount == 0)
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: Selected Leaf Material Section %d is not referenced by Source LOD %d."),
+			*StaticMesh.GetName(),
+			LeafMaterialIndex,
+			SourceLODIndex);
+		return Result;
 	}
 	const TArray<FTriangleComponent> WoodTriangleComponents =
 		BuildTriangleComponents(Triangles, WoodTriangleIndices);
@@ -2567,34 +1146,25 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 		WoodComponentTriangleCounts.IsEmpty()
 			? 0
 			: WoodComponentTriangleCounts[WoodComponentTriangleCounts.Num() / 2];
-	const TArray<FTriangleComponent> LeafTriangleComponents =
-		BuildTriangleComponents(Triangles, LeafTriangleIndices);
 	if (WoodTriangleComponents.IsEmpty())
 	{
 		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: No wood geometry remains after card-foliage classification."),
-			*StaticMesh.GetName());
+			TEXT("%s\n  failed: No wood geometry remains after excluding Leaf Material Section %d."),
+			*StaticMesh.GetName(),
+			LeafMaterialIndex);
 		return Result;
 	}
 
 	const TVertexAttributesConstRef<FVector3f> VertexPositions =
 		SourceMeshDescription.GetVertexPositions();
-	TArray<FWoodComponent> WoodComponents;
-	WoodComponents.Reserve(WoodTriangleComponents.Num());
-	FBox WoodBounds(EForceInit::ForceInit);
-	for (const FTriangleComponent& Component : WoodTriangleComponents)
-	{
-		FWoodComponent& WoodComponent = WoodComponents.Add_GetRef(
-			BuildWoodComponent(Component, Triangles, VertexPositions));
-		WoodBounds += WoodComponent.Bounds;
-	}
 	TArray<int32> WoodComponentIDByTriangle;
 	WoodComponentIDByTriangle.Init(INDEX_NONE, Triangles.Num());
 	for (int32 ComponentIndex = 0;
-		ComponentIndex < WoodComponents.Num();
+		ComponentIndex < WoodTriangleComponents.Num();
 		++ComponentIndex)
 	{
-		for (const int32 TriangleIndex : WoodComponents[ComponentIndex].TriangleIndices)
+		for (const int32 TriangleIndex :
+			WoodTriangleComponents[ComponentIndex].TriangleIndices)
 		{
 			if (WoodComponentIDByTriangle.IsValidIndex(TriangleIndex))
 			{
@@ -2602,29 +1172,9 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 			}
 		}
 	}
-	const TArray<FWoodCapIsland> WoodCapIslands =
-		FindTopologyOwnedWoodCapIslands(
-			LeafTriangleComponents,
-			WoodTriangleComponents,
-			Triangles,
-			VertexPositions);
-
-	TArray<int32> SkeletonWoodTriangleIndices = WoodTriangleIndices;
-	for (const FWoodCapIsland& CapIsland : WoodCapIslands)
-	{
-		for (const int32 TriangleIndex : CapIsland.TriangleIndices)
-		{
-			SkeletonWoodTriangleIndices.AddUnique(TriangleIndex);
-			if (WoodComponentIDByTriangle.IsValidIndex(TriangleIndex))
-			{
-				WoodComponentIDByTriangle[TriangleIndex] =
-					CapIsland.OwnerComponentIndex;
-			}
-		}
-	}
 	TArray<FFoliageBakerTreeSkeletonTriangle> SkeletonTriangles;
-	SkeletonTriangles.Reserve(SkeletonWoodTriangleIndices.Num());
-	for (const int32 TriangleIndex : SkeletonWoodTriangleIndices)
+	SkeletonTriangles.Reserve(WoodTriangleIndices.Num());
+	for (const int32 TriangleIndex : WoodTriangleIndices)
 	{
 		if (!Triangles.IsValidIndex(TriangleIndex))
 		{
@@ -2633,7 +1183,6 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 		const FTreeTriangle& Triangle = Triangles[TriangleIndex];
 		FFoliageBakerTreeSkeletonTriangle& SkeletonTriangle =
 			SkeletonTriangles.AddDefaulted_GetRef();
-		SkeletonTriangle.SourceTriangleID = Triangle.TriangleID.GetValue();
 		SkeletonTriangle.SourceComponentID =
 			WoodComponentIDByTriangle[TriangleIndex];
 		SkeletonTriangle.A = FVector(VertexPositions[Triangle.VertexIDs[0]]);
@@ -2643,15 +1192,15 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 	UE_LOG(
 		LogFoliageBakerTreeHierarchy,
 		Display,
-		TEXT("%s: starting pure global GPU skeletonization with %d wood triangles."),
+		TEXT("%s: starting global GPU skeletonization with %d wood triangles."),
 		*StaticMesh.GetName(),
 		SkeletonTriangles.Num());
 	const double SkeletonStartSeconds = FPlatformTime::Seconds();
+	const FVector TreePivot = FVector::ZeroVector;
 	const FFoliageBakerTreeSkeletonResult Skeleton =
 		FFoliageBakerTreeSkeleton::Build(
 			SkeletonTriangles,
-			{},
-			FVector::ZeroVector);
+			TreePivot);
 	UE_LOG(
 		LogFoliageBakerTreeHierarchy,
 		Display,
@@ -2675,92 +1224,55 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 		}
 	}
 
-	TArray<int32> TriangleBranchIDs;
 	Result.PreviewData = BuildSkeletonPreviewData(
 		StaticMesh,
 		SourceLODIndex,
 		Triangles,
 		VertexPositions,
 		WoodTriangleIndices,
-		LeafTriangleComponents,
-		WoodCapIslands,
+		WoodTriangleComponents,
 		Skeleton,
-		TriangleBranchIDs);
-	Result.LeafClusterCount = Result.PreviewData.IsValid()
-		? Result.PreviewData->LeafClusters.Num()
-		: 0;
-
-	TArray<FVector4f> TriangleColors;
-	TriangleColors.Init(FVector4f(0.0f, 0.0f, 0.0f, 1.0f), Triangles.Num());
-	for (const int32 TriangleIndex : SkeletonWoodTriangleIndices)
-	{
-		if (!Triangles.IsValidIndex(TriangleIndex)
-			|| !TriangleBranchIDs.IsValidIndex(TriangleIndex))
-		{
-			continue;
-		}
-		const int32 BranchID = TriangleBranchIDs[TriangleIndex];
-		const FVector4f Color = BranchID == INDEX_NONE
-			? FVector4f(1.0f, 1.0f, 1.0f, 1.0f)
-			: MakeBranchColor(StaticMesh, BranchID);
-		TriangleColors[TriangleIndex] = Color;
-	}
-	StaticMesh.Modify();
-	if (!StaticMesh.ModifyMeshDescription(SourceLODIndex, false))
-	{
-		Result.Report = FString::Printf(
-			TEXT("%s\n  failed: Source LOD %d could not be added to the undo transaction."),
-			*StaticMesh.GetName(),
-			SourceLODIndex);
-		return Result;
-	}
-	StaticMesh.PreEditChange(nullptr);
-	FMeshDescription& EditableMeshDescription =
-		*StaticMesh.GetMeshDescription(SourceLODIndex);
-	if (!EditableMeshDescription.VertexInstanceAttributes().HasAttribute(
-			MeshAttribute::VertexInstance::Color))
-	{
-		EditableMeshDescription.VertexInstanceAttributes()
-			.RegisterAttribute<FVector4f>(
-				MeshAttribute::VertexInstance::Color,
-				1,
-				FVector4f(1.0f, 1.0f, 1.0f, 1.0f),
-				EMeshAttributeFlags::Lerpable | EMeshAttributeFlags::Mandatory);
-	}
-	FStaticMeshAttributes Attributes(EditableMeshDescription);
-	TVertexInstanceAttributesRef<FVector4f> VertexInstanceColors =
-		Attributes.GetVertexInstanceColors();
-	for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
-	{
-		const TArrayView<const FVertexInstanceID> VertexInstanceIDs =
-			EditableMeshDescription.GetTriangleVertexInstances(
-				Triangles[TriangleIndex].TriangleID);
-		if (VertexInstanceIDs.Num() != 3)
-		{
-			continue;
-		}
-		for (const FVertexInstanceID VertexInstanceID : VertexInstanceIDs)
-		{
-			VertexInstanceColors[VertexInstanceID] = TriangleColors[TriangleIndex];
-		}
-	}
-
-	UStaticMesh::FCommitMeshDescriptionParams CommitParams;
-	CommitParams.bMarkPackageDirty = true;
-	CommitParams.bUseHashAsGuid = false;
-	StaticMesh.CommitMeshDescription(SourceLODIndex, CommitParams);
-	StaticMesh.PostEditChange();
-	StaticMesh.MarkPackageDirty();
+		TreePivot);
 
 	Result.bSucceeded = true;
-	Result.CreatedAssets.Add(TStrongObjectPtr<UObject>(&StaticMesh));
+	int32 BoneRecordCount = 0;
+	int32 ZeroAxisBoneRecordCount = 0;
+	double MaximumAxisExtent = 0.0;
+	double MaximumBehindPivotProjection = 0.0;
+	if (Result.PreviewData.IsValid())
+	{
+		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
+			Result.PreviewData->Branches)
+		{
+			if (Branch.BoneRecord.BakeID == INDEX_NONE)
+			{
+				continue;
+			}
+			++BoneRecordCount;
+			ZeroAxisBoneRecordCount += Branch.BoneRecord.Axis.IsNearlyZero()
+				? 1
+				: 0;
+			MaximumAxisExtent = FMath::Max(
+				MaximumAxisExtent,
+				Branch.BoneRecord.AxisExtent);
+			MaximumBehindPivotProjection = FMath::Max(
+				MaximumBehindPivotProjection,
+				FMath::Max(-Branch.BoneRecord.MinimumAxisProjection, 0.0));
+		}
+	}
 	Result.Report = FString::Printf(
-		TEXT("%s\n  wrote LOD %d hierarchy test colors: trunk white, card foliage black, %d branch ID color(s), %d leaf cluster parent assignment(s), %d topology-owned wood cap island(s), %d source wood component(s) (median %d, maximum %d triangles).\n  %s"),
+		TEXT("%s\n  analyzed LOD %d wood hierarchy with Leaf Material Section %d excluded: %d branch group(s), %d virtual bone(s), %d trunk/branch axis record(s) (%d zero-axis, maximum %.3f cm axis extent, %.3f cm behind-pivot projection), %d source wood component(s) (median %d, maximum %d triangles). No Leaf Cluster was created and no asset data was written.\n  %s"),
 		*StaticMesh.GetName(),
 		SourceLODIndex,
+		LeafMaterialIndex,
 		Result.BranchCount,
-		Result.LeafClusterCount,
-		WoodCapIslands.Num(),
+		Result.PreviewData.IsValid()
+			? Result.PreviewData->SkeletonEdges.Num()
+			: 0,
+		BoneRecordCount,
+		ZeroAxisBoneRecordCount,
+		MaximumAxisExtent,
+		MaximumBehindPivotProjection,
 		WoodTriangleComponents.Num(),
 		MedianWoodComponentTriangleCount,
 		MaximumWoodComponentTriangleCount,
@@ -2768,91 +1280,767 @@ FFoliageBakerTreeHierarchyColorBaker::Bake(
 	return Result;
 }
 
-bool FFoliageBakerTreeHierarchyColorBaker::MarkBranchAsTrunk(
-	UStaticMesh& StaticMesh,
+FFoliageBakerLeafOwnershipResolveResult
+FFoliageBakerTreeHierarchyColorBaker::ResolveLeafOwnership(
+	const UStaticMesh& StaticMesh,
 	const int32 SourceLODIndex,
-	const TArray<int32>& SourceTriangleIDs,
-	FString& OutError)
+	const int32 LeafMaterialIndex,
+	const FFoliageBakerTreeHierarchyPreviewData& AnalysisData,
+	const TArray<FFoliageBakerLeafTemplateAnnotation>& Annotations)
 {
+	FFoliageBakerLeafOwnershipResolveResult Result;
 	if (SourceLODIndex < 0
 		|| !StaticMesh.IsSourceModelValid(SourceLODIndex)
 		|| !StaticMesh.IsMeshDescriptionValid(SourceLODIndex))
 	{
-		OutError = FString::Printf(
-			TEXT("Source LOD %d has no editable MeshDescription."),
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: Source LOD %d has no editable MeshDescription."),
+			*StaticMesh.GetName(),
 			SourceLODIndex);
-		return false;
-	}
-	const FMeshDescription& SourceMeshDescription =
-		*StaticMesh.GetMeshDescription(SourceLODIndex);
-	bool bHasValidTriangle = false;
-	for (const int32 SourceTriangleID : SourceTriangleIDs)
-	{
-		if (SourceMeshDescription.IsTriangleValid(
-				FTriangleID(SourceTriangleID)))
-		{
-			bHasValidTriangle = true;
-			break;
-		}
-	}
-	if (!bHasValidTriangle)
-	{
-		OutError = TEXT("The selected branch has no valid source triangles.");
-		return false;
+		return Result;
 	}
 
-	StaticMesh.Modify();
-	if (!StaticMesh.ModifyMeshDescription(SourceLODIndex, false))
-	{
-		OutError = FString::Printf(
-			TEXT("Source LOD %d could not be added to the undo transaction."),
-			SourceLODIndex);
-		return false;
-	}
-	StaticMesh.PreEditChange(nullptr);
-	FMeshDescription& EditableMeshDescription =
+	const FMeshDescription& SourceMeshDescription =
 		*StaticMesh.GetMeshDescription(SourceLODIndex);
-	if (!EditableMeshDescription.VertexInstanceAttributes().HasAttribute(
-		MeshAttribute::VertexInstance::Color))
+	TArray<FTreeTriangle> Triangles;
+	FString Error;
+	if (!ReadTriangles(StaticMesh, SourceMeshDescription, Triangles, Error))
 	{
-		EditableMeshDescription.VertexInstanceAttributes()
-			.RegisterAttribute<FVector4f>(
-				MeshAttribute::VertexInstance::Color,
-				1,
-				FVector4f(1.0f, 1.0f, 1.0f, 1.0f),
-				EMeshAttributeFlags::Lerpable | EMeshAttributeFlags::Mandatory);
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: %s"),
+			*StaticMesh.GetName(),
+			*Error);
+		return Result;
 	}
-	FStaticMeshAttributes Attributes(EditableMeshDescription);
-	TVertexInstanceAttributesRef<FVector4f> VertexInstanceColors =
-		Attributes.GetVertexInstanceColors();
-	for (const int32 SourceTriangleID : SourceTriangleIDs)
+
+	const FStaticMeshConstAttributes Attributes(SourceMeshDescription);
+	const TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs =
+		Attributes.GetVertexInstanceUVs();
+	if (VertexInstanceUVs.GetNumChannels() <= 0)
 	{
-		const FTriangleID TriangleID(SourceTriangleID);
-		if (!EditableMeshDescription.IsTriangleValid(TriangleID))
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: Source LOD %d has no UV0 channel."),
+			*StaticMesh.GetName(),
+			SourceLODIndex);
+		return Result;
+	}
+	const TVertexAttributesConstRef<FVector3f> VertexPositions =
+		SourceMeshDescription.GetVertexPositions();
+
+	TArray<int32> LeafTriangleIndices;
+	TMap<int32, int32> TriangleIndexBySourceTriangleID;
+	for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
+	{
+		const FTreeTriangle& Triangle = Triangles[TriangleIndex];
+		TriangleIndexBySourceTriangleID.Add(
+			Triangle.TriangleID.GetValue(),
+			TriangleIndex);
+		if (Triangle.MaterialIndex == LeafMaterialIndex)
 		{
-			continue;
-		}
-		const TArrayView<const FVertexInstanceID> VertexInstanceIDs =
-			EditableMeshDescription.GetTriangleVertexInstances(TriangleID);
-		if (VertexInstanceIDs.Num() != 3)
-		{
-			continue;
-		}
-		for (const FVertexInstanceID VertexInstanceID : VertexInstanceIDs)
-		{
-			VertexInstanceColors[VertexInstanceID] = FVector4f(
-				1.0f,
-				1.0f,
-				1.0f,
-				1.0f);
+			LeafTriangleIndices.Add(TriangleIndex);
 		}
 	}
+	const TArray<FTriangleComponent> PhysicalLeafComponents =
+		BuildTriangleComponents(Triangles, LeafTriangleIndices);
+	Result.PhysicalLeafClusterCount = PhysicalLeafComponents.Num();
+
+	UE::Geometry::FDynamicMesh3 BranchSurfaceMesh;
+	TMap<int32, int32> ParentBranchIDBySurfaceTriangleID;
+	for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
+		AnalysisData.Branches)
+	{
+		for (const int32 SourceTriangleID : Branch.SourceTriangleIDs)
+		{
+			if (!TriangleIndexBySourceTriangleID.Contains(SourceTriangleID))
+			{
+				continue;
+			}
+			const FTreeTriangle& Triangle = Triangles[
+				TriangleIndexBySourceTriangleID.FindChecked(SourceTriangleID)];
+			const int32 FirstVertexID = BranchSurfaceMesh.AppendVertex(
+				FVector3d(VertexPositions[Triangle.VertexIDs[0]]));
+			const int32 SecondVertexID = BranchSurfaceMesh.AppendVertex(
+				FVector3d(VertexPositions[Triangle.VertexIDs[1]]));
+			const int32 ThirdVertexID = BranchSurfaceMesh.AppendVertex(
+				FVector3d(VertexPositions[Triangle.VertexIDs[2]]));
+			const int32 SurfaceTriangleID = BranchSurfaceMesh.AppendTriangle(
+				FirstVertexID,
+				SecondVertexID,
+				ThirdVertexID);
+			if (SurfaceTriangleID >= 0)
+			{
+				ParentBranchIDBySurfaceTriangleID.Add(
+					SurfaceTriangleID,
+					Branch.BranchID);
+			}
+		}
+	}
+	if (BranchSurfaceMesh.TriangleCount() == 0)
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: Analyze Hierarchy produced no trunk/branch surface triangles for leaf ownership."),
+			*StaticMesh.GetName());
+		return Result;
+	}
+	UE::Geometry::FDynamicMeshAABBTree3 BranchSurfaceSpatial(
+		&BranchSurfaceMesh,
+		true);
+
+	for (const FTriangleComponent& Component : PhysicalLeafComponents)
+	{
+		bool bResolvedComponent = false;
+		for (const FFoliageBakerLeafTemplateAnnotation& Annotation : Annotations)
+		{
+			TArray<int32> MatchingTriangleIndices;
+			for (const int32 TriangleIndex : Component.TriangleIndices)
+			{
+				const FTreeTriangle& Triangle = Triangles[TriangleIndex];
+				const FString TriangleSignature = MakeUVTriangleSignature(
+					VertexInstanceUVs.Get(Triangle.VertexInstanceIDs[0], 0),
+					VertexInstanceUVs.Get(Triangle.VertexInstanceIDs[1], 0),
+					VertexInstanceUVs.Get(Triangle.VertexInstanceIDs[2], 0));
+				if (Annotation.TriangleSignatures.Contains(TriangleSignature))
+				{
+					MatchingTriangleIndices.Add(TriangleIndex);
+				}
+			}
+			if (MatchingTriangleIndices.IsEmpty())
+			{
+				continue;
+			}
+
+			bool bResolvedPivot = false;
+			bool bResolvedTip = false;
+			FVector PivotPosition = FVector::ZeroVector;
+			FVector TipPosition = FVector::ZeroVector;
+			for (const int32 TriangleIndex : MatchingTriangleIndices)
+			{
+				const FTreeTriangle& Triangle = Triangles[TriangleIndex];
+				const TStaticArray<FVector2f, 3> TriangleUVs =
+				{
+					VertexInstanceUVs.Get(Triangle.VertexInstanceIDs[0], 0),
+					VertexInstanceUVs.Get(Triangle.VertexInstanceIDs[1], 0),
+					VertexInstanceUVs.Get(Triangle.VertexInstanceIDs[2], 0)
+				};
+				const TStaticArray<FVector, 3> TrianglePositions =
+				{
+					FVector(VertexPositions[Triangle.VertexIDs[0]]),
+					FVector(VertexPositions[Triangle.VertexIDs[1]]),
+					FVector(VertexPositions[Triangle.VertexIDs[2]])
+				};
+				if (!bResolvedPivot)
+				{
+					bResolvedPivot = ResolveUVPointPosition(
+						Annotation.PivotUV,
+						TriangleUVs,
+						TrianglePositions,
+						PivotPosition);
+				}
+				if (!bResolvedTip)
+				{
+					bResolvedTip = ResolveUVPointPosition(
+						Annotation.TipUV,
+						TriangleUVs,
+						TrianglePositions,
+						TipPosition);
+				}
+				if (bResolvedPivot && bResolvedTip)
+				{
+					break;
+				}
+			}
+			if (!bResolvedPivot || !bResolvedTip)
+			{
+				continue;
+			}
+
+			FFoliageBakerResolvedLeafCluster& ResolvedCluster =
+				Result.ResolvedLeafClusters.AddDefaulted_GetRef();
+			ResolvedCluster.UVIslandSignature = Annotation.UVIslandSignature;
+			ResolvedCluster.PivotPosition = PivotPosition;
+			ResolvedCluster.TipPosition = TipPosition;
+			for (const int32 TriangleIndex : MatchingTriangleIndices)
+			{
+				ResolvedCluster.SourceTriangleIDs.Add(
+					Triangles[TriangleIndex].TriangleID.GetValue());
+			}
+			double NearestDistanceSquared = TNumericLimits<double>::Max();
+			const int32 NearestSurfaceTriangleID =
+				BranchSurfaceSpatial.FindNearestTriangle(
+					FVector3d(PivotPosition),
+					NearestDistanceSquared);
+			if (ParentBranchIDBySurfaceTriangleID.Contains(
+					NearestSurfaceTriangleID))
+			{
+				ResolvedCluster.ParentBranchID =
+					ParentBranchIDBySurfaceTriangleID.FindChecked(
+						NearestSurfaceTriangleID);
+			}
+			bResolvedComponent = true;
+		}
+		if (!bResolvedComponent)
+		{
+			++Result.UnresolvedLeafClusterCount;
+		}
+	}
+
+	Result.ResolvedLeafClusterCount = Result.ResolvedLeafClusters.Num();
+	Result.bSucceeded = true;
+	Result.Report = FString::Printf(
+		TEXT("%s\n  resolved Leaf Material Section %d on LOD %d: %d physical leaf component(s), %d resolved UV-template instance(s), %d physical component(s) without a complete matching Pivot/Tip annotation. Parent ownership used the resolved world-space Pivot nearest to the analyzed trunk/branch source surface. No asset data was written."),
+		*StaticMesh.GetName(),
+		LeafMaterialIndex,
+		SourceLODIndex,
+		Result.PhysicalLeafClusterCount,
+		Result.ResolvedLeafClusterCount,
+		Result.UnresolvedLeafClusterCount);
+	return Result;
+}
+
+namespace
+{
+	constexpr uint16 WindDataParentIDBase = 1024;
+	constexpr double WindDataGeometrySpanRangesCentimeters[] =
+	{
+		256.0,
+		512.0,
+		1024.0,
+		2048.0,
+		4096.0
+	};
+	constexpr EObjectFlags WindDataAssetFlags =
+		RF_Public | RF_Standalone | RF_Transactional;
+
+	struct FWindDataBoneRecord
+	{
+		int32 ParentID = 0;
+		FVector PivotPosition = FVector::ZeroVector;
+		FVector Axis = FVector::ZeroVector;
+		double GeometryProjectionSpanCentimeters = 0.0;
+	};
+
+	double SelectWindDataGeometrySpanRangeCentimeters(
+		const double MaximumGeometryProjectionSpanCentimeters)
+	{
+		for (const double RangeCentimeters :
+			WindDataGeometrySpanRangesCentimeters)
+		{
+			if (MaximumGeometryProjectionSpanCentimeters <= RangeCentimeters)
+			{
+				return RangeCentimeters;
+			}
+		}
+		return WindDataGeometrySpanRangesCentimeters[
+			UE_ARRAY_COUNT(WindDataGeometrySpanRangesCentimeters) - 1];
+	}
+
+	FVector2f MakeWindDataTexelUV(
+		const int32 BoneID,
+		const int32 TextureWidth,
+		const int32 TextureHeight)
+	{
+		return FVector2f(
+			(static_cast<float>(BoneID % TextureWidth) + 0.5f)
+				/ static_cast<float>(TextureWidth),
+			(static_cast<float>(BoneID / TextureWidth) + 0.5f)
+				/ static_cast<float>(TextureHeight));
+	}
+
+	uint8 EncodeWindDataUnitValue(const double Value)
+	{
+		return static_cast<uint8>(FMath::RoundToInt(FMath::Clamp(
+			Value,
+			0.0,
+			1.0) * 255.0));
+	}
+
+	FColor EncodeWindDataAxis(
+		const FWindDataBoneRecord& Record,
+		const double GeometrySpanRangeCentimeters)
+	{
+		const FVector Axis = Record.Axis.GetSafeNormal();
+		const double EncodedGeometryProjectionSpan =
+			Record.GeometryProjectionSpanCentimeters
+			/ GeometrySpanRangeCentimeters;
+		return FColor(
+			EncodeWindDataUnitValue(Axis.X * 0.5 + 0.5),
+			EncodeWindDataUnitValue(Axis.Y * 0.5 + 0.5),
+			EncodeWindDataUnitValue(Axis.Z * 0.5 + 0.5),
+			EncodeWindDataUnitValue(EncodedGeometryProjectionSpan));
+	}
+
+	TStrongObjectPtr<UTexture2D> FindOrCreateWindDataTexture(
+		const UStaticMesh& StaticMesh,
+		const FString& AssetSuffix,
+		FFoliageBakerAssetTransaction& AssetTransaction,
+		FString& OutError)
+	{
+		OutError.Reset();
+		const FString AssetName = StaticMesh.GetName() + AssetSuffix;
+		const FString PackagePath = FPackageName::GetLongPackagePath(
+			StaticMesh.GetOutermost()->GetName());
+		const FString PackageName = PackagePath + TEXT("/") + AssetName;
+		const FString ObjectPath = PackageName + TEXT(".") + AssetName;
+		const TStrongObjectPtr<UObject> ExistingObject(
+			StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath));
+		TStrongObjectPtr<UTexture2D> Texture(
+			Cast<UTexture2D>(ExistingObject.Get()));
+		if (ExistingObject && !Texture)
+		{
+			OutError = FString::Printf(
+				TEXT("Cannot bake wind data because %s is not a Texture2D."),
+				*ObjectPath);
+			return nullptr;
+		}
+
+		TStrongObjectPtr<UPackage> Package(
+			Texture ? Texture->GetOutermost() : CreatePackage(*PackageName));
+		if (!Package)
+		{
+			OutError = FString::Printf(
+				TEXT("Could not create package %s."),
+				*PackageName);
+			return nullptr;
+		}
+		Package->FullyLoad();
+
+		if (!Texture)
+		{
+			Texture.Reset(NewObject<UTexture2D>(
+				Package.Get(),
+				*AssetName,
+				WindDataAssetFlags));
+			if (!Texture)
+			{
+				OutError = FString::Printf(
+					TEXT("Could not create Texture2D %s."),
+					*AssetName);
+				return nullptr;
+			}
+			AssetTransaction.Track(*Texture);
+		}
+		else if (!AssetTransaction.Snapshot(*Texture, OutError))
+		{
+			return nullptr;
+		}
+		else
+		{
+			Texture->Modify();
+		}
+		return Texture;
+	}
+
+	void ConfigureWindDataTexture(UTexture2D& Texture)
+	{
+		Texture.CompressionNone = true;
+		Texture.DeferCompression = false;
+		Texture.SRGB = false;
+		Texture.MipGenSettings = TMGS_NoMipmaps;
+		Texture.Filter = TF_Nearest;
+		Texture.AddressX = TA_Clamp;
+		Texture.AddressY = TA_Clamp;
+		Texture.NeverStream = true;
+	}
+}
+
+FFoliageBakerWindDataBakeResult
+FFoliageBakerTreeHierarchyColorBaker::BakeWindData(
+	UStaticMesh& StaticMesh,
+	const int32 SourceLODIndex,
+	const FFoliageBakerTreeHierarchyPreviewData& AnalysisData,
+	const TArray<FFoliageBakerResolvedLeafCluster>& ResolvedLeafClusters)
+{
+	FFoliageBakerWindDataBakeResult Result;
+	if (SourceLODIndex < 0
+		|| !StaticMesh.IsSourceModelValid(SourceLODIndex)
+		|| !StaticMesh.IsMeshDescriptionValid(SourceLODIndex))
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: Source LOD %d has no editable MeshDescription."),
+			*StaticMesh.GetName(),
+			SourceLODIndex);
+		return Result;
+	}
+
+	const FMeshDescription& SourceMeshDescription =
+		*StaticMesh.GetMeshDescription(SourceLODIndex);
+	TArray<FTreeTriangle> Triangles;
+	FString Error;
+	if (!ReadTriangles(StaticMesh, SourceMeshDescription, Triangles, Error))
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: %s"),
+			*StaticMesh.GetName(),
+			*Error);
+		return Result;
+	}
+	const TVertexAttributesConstRef<FVector3f> VertexPositions =
+		SourceMeshDescription.GetVertexPositions();
+	TMap<int32, int32> TriangleIndexBySourceTriangleID;
+	for (int32 TriangleIndex = 0;
+		TriangleIndex < Triangles.Num();
+		++TriangleIndex)
+	{
+		TriangleIndexBySourceTriangleID.Add(
+			Triangles[TriangleIndex].TriangleID.GetValue(),
+			TriangleIndex);
+	}
+
+	TArray<int32> SortedBranchIndices;
+	SortedBranchIndices.Reserve(AnalysisData.Branches.Num());
+	int32 TrunkBranchIndex = INDEX_NONE;
+	for (int32 BranchIndex = 0;
+		BranchIndex < AnalysisData.Branches.Num();
+		++BranchIndex)
+	{
+		const FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+			AnalysisData.Branches[BranchIndex];
+		if (Branch.BranchID == INDEX_NONE)
+		{
+			TrunkBranchIndex = BranchIndex;
+		}
+		else
+		{
+			SortedBranchIndices.Add(BranchIndex);
+		}
+	}
+	SortedBranchIndices.Sort(
+		[&AnalysisData](const int32 FirstIndex, const int32 SecondIndex)
+		{
+			return AnalysisData.Branches[FirstIndex].BranchID
+				< AnalysisData.Branches[SecondIndex].BranchID;
+		});
+
+	TArray<FWindDataBoneRecord> BoneRecords;
+	TMap<int32, int32> BoneIDByBranchID;
+	TMap<int32, int32> BoneIDBySourceTriangleID;
+	FWindDataBoneRecord& TrunkRecord = BoneRecords.AddDefaulted_GetRef();
+	if (AnalysisData.Branches.IsValidIndex(TrunkBranchIndex))
+	{
+		const FFoliageBakerTreeHierarchyPreviewBranch& TrunkBranch =
+			AnalysisData.Branches[TrunkBranchIndex];
+		TrunkRecord.PivotPosition = TrunkBranch.BoneRecord.PivotPosition;
+		TrunkRecord.Axis = TrunkBranch.BoneRecord.Axis;
+		TrunkRecord.GeometryProjectionSpanCentimeters =
+			TrunkBranch.BoneRecord.AxisExtent;
+		for (const int32 SourceTriangleID : TrunkBranch.SourceTriangleIDs)
+		{
+			BoneIDBySourceTriangleID.Add(SourceTriangleID, 0);
+		}
+	}
+
+	for (const int32 BranchIndex : SortedBranchIndices)
+	{
+		const FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+			AnalysisData.Branches[BranchIndex];
+		const int32 BoneID = BoneRecords.Num();
+		BoneIDByBranchID.Add(Branch.BranchID, BoneID);
+		FWindDataBoneRecord& Record = BoneRecords.AddDefaulted_GetRef();
+		Record.PivotPosition = Branch.BoneRecord.PivotPosition;
+		Record.Axis = Branch.BoneRecord.Axis;
+		Record.GeometryProjectionSpanCentimeters =
+			Branch.BoneRecord.AxisExtent;
+		for (const int32 SourceTriangleID : Branch.SourceTriangleIDs)
+		{
+			BoneIDBySourceTriangleID.Add(SourceTriangleID, BoneID);
+		}
+	}
+	for (const int32 BranchIndex : SortedBranchIndices)
+	{
+		const FFoliageBakerTreeHierarchyPreviewBranch& Branch =
+			AnalysisData.Branches[BranchIndex];
+		const int32 BoneID = BoneIDByBranchID.FindRef(Branch.BranchID);
+		FWindDataBoneRecord& Record = BoneRecords[BoneID];
+		Record.ParentID = Branch.ParentBranchID == INDEX_NONE
+			? 0
+			: BoneIDByBranchID.FindRef(Branch.ParentBranchID);
+	}
+
+	const int32 BranchBoneCount = BoneRecords.Num();
+	for (const FFoliageBakerResolvedLeafCluster& LeafCluster :
+		ResolvedLeafClusters)
+	{
+		const int32 BoneID = BoneRecords.Num();
+		FWindDataBoneRecord& Record = BoneRecords.AddDefaulted_GetRef();
+		Record.ParentID = LeafCluster.ParentBranchID == INDEX_NONE
+			? 0
+			: BoneIDByBranchID.FindRef(LeafCluster.ParentBranchID);
+		Record.PivotPosition = LeafCluster.PivotPosition;
+		const FVector PivotToTip =
+			LeafCluster.TipPosition - LeafCluster.PivotPosition;
+		Record.Axis = PivotToTip.GetSafeNormal();
+		double MinimumProjection = TNumericLimits<double>::Max();
+		double MaximumProjection = TNumericLimits<double>::Lowest();
+		for (const int32 SourceTriangleID : LeafCluster.SourceTriangleIDs)
+		{
+			BoneIDBySourceTriangleID.Add(SourceTriangleID, BoneID);
+			if (!TriangleIndexBySourceTriangleID.Contains(SourceTriangleID))
+			{
+				continue;
+			}
+			const FTreeTriangle& Triangle = Triangles[
+				TriangleIndexBySourceTriangleID.FindChecked(SourceTriangleID)];
+			for (const FVertexID VertexID : Triangle.VertexIDs)
+			{
+				const double Projection = FVector::DotProduct(
+					FVector(VertexPositions[VertexID])
+						- Record.PivotPosition,
+					Record.Axis);
+				MinimumProjection = FMath::Min(
+					MinimumProjection,
+					Projection);
+				MaximumProjection = FMath::Max(
+					MaximumProjection,
+					Projection);
+			}
+		}
+		if (MinimumProjection <= MaximumProjection)
+		{
+			Record.GeometryProjectionSpanCentimeters =
+				MaximumProjection - MinimumProjection;
+		}
+	}
+
+	const int32 BoneRecordCount = BoneRecords.Num();
+	double MaximumGeometryProjectionSpanCentimeters = 0.0;
+	for (const FWindDataBoneRecord& Record : BoneRecords)
+	{
+		MaximumGeometryProjectionSpanCentimeters = FMath::Max(
+			MaximumGeometryProjectionSpanCentimeters,
+			Record.GeometryProjectionSpanCentimeters);
+	}
+	const double WindDataGeometrySpanRangeCentimeters =
+		SelectWindDataGeometrySpanRangeCentimeters(
+			MaximumGeometryProjectionSpanCentimeters);
+	const double WindDataControlLengthScaleMeters =
+		WindDataGeometrySpanRangeCentimeters / 16.0;
+	int32 SaturatedGeometryProjectionSpanCount = 0;
+	for (const FWindDataBoneRecord& Record : BoneRecords)
+	{
+		SaturatedGeometryProjectionSpanCount +=
+			Record.GeometryProjectionSpanCentimeters
+				> WindDataGeometrySpanRangeCentimeters
+			? 1
+			: 0;
+	}
+	const int32 RequiredTexelCount = BoneRecordCount;
+	const int32 TextureWidth = FMath::CeilToInt(
+		FMath::Sqrt(static_cast<double>(RequiredTexelCount)));
+	const int32 TextureHeight = FMath::DivideAndRoundUp(
+		RequiredTexelCount,
+		TextureWidth);
+	const int32 TextureTexelCount = TextureWidth * TextureHeight;
+
+	TArray<FFloat16Color> PivotPositionPixels;
+	PivotPositionPixels.SetNum(TextureTexelCount);
+	TArray<FColor> PivotAxisPixels;
+	PivotAxisPixels.Init(FColor::Black, TextureTexelCount);
+	for (int32 BoneID = 0; BoneID < BoneRecordCount; ++BoneID)
+	{
+		const FWindDataBoneRecord& Record = BoneRecords[BoneID];
+		FFloat16Color& Pixel = PivotPositionPixels[BoneID];
+		Pixel.R = static_cast<float>(Record.PivotPosition.X);
+		Pixel.G = static_cast<float>(Record.PivotPosition.Y);
+		Pixel.B = static_cast<float>(Record.PivotPosition.Z);
+		Pixel.A.Encoded = static_cast<uint16>(
+			Record.ParentID + WindDataParentIDBase);
+		PivotAxisPixels[BoneID] = EncodeWindDataAxis(
+			Record,
+			WindDataGeometrySpanRangeCentimeters);
+	}
+	for (int32 TexelIndex = BoneRecordCount;
+		TexelIndex < TextureTexelCount;
+		++TexelIndex)
+	{
+		FFloat16Color& Pixel = PivotPositionPixels[TexelIndex];
+		Pixel.R.SetZero();
+		Pixel.G.SetZero();
+		Pixel.B.SetZero();
+		Pixel.A.SetZero();
+	}
+
+	FFoliageBakerAssetTransaction AssetTransaction;
+	if (!AssetTransaction.Snapshot(StaticMesh, Error))
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: %s"),
+			*StaticMesh.GetName(),
+			*Error);
+		return Result;
+	}
+
+	TStrongObjectPtr<UTexture2D> PivotPositionTexture =
+		FindOrCreateWindDataTexture(
+			StaticMesh,
+			TEXT("_PivPos"),
+			AssetTransaction,
+			Error);
+	if (!PivotPositionTexture)
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: %s"),
+			*StaticMesh.GetName(),
+			*Error);
+		return Result;
+	}
+	PivotPositionTexture->PreEditChange(nullptr);
+	PivotPositionTexture->Source.Init(
+		TextureWidth,
+		TextureHeight,
+		1,
+		1,
+		TSF_RGBA16F,
+		reinterpret_cast<const uint8*>(PivotPositionPixels.GetData()));
+	PivotPositionTexture->CompressionSettings = TC_HDR;
+	ConfigureWindDataTexture(*PivotPositionTexture);
+	PivotPositionTexture->PostEditChange();
+	PivotPositionTexture->MarkPackageDirty();
+
+	TStrongObjectPtr<UTexture2D> PivotAxisTexture =
+		FindOrCreateWindDataTexture(
+			StaticMesh,
+			FString::Printf(
+				TEXT("_%.0f_PivAxis"),
+				WindDataGeometrySpanRangeCentimeters),
+			AssetTransaction,
+			Error);
+	if (!PivotAxisTexture)
+	{
+		Result.Report = FString::Printf(
+			TEXT("%s\n  failed: %s"),
+			*StaticMesh.GetName(),
+			*Error);
+		return Result;
+	}
+	PivotAxisTexture->PreEditChange(nullptr);
+	PivotAxisTexture->Source.Init(
+		TextureWidth,
+		TextureHeight,
+		1,
+		1,
+		TSF_BGRA8,
+		reinterpret_cast<const uint8*>(PivotAxisPixels.GetData()));
+	PivotAxisTexture->CompressionSettings = TC_VectorDisplacementmap;
+	ConfigureWindDataTexture(*PivotAxisTexture);
+	PivotAxisTexture->PostEditChange();
+	PivotAxisTexture->MarkPackageDirty();
+
+	StaticMesh.Modify();
+	StaticMesh.ModifyMeshDescription(SourceLODIndex);
+	StaticMesh.PreEditChange(nullptr);
+	TArray<int32> MeshDescriptionLODIndicesToCommit;
+	MeshDescriptionLODIndicesToCommit.Add(SourceLODIndex);
+	FMeshDescription& MeshDescription =
+		*StaticMesh.GetMeshDescription(SourceLODIndex);
+	TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs =
+		FStaticMeshAttributes(MeshDescription).GetVertexInstanceUVs();
+	VertexInstanceUVs.SetNumChannels(FMath::Max(
+		VertexInstanceUVs.GetNumChannels(),
+		2));
+	const FVector2f RootBoneUV = MakeWindDataTexelUV(
+		0,
+		TextureWidth,
+		TextureHeight);
+	for (const FVertexInstanceID VertexInstanceID :
+		MeshDescription.VertexInstances().GetElementIDs())
+	{
+		VertexInstanceUVs.Set(VertexInstanceID, 1, RootBoneUV);
+	}
+
+	TSet<int32> AssignedSourceTriangleIDs;
+	for (const FTreeTriangle& Triangle : Triangles)
+	{
+		const int32 SourceTriangleID = Triangle.TriangleID.GetValue();
+		const bool bHasAssignedBone =
+			BoneIDBySourceTriangleID.Contains(SourceTriangleID);
+		const int32 BoneID = bHasAssignedBone
+			? BoneIDBySourceTriangleID.FindRef(SourceTriangleID)
+			: 0;
+		if (bHasAssignedBone)
+		{
+			AssignedSourceTriangleIDs.Add(SourceTriangleID);
+		}
+		const FVector2f BoneUV = MakeWindDataTexelUV(
+			BoneID,
+			TextureWidth,
+			TextureHeight);
+		for (const FVertexInstanceID VertexInstanceID :
+			Triangle.VertexInstanceIDs)
+		{
+			VertexInstanceUVs.Set(VertexInstanceID, 1, BoneUV);
+		}
+	}
+	for (int32 LODIndex = 0;
+		LODIndex < StaticMesh.GetNumSourceModels();
+		++LODIndex)
+	{
+		if (LODIndex != SourceLODIndex
+			&& StaticMesh.IsMeshDescriptionValid(LODIndex))
+		{
+			const FMeshDescription& OtherMeshDescription =
+				*StaticMesh.GetMeshDescription(LODIndex);
+			const TVertexInstanceAttributesConstRef<FVector2f> OtherUVs =
+				FStaticMeshConstAttributes(OtherMeshDescription)
+					.GetVertexInstanceUVs();
+			if (OtherUVs.GetNumChannels() < 2)
+			{
+				StaticMesh.ModifyMeshDescription(LODIndex);
+				FMeshDescription& MutableOtherMeshDescription =
+					*StaticMesh.GetMeshDescription(LODIndex);
+				FStaticMeshAttributes(MutableOtherMeshDescription)
+					.GetVertexInstanceUVs()
+					.SetNumChannels(2);
+				MeshDescriptionLODIndicesToCommit.Add(LODIndex);
+			}
+		}
+
+		FStaticMeshSourceModel& SourceModel =
+			StaticMesh.GetSourceModel(LODIndex);
+		SourceModel.BuildSettings.bGenerateLightmapUVs = true;
+		SourceModel.BuildSettings.SrcLightmapIndex = 0;
+		SourceModel.BuildSettings.DstLightmapIndex = 2;
+	}
+	StaticMesh.SetLightMapCoordinateIndex(2);
 
 	UStaticMesh::FCommitMeshDescriptionParams CommitParams;
 	CommitParams.bMarkPackageDirty = true;
 	CommitParams.bUseHashAsGuid = false;
-	StaticMesh.CommitMeshDescription(SourceLODIndex, CommitParams);
+	for (const int32 LODIndex : MeshDescriptionLODIndicesToCommit)
+	{
+		StaticMesh.CommitMeshDescription(LODIndex, CommitParams);
+	}
 	StaticMesh.PostEditChange();
 	StaticMesh.MarkPackageDirty();
-	return true;
+	AssetTransaction.Commit();
+
+	Result.bSucceeded = true;
+	Result.BoneRecordCount = BoneRecordCount;
+	Result.BranchBoneCount = BranchBoneCount;
+	Result.LeafBoneCount = ResolvedLeafClusters.Num();
+	Result.UnassignedTriangleCount =
+		Triangles.Num() - AssignedSourceTriangleIDs.Num();
+	Result.PivotPositionTexturePath = PivotPositionTexture->GetPathName();
+	Result.PivotAxisTexturePath = PivotAxisTexture->GetPathName();
+	Result.Report = FString::Printf(
+		TEXT("%s\n  baked LOD %d wind data: UV1 bone texel centers, %d linked bone record(s) (%d trunk/branch, %d leaf), %d source triangle(s) without hierarchy ownership mapped to trunk BoneID 0. Every source LOD generates lightmap UVs from UV0 into UV2, and the lightmap coordinate index is fixed to UV2 so UV1 remains dedicated to wind data.\n  PivPos: %s (%dx%d RGBA16F; RGB object-space centimeters, A raw half bits = ParentID + 1024).\n  PivAxis: %s (%dx%d RGBA8; RGB = Axis * 0.5 + 0.5, A * %.0f cm = geometry projection span). Material control length must decode A * %.0f m, preserving the reference 6.25x geometry-span ratio before clamping. Maximum geometry projection span %.3f cm; %d bone record(s) saturated at the %.0f cm encoding range. RGBA8 length step %.3f cm, maximum rounding error %.3f cm."),
+		*StaticMesh.GetName(),
+		SourceLODIndex,
+		Result.BoneRecordCount,
+		Result.BranchBoneCount,
+		Result.LeafBoneCount,
+		Result.UnassignedTriangleCount,
+		*Result.PivotPositionTexturePath,
+		TextureWidth,
+		TextureHeight,
+		*Result.PivotAxisTexturePath,
+		TextureWidth,
+		TextureHeight,
+		WindDataGeometrySpanRangeCentimeters,
+		WindDataControlLengthScaleMeters,
+		MaximumGeometryProjectionSpanCentimeters,
+		SaturatedGeometryProjectionSpanCount,
+		WindDataGeometrySpanRangeCentimeters,
+		WindDataGeometrySpanRangeCentimeters / 255.0,
+		WindDataGeometrySpanRangeCentimeters / 510.0);
+	return Result;
 }

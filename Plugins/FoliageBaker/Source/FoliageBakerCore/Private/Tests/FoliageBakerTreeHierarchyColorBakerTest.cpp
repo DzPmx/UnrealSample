@@ -1,21 +1,17 @@
 #include "FoliageBakerTreeHierarchyColorBaker.h"
-#include "FoliageBakerTreeSkeleton.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Engine/StaticMesh.h"
-#include "Engine/StaticMeshSourceData.h"
 #include "MeshDescription.h"
 #include "Misc/AutomationTest.h"
-#include "ScopedTransaction.h"
+#include "StaticMeshAttributes.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/StrongObjectPtr.h"
 
 namespace
 {
 	constexpr double TestPositionTolerance = 1.0e-3;
-	constexpr double ThinBranchRadius = 0.5;
-	constexpr int32 ThinBranchSideCount = 6;
 
 	const TArray<FSoftObjectPath> TreeHierarchyTestAssetPaths = {
 		FSoftObjectPath(TEXT("/Game/Foliage_Sets/VOL3_Oaks/Meshes/LP/SM_Tree_Set_03a.SM_Tree_Set_03a")),
@@ -30,272 +26,6 @@ namespace
 		FSoftObjectPath(TEXT("/Game/Foliage_Sets/VOL3_Oaks/Meshes/LP/SM_Tree_Set_03j.SM_Tree_Set_03j")),
 		FSoftObjectPath(TEXT("/Game/Foliage_Sets/VOL3_Oaks/Meshes/LP/SM_Tree_Set_03k.SM_Tree_Set_03k")),
 		FSoftObjectPath(TEXT("/Game/Demo/BillboardClouds/SM_Londontree001.SM_Londontree001"))};
-
-	TArray<FFoliageBakerTreeSkeletonTriangle> BuildThinBranchTriangles()
-	{
-		const TStaticArray<double, 3> RingPositions{0.0, 50.0, 100.0};
-		TArray<TArray<FVector>> Rings;
-		Rings.SetNum(RingPositions.Num());
-		for (int32 RingIndex = 0; RingIndex < RingPositions.Num(); ++RingIndex)
-		{
-			TArray<FVector>& Ring = Rings[RingIndex];
-			Ring.Reserve(ThinBranchSideCount);
-			for (int32 SideIndex = 0; SideIndex < ThinBranchSideCount; ++SideIndex)
-			{
-				const double Angle = 2.0 * UE_PI
-					* static_cast<double>(SideIndex)
-					/ static_cast<double>(ThinBranchSideCount);
-				Ring.Add(FVector(
-					RingPositions[RingIndex],
-					FMath::Cos(Angle) * ThinBranchRadius,
-					FMath::Sin(Angle) * ThinBranchRadius));
-			}
-		}
-
-		TArray<FFoliageBakerTreeSkeletonTriangle> Triangles;
-		for (int32 SegmentIndex = 0;
-			SegmentIndex + 1 < Rings.Num();
-			++SegmentIndex)
-		{
-			for (int32 SideIndex = 0;
-				SideIndex < ThinBranchSideCount;
-				++SideIndex)
-			{
-				const int32 NextSideIndex =
-					(SideIndex + 1) % ThinBranchSideCount;
-				FFoliageBakerTreeSkeletonTriangle& First =
-					Triangles.AddDefaulted_GetRef();
-				First.SourceTriangleID = Triangles.Num() - 1;
-				First.SourceComponentID = 0;
-				First.A = Rings[SegmentIndex][SideIndex];
-				First.B = Rings[SegmentIndex + 1][SideIndex];
-				First.C = Rings[SegmentIndex + 1][NextSideIndex];
-
-				FFoliageBakerTreeSkeletonTriangle& Second =
-					Triangles.AddDefaulted_GetRef();
-				Second.SourceTriangleID = Triangles.Num() - 1;
-				Second.SourceComponentID = 0;
-				Second.A = Rings[SegmentIndex][SideIndex];
-				Second.B = Rings[SegmentIndex + 1][NextSideIndex];
-				Second.C = Rings[SegmentIndex][NextSideIndex];
-			}
-		}
-		return Triangles;
-	}
-
-	bool ValidateThinBranchTerminalGuide(FAutomationTestBase& Test)
-	{
-		const TArray<FFoliageBakerTreeSkeletonGuide> Guides =
-			FFoliageBakerTreeSkeleton::BuildSurfaceGuides(
-				BuildThinBranchTriangles(),
-				0,
-				1.0,
-				FVector::ZeroVector);
-		double MaximumGuideX = TNumericLimits<double>::Lowest();
-		for (const FFoliageBakerTreeSkeletonGuide& Guide : Guides)
-		{
-			for (const FVector& Point : Guide.Polyline)
-			{
-				MaximumGuideX = FMath::Max(MaximumGuideX, Point.X);
-			}
-		}
-		Test.TestTrue(
-			TEXT("Thin low-poly branch produces a surface guide"),
-			!Guides.IsEmpty());
-		return Test.TestTrue(
-			TEXT("Thin low-poly branch guide reaches the source terminal section"),
-			MaximumGuideX >= 100.0 - TestPositionTolerance);
-	}
-
-	double SegmentOverlapLength(
-		const FVector& FirstStart,
-		const FVector& FirstEnd,
-		const FVector& SecondStart,
-		const FVector& SecondEnd,
-		const double DistanceTolerance)
-	{
-		const FVector FirstVector = FirstEnd - FirstStart;
-		const FVector SecondVector = SecondEnd - SecondStart;
-		const double FirstLength = FirstVector.Length();
-		const double SecondLength = SecondVector.Length();
-		if (FirstLength <= TestPositionTolerance
-			|| SecondLength <= TestPositionTolerance)
-		{
-			return 0.0;
-		}
-		const FVector FirstDirection = FirstVector / FirstLength;
-		const FVector SecondDirection = SecondVector / SecondLength;
-		if (FMath::Abs(FVector::DotProduct(FirstDirection, SecondDirection)) < 0.98)
-		{
-			return 0.0;
-		}
-		const FVector SecondStartOnFirst = FMath::ClosestPointOnInfiniteLine(
-			FirstStart,
-			FirstEnd,
-			SecondStart);
-		const FVector SecondEndOnFirst = FMath::ClosestPointOnInfiniteLine(
-			FirstStart,
-			FirstEnd,
-			SecondEnd);
-		if (FVector::Distance(SecondStart, SecondStartOnFirst) > DistanceTolerance
-			|| FVector::Distance(SecondEnd, SecondEndOnFirst) > DistanceTolerance)
-		{
-			return 0.0;
-		}
-		const double ProjectedStart = FVector::DotProduct(
-			SecondStartOnFirst - FirstStart,
-			FirstDirection);
-		const double ProjectedEnd = FVector::DotProduct(
-			SecondEndOnFirst - FirstStart,
-			FirstDirection);
-		return FMath::Max(
-			0.0,
-			FMath::Min(FirstLength, FMath::Max(ProjectedStart, ProjectedEnd))
-				- FMath::Max(0.0, FMath::Min(ProjectedStart, ProjectedEnd)));
-	}
-
-	bool ValidateNoDuplicateSkeletonPaths(
-		FAutomationTestBase& Test,
-		const FString& AssetName,
-		const FFoliageBakerTreeHierarchyPreviewData& PreviewData)
-	{
-		const double DistanceTolerance = FMath::Max(
-			PreviewData.SkeletonCellSize * 0.4,
-			TestPositionTolerance);
-		const double MinimumSignificantOverlap = FMath::Max(
-			PreviewData.SkeletonCellSize * 1.5,
-			TestPositionTolerance * 2.0);
-		double MaximumDuplicateOverlap = 0.0;
-		for (int32 FirstEdgeIndex = 0;
-			FirstEdgeIndex < PreviewData.SkeletonEdges.Num();
-			++FirstEdgeIndex)
-		{
-			const FFoliageBakerTreeHierarchyPreviewEdge& FirstEdge =
-				PreviewData.SkeletonEdges[FirstEdgeIndex];
-			for (int32 SecondEdgeIndex = FirstEdgeIndex + 1;
-				SecondEdgeIndex < PreviewData.SkeletonEdges.Num();
-				++SecondEdgeIndex)
-			{
-				const FFoliageBakerTreeHierarchyPreviewEdge& SecondEdge =
-					PreviewData.SkeletonEdges[SecondEdgeIndex];
-				for (int32 FirstPointIndex = 1;
-					FirstPointIndex < FirstEdge.Polyline.Num();
-					++FirstPointIndex)
-				{
-					for (int32 SecondPointIndex = 1;
-						SecondPointIndex < SecondEdge.Polyline.Num();
-						++SecondPointIndex)
-					{
-						MaximumDuplicateOverlap = FMath::Max(
-							MaximumDuplicateOverlap,
-							SegmentOverlapLength(
-								FirstEdge.Polyline[FirstPointIndex - 1],
-								FirstEdge.Polyline[FirstPointIndex],
-								SecondEdge.Polyline[SecondPointIndex - 1],
-								SecondEdge.Polyline[SecondPointIndex],
-								DistanceTolerance));
-					}
-				}
-			}
-		}
-		return Test.TestTrue(
-			FString::Printf(
-				TEXT("%s has no significant duplicate skeleton path (maximum %.3f, limit %.3f)"),
-				*AssetName,
-				MaximumDuplicateOverlap,
-				MinimumSignificantOverlap),
-			MaximumDuplicateOverlap <= MinimumSignificantOverlap);
-	}
-
-	bool ValidateNoParallelSkeletonPaths(
-		FAutomationTestBase& Test,
-		const FString& AssetName,
-		const FFoliageBakerTreeHierarchyPreviewData& PreviewData)
-	{
-		const double SampleSpacing = FMath::Max(
-			PreviewData.SkeletonCellSize * 0.5,
-			TestPositionTolerance);
-		const double DistanceTolerance = FMath::Max(
-			PreviewData.SkeletonCellSize * 0.55,
-			TestPositionTolerance);
-		const double MaximumAllowedParallelLength = FMath::Max(
-			PreviewData.SkeletonCellSize * 2.0,
-			TestPositionTolerance * 2.0);
-		double MaximumParallelLength = 0.0;
-		for (int32 FirstEdgeIndex = 0;
-			FirstEdgeIndex < PreviewData.SkeletonEdges.Num();
-			++FirstEdgeIndex)
-		{
-			const FFoliageBakerTreeHierarchyPreviewEdge& FirstEdge =
-				PreviewData.SkeletonEdges[FirstEdgeIndex];
-			for (int32 SecondEdgeIndex = FirstEdgeIndex + 1;
-				SecondEdgeIndex < PreviewData.SkeletonEdges.Num();
-				++SecondEdgeIndex)
-			{
-				const FFoliageBakerTreeHierarchyPreviewEdge& SecondEdge =
-					PreviewData.SkeletonEdges[SecondEdgeIndex];
-				double CurrentParallelLength = 0.0;
-				for (int32 PointIndex = 1;
-					PointIndex < FirstEdge.Polyline.Num();
-					++PointIndex)
-				{
-					const FVector Start = FirstEdge.Polyline[PointIndex - 1];
-					const FVector End = FirstEdge.Polyline[PointIndex];
-					const FVector Direction = (End - Start).GetSafeNormal();
-					const double SegmentLength = FVector::Distance(Start, End);
-					const int32 StepCount = FMath::Max(
-						1,
-						FMath::CeilToInt(SegmentLength / SampleSpacing));
-					for (int32 StepIndex = 0; StepIndex < StepCount; ++StepIndex)
-					{
-						const FVector Sample = FMath::Lerp(
-							Start,
-							End,
-							(static_cast<double>(StepIndex) + 0.5)
-								/ static_cast<double>(StepCount));
-						bool bParallelCoverage = false;
-						for (int32 OtherPointIndex = 1;
-							OtherPointIndex < SecondEdge.Polyline.Num();
-							++OtherPointIndex)
-						{
-							const FVector OtherStart =
-								SecondEdge.Polyline[OtherPointIndex - 1];
-							const FVector OtherEnd =
-								SecondEdge.Polyline[OtherPointIndex];
-							const FVector OtherDirection =
-								(OtherEnd - OtherStart).GetSafeNormal();
-							if (FMath::Abs(FVector::DotProduct(Direction, OtherDirection)) < 0.9)
-							{
-								continue;
-							}
-							const FVector Closest = FMath::ClosestPointOnSegment(
-								Sample,
-								OtherStart,
-								OtherEnd);
-							if (FVector::Distance(Sample, Closest) <= DistanceTolerance)
-							{
-								bParallelCoverage = true;
-								break;
-							}
-						}
-						CurrentParallelLength = bParallelCoverage
-							? CurrentParallelLength + SegmentLength / StepCount
-							: 0.0;
-						MaximumParallelLength = FMath::Max(
-							MaximumParallelLength,
-							CurrentParallelLength);
-					}
-				}
-			}
-		}
-		return Test.TestTrue(
-			FString::Printf(
-				TEXT("%s has no long nearby parallel skeleton path (maximum %.3f, limit %.3f)"),
-				*AssetName,
-				MaximumParallelLength,
-				MaximumAllowedParallelLength),
-			MaximumParallelLength <= MaximumAllowedParallelLength);
-	}
 
 	bool ValidateBranchSubtreeOwnership(
 		FAutomationTestBase& Test,
@@ -500,28 +230,6 @@ namespace
 		return false;
 	}
 
-	TStrongObjectPtr<UStaticMesh> CloneMeshForHierarchyTest(
-		const UStaticMesh& SourceMesh)
-	{
-		TStrongObjectPtr<UStaticMesh> TestMesh(NewObject<UStaticMesh>(
-			GetTransientPackage(),
-			NAME_None,
-			RF_Transient | RF_Transactional));
-		TestMesh->GetStaticMaterials() = SourceMesh.GetStaticMaterials();
-		TestMesh->AddSourceModel();
-		TestMesh->CreateMeshDescription(0);
-		check(TestMesh->IsMeshDescriptionValid(0));
-		check(SourceMesh.IsMeshDescriptionValid(0));
-		TestMesh->GetSourceModel(0).StaticMeshDescriptionBulkData->SetFlags(
-			RF_Transactional);
-		*TestMesh->GetMeshDescription(0) = *SourceMesh.GetMeshDescription(0);
-		UStaticMesh::FCommitMeshDescriptionParams CommitParams;
-		CommitParams.bMarkPackageDirty = false;
-		CommitParams.bUseHashAsGuid = true;
-		TestMesh->CommitMeshDescription(0, CommitParams);
-		return TestMesh;
-	}
-
 	bool ValidatePreview(
 		FAutomationTestBase& Test,
 		const FString& AssetName,
@@ -533,9 +241,6 @@ namespace
 		{
 			return false;
 		}
-		Test.TestTrue(
-			FString::Printf(TEXT("%s has assigned leaf clusters"), *AssetName),
-			!PreviewData.LeafClusters.IsEmpty());
 		TSet<int32> PreviewBranchIDs;
 		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
 			PreviewData.Branches)
@@ -545,51 +250,6 @@ namespace
 				PreviewBranchIDs.Add(Branch.BranchID);
 			}
 		}
-		bool bHasBranchOwnedLeafCluster = false;
-		for (int32 LeafClusterIndex = 0;
-			LeafClusterIndex < PreviewData.LeafClusters.Num();
-			++LeafClusterIndex)
-		{
-			const FFoliageBakerTreeHierarchyPreviewLeafCluster& LeafCluster =
-				PreviewData.LeafClusters[LeafClusterIndex];
-			Test.TestTrue(
-				FString::Printf(
-					TEXT("%s leaf cluster %d has source triangles"),
-					*AssetName,
-					LeafClusterIndex),
-				!LeafCluster.SourceTriangleIDs.IsEmpty());
-			Test.TestTrue(
-				FString::Printf(
-					TEXT("%s leaf cluster %d has valid bounds"),
-					*AssetName,
-					LeafClusterIndex),
-				LeafCluster.Bounds.IsValid != 0);
-			Test.TestEqual(
-				FString::Printf(
-					TEXT("%s leaf cluster %d preserves triangle positions"),
-					*AssetName,
-					LeafClusterIndex),
-				LeafCluster.TrianglePositions.Num(),
-				LeafCluster.SourceTriangleIDs.Num() * 3);
-			Test.TestTrue(
-				FString::Printf(
-					TEXT("%s leaf cluster %d references an existing parent"),
-					*AssetName,
-					LeafClusterIndex),
-				LeafCluster.ParentBranchID == INDEX_NONE
-					|| PreviewBranchIDs.Contains(LeafCluster.ParentBranchID));
-			bHasBranchOwnedLeafCluster |=
-				LeafCluster.ParentBranchID != INDEX_NONE;
-		}
-		if (!PreviewBranchIDs.IsEmpty())
-		{
-			Test.TestTrue(
-				FString::Printf(
-					TEXT("%s assigns foliage to at least one branch"),
-					*AssetName),
-				bHasBranchOwnedLeafCluster);
-		}
-
 		if (!Test.TestTrue(
 			FString::Printf(TEXT("%s has skeleton nodes"), *AssetName),
 			!PreviewData.SkeletonNodes.IsEmpty())
@@ -602,14 +262,155 @@ namespace
 		Test.TestTrue(
 			FString::Printf(TEXT("%s has voxelized wood"), *AssetName),
 			PreviewData.WoodVolumeComponentCount > 0);
-		Test.TestEqual(
-			FString::Printf(TEXT("%s covers every source guide terminal"), *AssetName),
-			PreviewData.UncoveredGuideTerminalCount,
-			0);
-		ValidateNoDuplicateSkeletonPaths(Test, AssetName, PreviewData);
-		ValidateNoParallelSkeletonPaths(Test, AssetName, PreviewData);
 		ValidateBranchSubtreeOwnership(Test, AssetName, PreviewData);
 		ValidateTrunkSemantics(Test, AssetName, PreviewData);
+		Test.TestEqual(
+			FString::Printf(
+				TEXT("%s exposes exactly two endpoint nodes per skeleton edge"),
+				*AssetName),
+			PreviewData.SkeletonNodes.Num(),
+			PreviewData.SkeletonEdges.Num() * 2);
+		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
+			PreviewData.Branches)
+		{
+			int32 MatchingEdgeIndex = INDEX_NONE;
+			int32 MatchingEdgeCount = 0;
+			for (int32 EdgeIndex = 0;
+				EdgeIndex < PreviewData.SkeletonEdges.Num();
+				++EdgeIndex)
+			{
+				const FFoliageBakerTreeHierarchyPreviewEdge& Edge =
+					PreviewData.SkeletonEdges[EdgeIndex];
+				const bool bMatches = Branch.Label == TEXT("Trunk")
+					? Edge.bTrunk
+					: !Edge.bTrunk && Edge.BranchID == Branch.BranchID;
+				if (bMatches)
+				{
+					MatchingEdgeIndex = EdgeIndex;
+					++MatchingEdgeCount;
+				}
+			}
+			Test.TestEqual(
+				FString::Printf(
+					TEXT("%s %s has one virtual edge"),
+					*AssetName,
+					*Branch.Label),
+				MatchingEdgeCount,
+				1);
+			if (!PreviewData.SkeletonEdges.IsValidIndex(MatchingEdgeIndex))
+			{
+				continue;
+			}
+			const FFoliageBakerTreeHierarchyPreviewEdge& Edge =
+				PreviewData.SkeletonEdges[MatchingEdgeIndex];
+			const FFoliageBakerTreeHierarchyBoneRecord& BoneRecord =
+				Branch.BoneRecord;
+			const int32 ExpectedBakeID = Edge.bTrunk
+				? 0
+				: Branch.BranchID + 1;
+			const int32 ExpectedParentBakeID = (
+				Edge.bTrunk || Branch.ParentBranchID == INDEX_NONE)
+					? 0
+					: Branch.ParentBranchID + 1;
+			Test.TestEqual(
+				FString::Printf(
+					TEXT("%s %s has its stable bake ID"),
+					*AssetName,
+					*Branch.Label),
+				BoneRecord.BakeID,
+				ExpectedBakeID);
+			Test.TestEqual(
+				FString::Printf(
+					TEXT("%s %s has its parent bake ID"),
+					*AssetName,
+					*Branch.Label),
+				BoneRecord.ParentBakeID,
+				ExpectedParentBakeID);
+			Test.TestTrue(
+				FString::Printf(
+					TEXT("%s %s has a normalized bake axis"),
+					*AssetName,
+					*Branch.Label),
+				BoneRecord.Axis.IsNormalized());
+			Test.TestTrue(
+				FString::Printf(
+					TEXT("%s %s has a positive axis extent"),
+					*AssetName,
+					*Branch.Label),
+				BoneRecord.AxisExtent > 0.0);
+			Test.TestTrue(
+				FString::Printf(
+					TEXT("%s %s stores projection span as axis extent"),
+					*AssetName,
+					*Branch.Label),
+				FMath::IsNearlyEqual(
+					BoneRecord.AxisExtent,
+					BoneRecord.PositiveAxisExtent
+						- BoneRecord.MinimumAxisProjection,
+					TestPositionTolerance));
+			Test.TestTrue(
+				FString::Printf(
+					TEXT("%s %s stores its pivot at the preview start"),
+					*AssetName,
+					*Branch.Label),
+				BoneRecord.PivotPosition.Equals(
+					Branch.StartPosition,
+					TestPositionTolerance));
+			if (Edge.bTrunk)
+			{
+				Test.TestTrue(
+					FString::Printf(
+						TEXT("%s trunk virtual edge preserves its fitted path"),
+						*AssetName),
+					Edge.Polyline.Num() >= 2);
+			}
+			else
+			{
+				Test.TestEqual(
+					FString::Printf(
+						TEXT("%s %s virtual edge contains only start and end"),
+						*AssetName,
+						*Branch.Label),
+					Edge.Polyline.Num(),
+					2);
+				Test.TestTrue(
+					FString::Printf(
+						TEXT("%s %s virtual end follows its axis positive extent"),
+						*AssetName,
+						*Branch.Label),
+					Branch.EndPosition.Equals(
+						BoneRecord.PivotPosition
+							+ BoneRecord.Axis
+								* BoneRecord.PositiveAxisExtent,
+						TestPositionTolerance));
+			}
+			if (Edge.Polyline.Num() >= 2)
+			{
+				Test.TestTrue(
+					FString::Printf(
+						TEXT("%s %s stores its virtual start"),
+						*AssetName,
+						*Branch.Label),
+					Branch.StartPosition.Equals(
+						Edge.Polyline[0],
+						TestPositionTolerance));
+				Test.TestTrue(
+					FString::Printf(
+						TEXT("%s %s stores its virtual end"),
+						*AssetName,
+						*Branch.Label),
+					Branch.EndPosition.Equals(
+						Edge.Polyline.Last(),
+						TestPositionTolerance));
+			}
+			Test.TestEqual(
+				FString::Printf(
+					TEXT("%s %s exposes its two virtual points"),
+					*AssetName,
+					*Branch.Label),
+				Branch.Joints.Num(),
+				2);
+		}
 		Test.TestTrue(
 			FString::Printf(TEXT("%s has a valid root node"), *AssetName),
 			PreviewData.SkeletonNodes.IsValidIndex(PreviewData.RootNodeID));
@@ -628,8 +429,7 @@ namespace
 
 		TArray<int32> IncomingEdgeCounts;
 		IncomingEdgeCounts.Init(0, PreviewData.SkeletonNodes.Num());
-		TArray<TArray<int32>> ChildNodes;
-		ChildNodes.SetNum(PreviewData.SkeletonNodes.Num());
+		TSet<int32> StartNodeIDs;
 		for (const FFoliageBakerTreeHierarchyPreviewEdge& Edge :
 			PreviewData.SkeletonEdges)
 		{
@@ -672,7 +472,7 @@ namespace
 						TestPositionTolerance));
 			}
 			++IncomingEdgeCounts[Edge.EndNodeID];
-			ChildNodes[Edge.StartNodeID].Add(Edge.EndNodeID);
+			StartNodeIDs.Add(Edge.StartNodeID);
 			Test.TestTrue(
 				FString::Printf(
 					TEXT("%s non-trunk edge %d has a branch ID"),
@@ -694,44 +494,144 @@ namespace
 		{
 			Test.TestTrue(
 				FString::Printf(
-					TEXT("%s node %d has one rooted parent"),
+					TEXT("%s virtual node %d has the expected parent count"),
 					*AssetName,
 					NodeIndex),
 				IncomingEdgeCounts[NodeIndex]
-					== (NodeIndex == PreviewData.RootNodeID ? 0 : 1));
-			if (ChildNodes[NodeIndex].Num() > 1
-				&& NodeIndex != PreviewData.RootNodeID)
-			{
-				Test.TestTrue(
-					FString::Printf(
-						TEXT("%s branching node %d is an explicit fork"),
-						*AssetName,
-						NodeIndex),
-					PreviewData.SkeletonNodes[NodeIndex].Kind
-						== EFoliageBakerTreeHierarchyPreviewNodeKind::Fork);
-			}
+					== (StartNodeIDs.Contains(NodeIndex) ? 0 : 1));
 		}
+		return !Test.HasAnyErrors();
+	}
 
-		TBitArray<> Reached(false, PreviewData.SkeletonNodes.Num());
-		TArray<int32> Queue;
-		Queue.Add(PreviewData.RootNodeID);
-		Reached[PreviewData.RootNodeID] = true;
-		for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
+	bool ValidateWoodComponentOwnership(
+		FAutomationTestBase& Test,
+		const FString& AssetName,
+		const UStaticMesh& StaticMesh,
+		const int32 SourceLODIndex,
+		const FFoliageBakerTreeHierarchyPreviewData& PreviewData)
+	{
+		const FMeshDescription& MeshDescription =
+			*StaticMesh.GetMeshDescription(SourceLODIndex);
+		const TVertexAttributesConstRef<FVector3f> VertexPositions =
+			MeshDescription.GetVertexPositions();
+		TMap<int32, int32> OwnerPreviewBranchIndexByTriangleID;
+		bool bValid = true;
+		for (int32 PreviewBranchIndex = 0;
+			PreviewBranchIndex < PreviewData.Branches.Num();
+			++PreviewBranchIndex)
 		{
-			for (const int32 ChildNodeID : ChildNodes[Queue[QueueIndex]])
+			for (const int32 TriangleIDValue :
+				PreviewData.Branches[PreviewBranchIndex].SourceTriangleIDs)
 			{
-				if (!Reached[ChildNodeID])
+				if (OwnerPreviewBranchIndexByTriangleID.Contains(TriangleIDValue))
 				{
-					Reached[ChildNodeID] = true;
-					Queue.Add(ChildNodeID);
+					bValid &= Test.TestEqual(
+						FString::Printf(
+							TEXT("%s wood triangle %d has one final owner"),
+							*AssetName,
+							TriangleIDValue),
+						OwnerPreviewBranchIndexByTriangleID.FindChecked(TriangleIDValue),
+						PreviewBranchIndex);
+				}
+				else
+				{
+					OwnerPreviewBranchIndexByTriangleID.Add(
+						TriangleIDValue,
+						PreviewBranchIndex);
 				}
 			}
 		}
-		Test.TestEqual(
-			FString::Printf(TEXT("%s all nodes are pivot reachable"), *AssetName),
-			Queue.Num(),
-			PreviewData.SkeletonNodes.Num());
-		return !Test.HasAnyErrors();
+
+		bValid &= Test.TestTrue(
+			FString::Printf(TEXT("%s assigns wood triangles"), *AssetName),
+			!OwnerPreviewBranchIndexByTriangleID.IsEmpty());
+		TMap<FVertexID, int32> OwnerPreviewBranchIndexByVertexID;
+		int32 PivotOwnerPreviewBranchIndex = INDEX_NONE;
+		double PivotSurfaceDistanceSquared = TNumericLimits<double>::Max();
+		TArray<int32> AssignedTriangleIDValues;
+		OwnerPreviewBranchIndexByTriangleID.GetKeys(AssignedTriangleIDValues);
+		AssignedTriangleIDValues.Sort();
+		for (const int32 TriangleIDValue : AssignedTriangleIDValues)
+		{
+			const int32 OwnerPreviewBranchIndex =
+				OwnerPreviewBranchIndexByTriangleID.FindChecked(TriangleIDValue);
+			const FTriangleID TriangleID(TriangleIDValue);
+			bValid &= Test.TestTrue(
+				FString::Printf(
+					TEXT("%s assigned triangle %d exists in LOD %d"),
+					*AssetName,
+					TriangleIDValue,
+					SourceLODIndex),
+				MeshDescription.IsTriangleValid(TriangleID));
+			if (!MeshDescription.IsTriangleValid(TriangleID))
+			{
+				continue;
+			}
+			const TArrayView<const FVertexID> TriangleVertexIDs =
+				MeshDescription.GetTriangleVertices(TriangleID);
+			bValid &= Test.TestEqual(
+				FString::Printf(
+					TEXT("%s assigned triangle %d has three vertices"),
+					*AssetName,
+					TriangleIDValue),
+				TriangleVertexIDs.Num(),
+				3);
+			if (TriangleVertexIDs.Num() != 3)
+			{
+				continue;
+			}
+			for (const FVertexID VertexID : TriangleVertexIDs)
+			{
+				if (OwnerPreviewBranchIndexByVertexID.Contains(VertexID))
+				{
+					bValid &= Test.TestEqual(
+						FString::Printf(
+							TEXT("%s connected wood at vertex %d has one final owner"),
+							*AssetName,
+							VertexID.GetValue()),
+						OwnerPreviewBranchIndexByVertexID.FindChecked(VertexID),
+						OwnerPreviewBranchIndex);
+				}
+				else
+				{
+					OwnerPreviewBranchIndexByVertexID.Add(
+						VertexID,
+						OwnerPreviewBranchIndex);
+				}
+			}
+
+			const FVector A(VertexPositions[TriangleVertexIDs[0]]);
+			const FVector B(VertexPositions[TriangleVertexIDs[1]]);
+			const FVector C(VertexPositions[TriangleVertexIDs[2]]);
+			const double DistanceSquared = FVector::DistSquared(
+				FVector::ZeroVector,
+				FMath::ClosestPointOnTriangleToPoint(
+					FVector::ZeroVector,
+					A,
+					B,
+					C));
+			if (DistanceSquared < PivotSurfaceDistanceSquared)
+			{
+				PivotSurfaceDistanceSquared = DistanceSquared;
+				PivotOwnerPreviewBranchIndex = OwnerPreviewBranchIndex;
+			}
+		}
+
+		bValid &= Test.TestTrue(
+			FString::Printf(
+				TEXT("%s pivot wood component resolves to a preview owner"),
+				*AssetName),
+			PreviewData.Branches.IsValidIndex(PivotOwnerPreviewBranchIndex));
+		if (PreviewData.Branches.IsValidIndex(PivotOwnerPreviewBranchIndex))
+		{
+			bValid &= Test.TestEqual(
+				FString::Printf(
+					TEXT("%s pivot wood component is owned by Trunk"),
+					*AssetName),
+				PreviewData.Branches[PivotOwnerPreviewBranchIndex].Label,
+				FString(TEXT("Trunk")));
+		}
+		return bValid;
 	}
 
 	void ValidateTreeHierarchyAsset(
@@ -747,14 +647,15 @@ namespace
 			return;
 		}
 
-		TStrongObjectPtr<UStaticMesh> TestMesh =
-			CloneMeshForHierarchyTest(*SourceMesh);
-		const FFoliageBakerTreeHierarchyColorBakeResult Result =
-			FFoliageBakerTreeHierarchyColorBaker::Bake(*TestMesh, 0);
+		const FFoliageBakerTreeHierarchyAnalysisResult Result =
+			FFoliageBakerTreeHierarchyColorBaker::Analyze(
+				*SourceMesh,
+				0,
+				0);
 		const FString AssetName = SourceMesh->GetName();
 		Test.AddInfo(Result.Report);
 		if (!Test.TestTrue(
-			FString::Printf(TEXT("%s hierarchy bake succeeds"), *AssetName),
+			FString::Printf(TEXT("%s hierarchy analysis succeeds"), *AssetName),
 			Result.bSucceeded))
 		{
 			Test.AddError(Result.Report);
@@ -766,13 +667,13 @@ namespace
 		{
 			return;
 		}
-		Test.TestEqual(
-			FString::Printf(
-				TEXT("%s reports every assigned leaf cluster"),
-				*AssetName),
-			Result.LeafClusterCount,
-			Result.PreviewData->LeafClusters.Num());
 		ValidatePreview(Test, AssetName, *Result.PreviewData);
+		ValidateWoodComponentOwnership(
+			Test,
+			AssetName,
+			*SourceMesh,
+			0,
+			*Result.PreviewData);
 	}
 }
 
@@ -794,10 +695,6 @@ void FFoliageBakerTreeHierarchyAssetTest::GetTests(
 
 bool FFoliageBakerTreeHierarchyAssetTest::RunTest(const FString& Parameters)
 {
-	const FScopedTransaction Transaction(NSLOCTEXT(
-		"FoliageBaker",
-		"TestSingleTreeHierarchyBake",
-		"Test single tree hierarchy bake"));
 	ValidateTreeHierarchyAsset(*this, FSoftObjectPath(Parameters));
 	return !HasAnyErrors();
 }
@@ -810,11 +707,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FFoliageBakerTreeHierarchyAllOakAssetsTest::RunTest(
 	const FString& Parameters)
 {
-	ValidateThinBranchTerminalGuide(*this);
-	const FScopedTransaction Transaction(NSLOCTEXT(
-		"FoliageBaker",
-		"TestTreeHierarchyBake",
-		"Test tree hierarchy bake"));
 	for (const FSoftObjectPath& AssetPath : TreeHierarchyTestAssetPaths)
 	{
 		ValidateTreeHierarchyAsset(*this, AssetPath);
