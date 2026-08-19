@@ -65,7 +65,7 @@ namespace
 		TArray<FImpostorCaptureView> Views;
 		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo> TileInfos;
 		TArray<FColor> BaseColorPixels;
-		TArray<FColor> NormalDepthPixels;
+		TArray<FColor> NormalMaskDepthPixels;
 		TArray<FColor> MixPixels;
 		TArray<float> CoverageValues;
 		FFoliageBakerWorldPositionOffsetStats WorldPositionOffsetStats;
@@ -312,7 +312,7 @@ namespace
 		}
 
 		InOutData.BaseColorPixels.Init(FColor(0, 0, 0, 0), PixelCount);
-		InOutData.NormalDepthPixels.Init(
+		InOutData.NormalMaskDepthPixels.Init(
 			EncodeOctahedralObjectSpaceNormal(
 				FVector::UpVector,
 				0,
@@ -382,7 +382,7 @@ namespace
 			DepthCorrectRequest.SourceBounds = InOutData.SourceBounds;
 			DepthCorrectRequest.bFlipProjectionV = true;
 			DepthCorrectRequest.bBakeBaseColor = Settings.bBakeBaseColorSdf;
-			DepthCorrectRequest.bBakeObjectSpaceNormal = Settings.bBakeNormalDepth;
+			DepthCorrectRequest.bBakeObjectSpaceNormal = Settings.bBakeNormalMaskDepth;
 			DepthCorrectRequest.bBakePackedMix = Settings.bBakeMix;
 			DepthCorrectRequest.bBakeRoughnessSpecular = !Settings.bBakeMix;
 			DepthCorrectRequest.Materials.Reserve(ReferencedMaterialIndices.Num());
@@ -483,7 +483,7 @@ namespace
 			}
 			if (DepthCorrectResult.SourceTriangleIdAndDepth.Num() != TilePixelCount
 				|| (Settings.bBakeBaseColorSdf && DepthCorrectResult.BaseColor.Num() != TilePixelCount)
-				|| (Settings.bBakeNormalDepth && DepthCorrectResult.ObjectSpaceNormal.Num() != TilePixelCount)
+				|| (Settings.bBakeNormalMaskDepth && DepthCorrectResult.ObjectSpaceNormal.Num() != TilePixelCount)
 				|| (Settings.bBakeMix && DepthCorrectResult.PackedMix.Num() != TilePixelCount)
 				|| (!Settings.bBakeMix
 					&& (DepthCorrectResult.Roughness.Num() != TilePixelCount
@@ -589,14 +589,14 @@ namespace
 					CoverageMask[AtlasIndex] = true;
 					InOutData.CoverageValues[AtlasIndex] = 1.0f;
 
-					if (Settings.bBakeNormalDepth)
+					if (Settings.bBakeNormalMaskDepth)
 					{
 						const float LinearDepth = FMath::Clamp(
 							static_cast<float>((SharedCaptureHalfExtent - CaptureDepth)
 								/ (2.0 * SharedCaptureHalfExtent)),
 							0.0f,
 							1.0f);
-						InOutData.NormalDepthPixels[AtlasIndex] =
+						InOutData.NormalMaskDepthPixels[AtlasIndex] =
 							EncodeOctahedralObjectSpaceNormal(
 								DecodeObjectSpaceNormal(
 									DepthCorrectResult.ObjectSpaceNormal[TileIndex]),
@@ -635,26 +635,26 @@ namespace
 			InOutData.BaseColorPixels.Reset();
 		}
 
-		if (Settings.bBakeNormalDepth)
+		if (Settings.bBakeNormalMaskDepth)
 		{
 			UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(
-				InOutData.NormalDepthPixels,
+				InOutData.NormalMaskDepthPixels,
 				InOutData.Stats.AtlasWidth,
 				InOutData.Stats.AtlasHeight,
 				InOutData.TileInfos,
 				NormalCoverage,
 				false);
-			for (int32 PixelIndex = 0; PixelIndex < InOutData.NormalDepthPixels.Num(); ++PixelIndex)
+			for (int32 PixelIndex = 0; PixelIndex < InOutData.NormalMaskDepthPixels.Num(); ++PixelIndex)
 			{
 				if (!NormalCoverage[PixelIndex])
 				{
-					InOutData.NormalDepthPixels[PixelIndex].A = UnitFloatToByte(0.5f);
+					InOutData.NormalMaskDepthPixels[PixelIndex].A = UnitFloatToByte(0.5f);
 				}
 			}
 		}
 		else
 		{
-			InOutData.NormalDepthPixels.Reset();
+			InOutData.NormalMaskDepthPixels.Reset();
 		}
 
 		if (Settings.bBakeMix)
@@ -1080,13 +1080,13 @@ namespace
 				Settings.BaseColorSdfTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
-		if (Settings.bBakeNormalDepth)
+		if (Settings.bBakeNormalMaskDepth)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Normal / Depth"),
+				TEXT("Normal / Mask / Depth"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.NormalDepthTextureSuffix,
+				Settings.NormalMaskDepthTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
 		if (Settings.bBakeMix)
@@ -1179,7 +1179,7 @@ namespace
 			return true;
 		};
 		return ValidateTextureName(Settings.bBakeBaseColorSdf, Settings.BaseColorSdfTextureParameterName, TEXT("BaseColor/SDF"))
-			&& ValidateTextureName(Settings.bBakeNormalDepth, Settings.NormalDepthTextureParameterName, TEXT("Normal/Depth"))
+			&& ValidateTextureName(Settings.bBakeNormalMaskDepth, Settings.NormalMaskDepthTextureParameterName, TEXT("Normal/Mask/Depth"))
 			&& ValidateTextureName(Settings.bBakeMix, Settings.MixTextureParameterName, TEXT("Mix"))
 			&& !Settings.FramesParameterName.IsNone()
 			&& !Settings.DefaultMeshSizeParameterName.IsNone()
@@ -1207,7 +1207,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 {
 	FFoliageBakerImpostorBakeResult Result;
 	FString Error;
-	if (!Settings.bBakeBaseColorSdf && !Settings.bBakeNormalDepth && !Settings.bBakeMix)
+	if (!Settings.bBakeBaseColorSdf && !Settings.bBakeNormalMaskDepth && !Settings.bBakeMix)
 	{
 		Result.Report = FString::Printf(TEXT("%s\n  failed: no Impostor texture output is enabled."), *SourceStaticMesh.GetName());
 		return Result;
@@ -1353,16 +1353,16 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		}
 	}
 
-	if (Settings.bBakeNormalDepth)
+	if (Settings.bBakeNormalMaskDepth)
 	{
-		Result.NormalDepthTexture = CreateTexture(
+		Result.NormalMaskDepthTexture = CreateTexture(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
 			PreflightResult.OutputFolders.TexturePackagePath,
-			Settings.NormalDepthTextureSuffix,
+			Settings.NormalMaskDepthTextureSuffix,
 			PreflightResult.ExistingAssetDecision,
-			BakeData.NormalDepthPixels,
+			BakeData.NormalMaskDepthPixels,
 			BakeData.Stats,
 			TC_BC7,
 			TEXTUREGROUP_WorldNormalMap,
@@ -1373,7 +1373,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 				UnitFloatToByte(0.5f)),
 			EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth,
 			Error);
-		if (!Result.NormalDepthTexture)
+		if (!Result.NormalMaskDepthTexture)
 		{
 			Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), *Error);
 			return Result;
@@ -1414,8 +1414,8 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		PreflightResult.ExistingAssetDecision.ExistingAssetPolicy;
 	MaterialParams.AssetNameVersion =
 		PreflightResult.ExistingAssetDecision.AssetNameVersion;
-	MaterialParams.BaseColorOpacityTextureParameterName = Settings.BaseColorSdfTextureParameterName;
-	MaterialParams.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
+	MaterialParams.ColorAtlasTextureParameterName = Settings.BaseColorSdfTextureParameterName;
+	MaterialParams.NormalAtlasTextureParameterName = Settings.NormalMaskDepthTextureParameterName;
 	MaterialParams.MixTextureParameterName = Settings.MixTextureParameterName;
 	MaterialParams.OwnedScalarParameterNames = {
 		Settings.LeafRoughnessParameterName,
@@ -1473,7 +1473,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		MaterialParams,
 		MaterialTemplate,
 		Result.BaseColorSdfTexture,
-		Result.NormalDepthTexture,
+		Result.NormalMaskDepthTexture,
 		Result.MixTexture,
 		Error);
 	if (!Result.MaterialInstance)
@@ -1557,7 +1557,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		AppendCreatedAsset(Result.ProxyMesh, Result.CreatedAssets);
 	}
 	AppendCreatedAsset(Result.BaseColorSdfTexture, Result.CreatedAssets);
-	AppendCreatedAsset(Result.NormalDepthTexture, Result.CreatedAssets);
+	AppendCreatedAsset(Result.NormalMaskDepthTexture, Result.CreatedAssets);
 	AppendCreatedAsset(Result.MixTexture, Result.CreatedAssets);
 	AppendCreatedAsset(Result.MaterialInstance, Result.CreatedAssets);
 	const int32 AtlasPixelCount = BakeData.Stats.AtlasWidth * BakeData.Stats.AtlasHeight;

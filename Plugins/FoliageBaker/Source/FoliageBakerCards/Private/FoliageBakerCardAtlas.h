@@ -21,7 +21,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 
 	bool CropToUsedSpace(
 		FFoliageBakerProxyGeometry& InOutGeometry,
-		TArray<FColor>& BaseColorOpacityPixels,
+		TArray<FColor>& ColorAtlasPixels,
 		TArray<FColor>& NormalPixels,
 		TArray<FColor>& MixPixels,
 		TArray<FColor>& SourceTriangleIdAndDepthPixels,

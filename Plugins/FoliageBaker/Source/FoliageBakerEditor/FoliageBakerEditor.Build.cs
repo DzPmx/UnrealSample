@@ -29,6 +29,7 @@ public class FoliageBakerEditor : ModuleRules
 				"PropertyEditor",
 				"EditorFramework",
 				"UnrealEd",
+				"ToolWidgets",
 				"FoliageBakerCore",
 				"FoliageBakerEditorCommon",
 				"FoliageBakerCards",

@@ -16,7 +16,7 @@ struct FFoliageBakerImpostorBakeResult
 	TStrongObjectPtr<UStaticMesh> ProxyMesh;
 	int32 SourceMeshLODIndex = INDEX_NONE;
 	TStrongObjectPtr<UTexture2D> BaseColorSdfTexture;
-	TStrongObjectPtr<UTexture2D> NormalDepthTexture;
+	TStrongObjectPtr<UTexture2D> NormalMaskDepthTexture;
 	TStrongObjectPtr<UTexture2D> MixTexture;
 	TStrongObjectPtr<UMaterialInstanceConstant> MaterialInstance;
 	TArray<TStrongObjectPtr<UObject>> CreatedAssets;

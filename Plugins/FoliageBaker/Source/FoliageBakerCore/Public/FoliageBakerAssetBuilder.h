@@ -161,8 +161,8 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	FString AssetNameSuffix;
 	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy = EFoliageBakerExistingAssetPolicy::ReuseOrCreate;
 	int32 AssetNameVersion = 0;
-	FName BaseColorOpacityTextureParameterName = NAME_None;
-	FName NormalDepthTextureParameterName = NAME_None;
+	FName ColorAtlasTextureParameterName = NAME_None;
+	FName NormalAtlasTextureParameterName = NAME_None;
 	FName MixTextureParameterName = NAME_None;
 	TArray<FTextureParameterValue> AdditionalTextureParameterValues;
 	TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue> ScalarParameterValues;
@@ -210,15 +210,6 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerSourceLODAssetParams
 class FOLIAGEBAKERCORE_API FFoliageBakerAssetBuilder final
 {
 public:
-	static bool BuildGeneratedAssetBasePath(
-		const UStaticMesh& SourceStaticMesh,
-		const FString& ConfiguredOutputFolder,
-		const FString& AssetNamePrefix,
-		const FString& AssetNameSuffix,
-		FString& OutBasePackageName,
-		FString& OutBaseAssetName,
-		FString& OutError);
-
 	static bool BuildGeneratedAssetPath(
 		const UStaticMesh& SourceStaticMesh,
 		const FString& ConfiguredOutputFolder,
@@ -232,16 +223,6 @@ public:
 		const UStaticMesh& SourceStaticMesh,
 		const FString& AssetNameSuffix,
 		FFoliageBakerGeneratedAssetPath& OutAssetPath,
-		FString& OutError);
-
-	static bool BuildGeneratedAssetBasePath(
-		const UStaticMesh& SourceStaticMesh,
-		const FString& ConfiguredOutputFolder,
-		const FString& OutputPackagePathOverride,
-		const FString& AssetNamePrefix,
-		const FString& AssetNameSuffix,
-		FString& OutBasePackageName,
-		FString& OutBaseAssetName,
 		FString& OutError);
 
 	// Resolves folders from the materials actually used by the selected source LOD.
@@ -272,8 +253,8 @@ public:
 		FFoliageBakerAssetTransaction& AssetTransaction,
 		const FFoliageBakerMaterialInstanceAssetParams& Params,
 		UMaterialInstanceConstant& TemplateMaterialInstance,
-		const TStrongObjectPtr<UTexture2D>& BaseColorOpacityTexture,
-		const TStrongObjectPtr<UTexture2D>& NormalDepthTexture,
+		const TStrongObjectPtr<UTexture2D>& ColorAtlasTexture,
+		const TStrongObjectPtr<UTexture2D>& NormalAtlasTexture,
 		const TStrongObjectPtr<UTexture2D>& MixTexture,
 		FString& OutError);
 

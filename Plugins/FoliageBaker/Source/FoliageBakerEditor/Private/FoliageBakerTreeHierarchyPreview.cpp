@@ -8,7 +8,7 @@
 #include "EditorModes.h"
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
-#include "FoliageBakerTreeHierarchyColorBaker.h"
+#include "FoliageBakerTreeHierarchyBaker.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialRenderProxy.h"
@@ -529,8 +529,8 @@ public:
 			const FString DebugLabel = FString::Printf(
 				TEXT("%s  Bone %d/%d  Length %.1f  Positive %.1f  Min %.1f"),
 				*Branch.Label,
-				BoneRecord.BakeID,
-				BoneRecord.ParentBakeID,
+				BoneRecord.BoneID,
+				BoneRecord.ParentBoneID,
 				BoneRecord.AxisExtent,
 				BoneRecord.PositiveAxisExtent,
 				BoneRecord.MinimumAxisProjection);

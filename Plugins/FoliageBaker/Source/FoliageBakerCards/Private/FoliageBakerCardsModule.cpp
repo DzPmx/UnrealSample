@@ -11,9 +11,9 @@
 
 namespace
 {
-	bool IsSingleBillboardMode(const EFoliageBakerCardMode Mode)
+	bool IsBillboardMode(const EFoliageBakerCardMode Mode)
 	{
-		return Mode == EFoliageBakerCardMode::SingleBillboard;
+		return Mode == EFoliageBakerCardMode::Billboard;
 	}
 
 	bool IsMultiBillboardMode(const EFoliageBakerCardMode Mode)
@@ -24,21 +24,21 @@ namespace
 	TSoftObjectPtr<UMaterialInstanceConstant> GetConfiguredMaterialTemplate(
 		const UFoliageBakerCardsSettings& ToolSettings)
 	{
-		if (IsSingleBillboardMode(ToolSettings.Mode))
+		if (IsBillboardMode(ToolSettings.Mode))
 		{
-			const UFoliageBakerSingleBillboardSettings& BillboardSettings =
-				*CastChecked<UFoliageBakerSingleBillboardSettings>(
+			const UFoliageBakerBillboardSettings& BillboardModeSettings =
+				*CastChecked<UFoliageBakerBillboardSettings>(
 					&ToolSettings);
 			if (ToolSettings.bBakeUpperHemisphereL1Visibility)
 			{
 				switch (ToolSettings.BillboardMode)
 				{
 				case EFoliageBakerBillboardMode::SinglePlane:
-					return BillboardSettings.SinglePlaneSHShadowMaterialInstanceTemplate;
+					return BillboardModeSettings.SinglePlaneL1VisibilityMaterialInstanceTemplate;
 				case EFoliageBakerBillboardMode::SinglePlaneTwoViews:
-					return BillboardSettings.SinglePlaneTwoViewsSHShadowMaterialInstanceTemplate;
+					return BillboardModeSettings.SinglePlaneTwoViewsL1VisibilityMaterialInstanceTemplate;
 				case EFoliageBakerBillboardMode::DoublePlanes:
-					return BillboardSettings.DoublePlanesSHShadowMaterialInstanceTemplate;
+					return BillboardModeSettings.DoublePlanesL1VisibilityMaterialInstanceTemplate;
 				default:
 					checkNoEntry();
 					return TSoftObjectPtr<UMaterialInstanceConstant>();
@@ -47,12 +47,12 @@ namespace
 			if (ToolSettings.BillboardMode
 				== EFoliageBakerBillboardMode::SinglePlaneTwoViews)
 			{
-				return BillboardSettings.SinglePlaneTwoViewsMaterialInstanceTemplate;
+				return BillboardModeSettings.SinglePlaneTwoViewsMaterialInstanceTemplate;
 			}
 			if (ToolSettings.BillboardMode
 				== EFoliageBakerBillboardMode::DoublePlanes)
 			{
-				return BillboardSettings.DoublePlanesMaterialInstanceTemplate;
+				return BillboardModeSettings.DoublePlanesMaterialInstanceTemplate;
 			}
 		}
 		return ToolSettings.MaterialInstanceTemplate;
@@ -67,7 +67,7 @@ namespace
 		Request.BillboardMode = Settings.BillboardMode;
 		Request.SingleCaptureAxis = Settings.SingleCaptureAxis;
 		Request.CrossCardPlaneCount = Settings.CrossCardPlaneCount;
-		Request.CrossCardGeometryMode = Settings.CrossCardFaceMode;
+		Request.CrossCardFaceMode = Settings.CrossCardFaceMode;
 		Request.TrunkMaterialKeywords = Settings.TrunkMaterialKeywords;
 		Request.LeafMaterialKeywords = Settings.LeafMaterialKeywords;
 		Request.MultiBillboardClusterCount = Settings.MultiBillboardClusterCount;
@@ -77,7 +77,7 @@ namespace
 		Request.TextureResolutionMode = Settings.TextureResolutionMode;
 		Request.TargetTexelsPerMeter = Settings.TargetTexelsPerMeter;
 		Request.MinimumTextureAtlasResolution = Settings.MinimumTextureAtlasResolution;
-		Request.TextureResolution = IsSingleBillboardMode(Settings.Mode)
+		Request.TextureResolution = IsBillboardMode(Settings.Mode)
 			? Settings.SingleTextureResolution
 			: IsMultiBillboardMode(Settings.Mode)
 				? Settings.MultiBillboardTextureResolution
@@ -86,15 +86,15 @@ namespace
 		Request.bPreserveAlphaMaskValues = Settings.bPreserveAlphaMaskValues;
 		Request.MipMaskCoverageThreshold = Settings.MipMaskCoverageThreshold;
 		Request.bTrimUnusedAtlasSpace = Settings.bTrimUnusedAtlasSpace;
-		Request.bBakeBaseColorOpacity = Settings.bBakeBaseColorOpacity;
-		Request.bBakeNormalDepth = Settings.bBakeNormalDepth;
+		Request.bBakeBaseColorClassification = Settings.bBakeBaseColorClassification;
+		Request.bBakeNormalClassification = Settings.bBakeNormalClassification;
 		Request.bBakeMix = Settings.bBakeMix;
 		Request.bOverrideBakeStaticSwitch =
 			Settings.bOverrideBakeStaticSwitch;
 		Request.BakeStaticSwitchOverrides =
 			Settings.BakeStaticSwitchOverrides;
 		Request.bBakeUpperHemisphereL1Visibility =
-			IsSingleBillboardMode(Settings.Mode)
+			IsBillboardMode(Settings.Mode)
 			&& Settings.bBakeUpperHemisphereL1Visibility;
 		Request.UpperHemisphereL1TextureResolution =
 			Settings.UpperHemisphereL1TextureResolution;
@@ -102,8 +102,8 @@ namespace
 			Settings.UpperHemisphereL1SampleCount;
 		Request.UpperHemisphereL1ShadowMapResolution =
 			Settings.UpperHemisphereL1ShadowMapResolution;
-		Request.BaseColorOpacityTextureParameterName = Settings.BaseColorOpacityTextureParameterName;
-		Request.NormalDepthTextureParameterName = Settings.NormalDepthTextureParameterName;
+		Request.ColorAtlasTextureParameterName = Settings.ColorAtlasTextureParameterName;
+		Request.NormalClassificationTextureParameterName = Settings.NormalClassificationTextureParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;
 		Request.UpperHemisphereL1VisibilityTextureParameterName =
 			Settings.UpperHemisphereL1VisibilityTextureParameterName;
@@ -116,8 +116,8 @@ namespace
 		Request.bPlaceGeneratedAssetsNearReplacedLODAssets =
 			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
 		Request.TextureNamePrefix = Settings.TextureNamePrefix;
-		Request.BaseColorOpacityTextureSuffix = Settings.BaseColorOpacityTextureSuffix;
-		Request.NormalDepthTextureSuffix = Settings.NormalDepthTextureSuffix;
+		Request.BaseColorClassificationTextureSuffix = Settings.BaseColorClassificationTextureSuffix;
+		Request.NormalClassificationTextureSuffix = Settings.NormalClassificationTextureSuffix;
 		Request.MixTextureSuffix = Settings.MixTextureSuffix;
 		Request.UpperHemisphereL1VisibilityTextureSuffix =
 			Settings.UpperHemisphereL1VisibilityTextureSuffix;
@@ -129,30 +129,30 @@ namespace
 
 void FFoliageBakerCardsModule::ShutdownModule()
 {
-	SingleBillboardController.Reset();
+	BillboardController.Reset();
 	CrossCardsController.Reset();
 	MultiBillboardController.Reset();
-	SingleBillboardSettings.Reset();
+	BillboardSettings.Reset();
 	CrossCardsSettings.Reset();
 	MultiBillboardSettings.Reset();
 }
 
 void FFoliageBakerCardsModule::EnsureToolSettings(const EFoliageBakerCardMode Mode)
 {
-	TStrongObjectPtr<UFoliageBakerCardsSettings>& Settings = IsSingleBillboardMode(Mode)
-		? SingleBillboardSettings
+	TStrongObjectPtr<UFoliageBakerCardsSettings>& Settings = IsBillboardMode(Mode)
+		? BillboardSettings
 		: IsMultiBillboardMode(Mode)
 			? MultiBillboardSettings
 			: CrossCardsSettings;
 	if (!Settings.IsValid())
 	{
-		if (IsSingleBillboardMode(Mode))
+		if (IsBillboardMode(Mode))
 		{
 			FFoliageBakerFeatureTool::EnsureTransientSettings<
 				UFoliageBakerCardsSettings,
-				UFoliageBakerSingleBillboardSettings>(
+				UFoliageBakerBillboardSettings>(
 					Settings,
-					FName(TEXT("FoliageBakerSingleBillboardSettings")));
+					FName(TEXT("FoliageBakerBillboardSettings")));
 		}
 		else if (IsMultiBillboardMode(Mode))
 		{
@@ -178,8 +178,8 @@ const TStrongObjectPtr<UFoliageBakerCardsSettings>&
 	FFoliageBakerCardsModule::GetToolSettings(
 		const EFoliageBakerCardMode Mode) const
 {
-	return IsSingleBillboardMode(Mode)
-		? SingleBillboardSettings
+	return IsBillboardMode(Mode)
+		? BillboardSettings
 		: IsMultiBillboardMode(Mode)
 			? MultiBillboardSettings
 			: CrossCardsSettings;
@@ -188,8 +188,8 @@ const TStrongObjectPtr<UFoliageBakerCardsSettings>&
 TSharedPtr<FFoliageBakerFeatureController>& FFoliageBakerCardsModule::GetFeatureController(
 	const EFoliageBakerCardMode Mode)
 {
-	return IsSingleBillboardMode(Mode)
-		? SingleBillboardController
+	return IsBillboardMode(Mode)
+		? BillboardController
 		: IsMultiBillboardMode(Mode)
 			? MultiBillboardController
 			: CrossCardsController;
@@ -210,12 +210,12 @@ TSharedRef<SWidget> FFoliageBakerCardsModule::CreateFeaturePanel(const EFoliageB
 		{
 			return Settings->SourceStaticMeshes;
 		};
-	ControllerArgs.BakeButtonText = IsSingleBillboardMode(Mode)
+	ControllerArgs.BakeButtonText = IsBillboardMode(Mode)
 		? LOCTEXT("BakeBillboardButton", "Bake Billboard")
 		: IsMultiBillboardMode(Mode)
 			? LOCTEXT("BakeMultiBillboardButton", "Bake MultiBillboard")
 			: LOCTEXT("BakeCrossCardsButton", "Bake Cross Cards");
-	ControllerArgs.BakeButtonTooltip = IsSingleBillboardMode(Mode)
+	ControllerArgs.BakeButtonTooltip = IsBillboardMode(Mode)
 		? LOCTEXT("BakeBillboardTooltip", "Bake the selected Single Plane - One View, Single Plane - Two Views, or Double Planes - Two Views mode for every queued Static Mesh.")
 		: IsMultiBillboardMode(Mode)
 			? LOCTEXT("BakeMultiBillboardTooltip", "Bake clustered leaf Billboards and, when enabled, retain and simplify the non-leaf trunk and branch geometry with its original materials.")
@@ -255,11 +255,13 @@ bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 			return !Keyword.TrimStartAndEnd().IsEmpty();
 		});
 	return FFoliageBakerFeatureTool::CanBakeFeature(
-		!MaterialTemplate.IsNull() && bHasLeafKeyword,
-		Settings->bBakeBaseColorOpacity
-			|| Settings->bBakeNormalDepth
+		FFoliageBakerFeatureTool::HasExistingAsset(
+			MaterialTemplate.ToSoftObjectPath())
+			&& bHasLeafKeyword,
+		Settings->bBakeBaseColorClassification
+			|| Settings->bBakeNormalClassification
 			|| Settings->bBakeMix
-			|| (IsSingleBillboardMode(Mode)
+			|| (IsBillboardMode(Mode)
 				&& Settings->bBakeUpperHemisphereL1Visibility),
 		Settings->SourceStaticMeshes);
 }

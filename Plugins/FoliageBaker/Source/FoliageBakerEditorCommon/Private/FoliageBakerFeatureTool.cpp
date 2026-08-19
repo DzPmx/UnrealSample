@@ -1,4 +1,5 @@
 #include "FoliageBakerFeatureTool.h"
+#include "FoliageBakerToolChrome.h"
 
 #include "AssetRegistry/AssetData.h"
 #include "AssetSelection.h"
@@ -9,6 +10,7 @@
 #include "Engine/StaticMesh.h"
 #include "IDetailCustomization.h"
 #include "IDetailsView.h"
+#include "Misc/PackageName.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/ScopedSlowTask.h"
 #include "Modules/ModuleManager.h"
@@ -18,9 +20,7 @@
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SSeparator.h"
 #include "Widgets/SBoxPanel.h"
-#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerFeatureTool"
 
@@ -124,9 +124,14 @@ namespace
 	FText FormatQueuedStaticMeshCount(
 		const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes)
 	{
+		const int32 Count = GetUniqueValidStaticMeshes(SourceStaticMeshes).Num();
+		if (Count == 0)
+		{
+			return LOCTEXT("QueuedMeshCountEmpty", "None queued");
+		}
 		return FText::Format(
-			LOCTEXT("QueuedMeshCount", "{0} Static Mesh asset(s) queued"),
-			FText::AsNumber(GetUniqueValidStaticMeshes(SourceStaticMeshes).Num()));
+			LOCTEXT("QueuedMeshCount", "{0} queued"),
+			FText::AsNumber(Count));
 	}
 
 	struct FFoliageBakerFeatureControllerState
@@ -185,140 +190,172 @@ TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Creat
 	Impl->Widget = SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
-		.Padding(8.0f, 8.0f, 8.0f, 4.0f)
+		.Padding(12.0f, 12.0f, 12.0f, 8.0f)
 		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(10.0f)
-			[
+			FoliageBakerToolChrome::MakeCard(
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("SourceMeshesSectionTitle", "Source Static Meshes"))
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
 				[
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot()
 					.FillWidth(1.0f)
 					.VAlign(VAlign_Center)
 					[
-						SNew(STextBlock)
-						.Text_Lambda([WeakState]()
-						{
-							const TSharedPtr<FFoliageBakerFeatureControllerState> State =
-								WeakState.Pin();
-							if (!State
-								|| !State->SettingsObject.IsValid()
-								|| !State->GetSourceStaticMeshes)
-							{
-								return FText::GetEmpty();
-							}
-							return FormatQueuedStaticMeshCount(
-								State->GetSourceStaticMeshes());
-						})
+						FoliageBakerToolChrome::MakeTitle(
+							LOCTEXT("SourceMeshesSectionTitle", "Source Meshes"))
 					]
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
-					.Padding(8.0f, 0.0f)
+					.VAlign(VAlign_Center)
 					[
-						SNew(SButton)
-						.Text(LOCTEXT("AddSelectedMeshes", "Add Content Browser Selection"))
-						.ToolTipText(LOCTEXT(
-							"AddSelectedMeshesTooltip",
-							"Add selected Static Mesh assets without removing meshes already queued."))
-						.OnClicked_Lambda([WeakState]()
-						{
-							const TSharedPtr<FFoliageBakerFeatureControllerState> State =
-								WeakState.Pin();
-							if (State
-								&& State->SettingsObject.IsValid()
-								&& State->GetSourceStaticMeshes
-								&& AddContentBrowserSelection(
-									*State->SettingsObject.Get(),
-									State->GetSourceStaticMeshes(),
-									State->AddMeshesTransactionText))
+						FoliageBakerToolChrome::MakeCountBadge(
+							TAttribute<FText>::CreateLambda([WeakState]()
 							{
-								if (const TSharedPtr<IDetailsView> DetailsView =
-									State->DetailsView.Pin())
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								if (!State
+									|| !State->SettingsObject.IsValid()
+									|| !State->GetSourceStaticMeshes)
 								{
-									DetailsView->ForceRefresh();
+									return FText::GetEmpty();
 								}
-							}
-							return FReply::Handled();
-						})
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("ClearMeshes", "Clear"))
-						.ToolTipText(LOCTEXT(
-							"ClearMeshesTooltip",
-							"Remove all queued Static Mesh assets from this feature."))
-						.OnClicked_Lambda([WeakState]()
-						{
-							const TSharedPtr<FFoliageBakerFeatureControllerState> State =
-								WeakState.Pin();
-							if (State
-								&& State->SettingsObject.IsValid()
-								&& State->GetSourceStaticMeshes
-								&& ClearSourceStaticMeshes(
-									*State->SettingsObject.Get(),
-									State->GetSourceStaticMeshes(),
-									State->ClearMeshesTransactionText))
+								return FormatQueuedStaticMeshCount(
+									State->GetSourceStaticMeshes());
+							}),
+							TAttribute<bool>::CreateLambda([WeakState]()
 							{
-								if (const TSharedPtr<IDetailsView> DetailsView =
-									State->DetailsView.Pin())
-								{
-									DetailsView->ForceRefresh();
-								}
-							}
-							return FReply::Handled();
-						})
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								return State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
+										State->GetSourceStaticMeshes());
+							}))
 					]
 				]
-			]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 6.0f, 0.0f, 8.0f)
+				[
+					FoliageBakerToolChrome::MakeMuted(LOCTEXT(
+						"SourceMeshesSectionHint",
+						"Queue one or more Static Mesh assets. Bake runs on every queued mesh."))
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+					[
+						FoliageBakerToolChrome::MakeIconTextButton(
+							FName(TEXT("Icons.Plus")),
+							LOCTEXT("AddSelectedMeshes", "Add Selection"),
+							LOCTEXT(
+								"AddSelectedMeshesTooltip",
+								"Add Static Mesh assets selected in the Content Browser without removing meshes already queued."),
+							FOnClicked::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								if (State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& AddContentBrowserSelection(
+										*State->SettingsObject.Get(),
+										State->GetSourceStaticMeshes(),
+										State->AddMeshesTransactionText))
+								{
+									if (const TSharedPtr<IDetailsView> DetailsView =
+										State->DetailsView.Pin())
+									{
+										DetailsView->ForceRefresh();
+									}
+								}
+								return FReply::Handled();
+							}))
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						FoliageBakerToolChrome::MakeIconTextButton(
+							FName(TEXT("Icons.Delete")),
+							LOCTEXT("ClearMeshes", "Clear"),
+							LOCTEXT(
+								"ClearMeshesTooltip",
+								"Remove all queued Static Mesh assets from this feature."),
+							FOnClicked::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								if (State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& ClearSourceStaticMeshes(
+										*State->SettingsObject.Get(),
+										State->GetSourceStaticMeshes(),
+										State->ClearMeshesTransactionText))
+								{
+									if (const TSharedPtr<IDetailsView> DetailsView =
+										State->DetailsView.Pin())
+									{
+										DetailsView->ForceRefresh();
+									}
+								}
+								return FReply::Handled();
+							}),
+							TAttribute<bool>::CreateLambda([WeakState]()
+							{
+								const TSharedPtr<FFoliageBakerFeatureControllerState> State =
+									WeakState.Pin();
+								return State
+									&& State->SettingsObject.IsValid()
+									&& State->GetSourceStaticMeshes
+									&& FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
+										State->GetSourceStaticMeshes());
+							}))
+					]
+				],
+				FMargin(14.0f, 12.0f))
 		]
 		+ SVerticalBox::Slot()
 		.FillHeight(1.0f)
-		.Padding(8.0f, 4.0f)
+		.Padding(12.0f, 0.0f)
 		[
-			Impl->DetailsView.ToSharedRef()
+			FoliageBakerToolChrome::MakeRecessedPanel(Impl->DetailsView.ToSharedRef())
 		]
 		+ SVerticalBox::Slot()
 		.AutoHeight()
+		.Padding(12.0f)
 		[
-			SNew(SSeparator)
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(8.0f)
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			.VAlign(VAlign_Center)
-			.Padding(0.0f, 0.0f, 12.0f, 0.0f)
+			SNew(SBorder)
+			.BorderImage(FoliageBakerToolChrome::HeaderBrush())
+			.Padding(FMargin(14.0f, 12.0f))
 			[
-				SNew(STextBlock)
-					.Text(Args.RequirementsHint)
-					.AutoWrapText(true)
-			]
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(SBox)
-				.MinDesiredWidth(200.0f)
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 16.0f, 0.0f)
 				[
-					SNew(SButton)
+					FoliageBakerToolChrome::MakeMuted(Args.RequirementsHint)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.MinDesiredWidth(188.0f)
+					.MinDesiredHeight(32.0f)
+					[
+						SNew(SButton)
 						.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
 						.HAlign(HAlign_Center)
+						.VAlign(VAlign_Center)
+						.ContentPadding(FMargin(16.0f, 6.0f))
 						.Text(Args.BakeButtonText)
 						.ToolTipText(Args.BakeButtonTooltip)
 						.IsEnabled_Lambda([WeakState]()
@@ -338,6 +375,7 @@ TSharedRef<FFoliageBakerFeatureController> FFoliageBakerFeatureController::Creat
 							}
 							return FReply::Handled();
 						})
+					]
 				]
 			]
 		];
@@ -368,6 +406,19 @@ bool FFoliageBakerFeatureTool::HasAnyValidStaticMesh(
 		{
 			return StaticMesh != nullptr;
 		});
+}
+
+bool FFoliageBakerFeatureTool::HasExistingAsset(const FSoftObjectPath& AssetPath)
+{
+	if (!AssetPath.IsValid())
+	{
+		return false;
+	}
+	if (AssetPath.ResolveObject() != nullptr)
+	{
+		return true;
+	}
+	return FPackageName::DoesPackageExist(AssetPath.GetLongPackageName());
 }
 
 bool FFoliageBakerFeatureTool::CanBakeFeature(

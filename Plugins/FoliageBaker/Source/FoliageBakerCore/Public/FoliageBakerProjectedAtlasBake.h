@@ -85,7 +85,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 	struct FOLIAGEBAKERCORE_API FResult
 	{
-		TArray<FColor> BaseColorOpacityPixels;
+		TArray<FColor> ColorAtlasPixels;
 		TArray<FColor> NormalPixels;
 		TArray<FColor> MixPixels;
 		TArray<FColor> SourceTriangleIdAndDepthPixels;

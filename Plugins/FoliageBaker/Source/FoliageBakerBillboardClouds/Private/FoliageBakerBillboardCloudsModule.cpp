@@ -69,7 +69,8 @@ bool FFoliageBakerBillboardCloudsModule::CanBake() const
 		return false;
 	}
 	return FFoliageBakerFeatureTool::CanBakeFeature(
-		!ToolSettings->BillboardMaterialTemplate.IsNull(),
+		FFoliageBakerFeatureTool::HasExistingAsset(
+			ToolSettings->MaterialInstanceTemplate.ToSoftObjectPath()),
 		FFoliageBakerBillboardCloudsBaker::HasAnyAtlasOutput(*ToolSettings),
 		ToolSettings->SourceStaticMeshes);
 }
@@ -78,7 +79,7 @@ void FFoliageBakerBillboardCloudsModule::Bake()
 {
 	EnsureToolSettings();
 	const TStrongObjectPtr<UMaterialInstanceConstant> MaterialTemplate(
-		ToolSettings->BillboardMaterialTemplate.LoadSynchronous());
+		ToolSettings->MaterialInstanceTemplate.LoadSynchronous());
 	if (!MaterialTemplate)
 	{
 		FFoliageBakerFeatureTool::ShowMessage(

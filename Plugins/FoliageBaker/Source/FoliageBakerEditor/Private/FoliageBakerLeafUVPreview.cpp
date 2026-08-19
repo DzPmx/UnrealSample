@@ -1,19 +1,19 @@
 #include "FoliageBakerLeafUVPreview.h"
+#include "FoliageBakerToolChrome.h"
 
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
-#include "FoliageBakerTreeHierarchyColorBaker.h"
+#include "FoliageBakerTreeHierarchyBaker.h"
 #include "InputCoreTypes.h"
 #include "Materials/MaterialInterface.h"
 #include "MeshDescription.h"
+#include "Misc/Attribute.h"
 #include "Rendering/DrawElements.h"
 #include "StaticMeshAttributes.h"
-#include "Styling/AppStyle.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Input/SButton.h"
-#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Input/SSegmentedControl.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SLeafWidget.h"
 #include "Widgets/Text/STextBlock.h"
@@ -708,16 +708,12 @@ void SFoliageBakerLeafUVPreview::Construct(const FArguments& InArgs)
 				.AutoHeight()
 				.Padding(2.0f, 2.0f, 2.0f, 4.0f)
 				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("MaterialSectionListTitle", "Material Sections"))
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					FoliageBakerToolChrome::MakeTitle(LOCTEXT("MaterialSectionListTitle", "Material Sections"))
 				]
 				+ SVerticalBox::Slot()
 				.FillHeight(0.52f)
 				[
-					SNew(SBorder)
-					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-					[
+					FoliageBakerToolChrome::MakeRecessedPanel(
 						SAssignNew(
 							MaterialSectionList,
 							SListView<TSharedPtr<FFoliageBakerLeafUVMaterialSectionOption>>)
@@ -726,16 +722,13 @@ void SFoliageBakerLeafUVPreview::Construct(const FArguments& InArgs)
 						.OnGenerateRow(this, &SFoliageBakerLeafUVPreview::GenerateMaterialSectionRow)
 						.OnSelectionChanged(
 							this,
-							&SFoliageBakerLeafUVPreview::HandleMaterialSectionSelectionChanged)
-					]
+							&SFoliageBakerLeafUVPreview::HandleMaterialSectionSelectionChanged))
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
 				.Padding(2.0f, 8.0f, 2.0f, 4.0f)
 				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("LeafTextureTitle", "Leaf Texture Overlay"))
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					FoliageBakerToolChrome::MakeTitle(LOCTEXT("LeafTextureTitle", "Leaf Texture Overlay"))
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
@@ -759,24 +752,19 @@ void SFoliageBakerLeafUVPreview::Construct(const FArguments& InArgs)
 				.AutoHeight()
 				.Padding(2.0f, 8.0f, 2.0f, 4.0f)
 				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("UVIslandListTitle", "UV0 Islands"))
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					FoliageBakerToolChrome::MakeTitle(LOCTEXT("UVIslandListTitle", "UV0 Islands"))
 				]
 				+ SVerticalBox::Slot()
 				.FillHeight(0.48f)
 				[
-					SNew(SBorder)
-					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-					[
+					FoliageBakerToolChrome::MakeRecessedPanel(
 						SAssignNew(IslandList, SListView<TSharedPtr<int32>>)
 						.ListItemsSource(&IslandOptions)
 						.SelectionMode(ESelectionMode::Multi)
 						.OnGenerateRow(this, &SFoliageBakerLeafUVPreview::GenerateIslandRow)
 						.OnSelectionChanged(
 							this,
-							&SFoliageBakerLeafUVPreview::HandleIslandSelectionChanged)
-					]
+							&SFoliageBakerLeafUVPreview::HandleIslandSelectionChanged))
 				]
 			]
 		]
@@ -789,121 +777,118 @@ void SFoliageBakerLeafUVPreview::Construct(const FArguments& InArgs)
 			.AutoHeight()
 			.Padding(0.0f, 0.0f, 0.0f, 4.0f)
 			[
-				SNew(SWrapBox)
-				.UseAllottedSize(true)
-				.InnerSlotPadding(FVector2D(4.0f, 4.0f))
-				+ SWrapBox::Slot()
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
 				[
-					SNew(SButton)
-					.Text(LOCTEXT("SelectIslandMode", "Select Island"))
-					.OnClicked_Lambda(
-						[this]()
+					SNew(SSegmentedControl<EFoliageBakerLeafUVEditMode>)
+					.Value_Lambda([this]() { return EditMode; })
+					.OnValueChanged_Lambda(
+						[this](const EFoliageBakerLeafUVEditMode NewMode)
 						{
-							return SetEditMode(EFoliageBakerLeafUVEditMode::SelectIsland);
+							SetEditMode(NewMode);
 						})
+					.UniformPadding(FMargin(12.0f, 5.0f))
+					+ SSegmentedControl<EFoliageBakerLeafUVEditMode>::Slot(
+						EFoliageBakerLeafUVEditMode::SelectIsland)
+					.Text(LOCTEXT("SelectIslandMode", "Select"))
+					+ SSegmentedControl<EFoliageBakerLeafUVEditMode>::Slot(
+						EFoliageBakerLeafUVEditMode::SetPivot)
+					.Text(LOCTEXT("SetPivotMode", "Pivot"))
+					+ SSegmentedControl<EFoliageBakerLeafUVEditMode>::Slot(
+						EFoliageBakerLeafUVEditMode::SetTip)
+					.Text(LOCTEXT("SetTipMode", "Tip"))
 				]
-				+ SWrapBox::Slot()
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("SetPivotMode", "Set Pivot"))
-					.OnClicked_Lambda(
-						[this]()
-						{
-							return SetEditMode(EFoliageBakerLeafUVEditMode::SetPivot);
-						})
-				]
-				+ SWrapBox::Slot()
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("SetTipMode", "Set Tip"))
-					.OnClicked_Lambda(
-						[this]()
-						{
-							return SetEditMode(EFoliageBakerLeafUVEditMode::SetTip);
-						})
-				]
-				+ SWrapBox::Slot()
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(8.0f, 0.0f, 0.0f, 0.0f)
+				.VAlign(VAlign_Center)
 				[
 					SNew(SButton)
 					.Text(LOCTEXT("ClearLeafUVPoints", "Clear Points"))
 					.OnClicked(this, &SFoliageBakerLeafUVPreview::ClearSelectedAnnotation)
 				]
-				+ SWrapBox::Slot()
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(6.0f, 0.0f, 0.0f, 0.0f)
+				.VAlign(VAlign_Center)
 				[
 					SNew(SButton)
 					.Text(LOCTEXT("ResetLeafUVView", "Reset View"))
 					.OnClicked(this, &SFoliageBakerLeafUVPreview::ResetUVView)
 				]
-				+ SWrapBox::Slot()
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.Padding(10.0f, 0.0f, 0.0f, 0.0f)
 				.VAlign(VAlign_Center)
 				[
-					SNew(STextBlock)
-					.Text_Lambda([this]() { return GetEditModeText(); })
-					.AutoWrapText(true)
+					FoliageBakerToolChrome::MakeMuted(
+						TAttribute<FText>::CreateLambda(
+							[this]() { return GetEditModeText(); }))
 				]
 			]
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0.0f, 0.0f, 0.0f, 4.0f)
 			[
-				SNew(SWrapBox)
-				.UseAllottedSize(true)
-				.InnerSlotPadding(FVector2D(4.0f, 4.0f))
-				+ SWrapBox::Slot()
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
 				[
 					SNew(SButton)
 					.Text(LOCTEXT("HideSelectedLeafUV", "Hide Selected"))
 					.OnClicked(this, &SFoliageBakerLeafUVPreview::HideSelectedIslands)
 				]
-				+ SWrapBox::Slot()
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(6.0f, 0.0f, 0.0f, 0.0f)
+				.VAlign(VAlign_Center)
 				[
 					SNew(SButton)
 					.Text(LOCTEXT("HideCompletedLeafUV", "Hide Completed"))
 					.OnClicked(this, &SFoliageBakerLeafUVPreview::HideCompletedIslands)
 				]
-				+ SWrapBox::Slot()
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(6.0f, 0.0f, 0.0f, 0.0f)
+				.VAlign(VAlign_Center)
 				[
 					SNew(SButton)
 					.Text(LOCTEXT("ShowAllLeafUV", "Show All"))
 					.OnClicked(this, &SFoliageBakerLeafUVPreview::ShowAllIslands)
 				]
-				+ SWrapBox::Slot()
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.Padding(10.0f, 0.0f, 0.0f, 0.0f)
 				.VAlign(VAlign_Center)
 				[
-					SNew(STextBlock)
-					.Text(LOCTEXT(
+					FoliageBakerToolChrome::MakeMuted(LOCTEXT(
 						"LeafUVNavigationHelp",
-						"Wheel: Zoom  |  MMB Drag: Pan  |  LMB Drag: Box Select  |  Ctrl/Shift: Add"))
-					.AutoWrapText(true)
-					.TextStyle(FAppStyle::Get(), "SmallText")
+						"Wheel zoom  ·  MMB pan  ·  LMB box select  ·  Ctrl/Shift add"))
 				]
 			]
 			+ SVerticalBox::Slot()
 			.FillHeight(1.0f)
 			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(0.0f)
-				[
-					UVCanvas.ToSharedRef()
-				]
+				FoliageBakerToolChrome::MakeRecessedPanel(UVCanvas.ToSharedRef())
 			]
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(2.0f, 5.0f, 2.0f, 0.0f)
 			[
-				SNew(STextBlock)
-				.Text_Lambda([this]() { return GetSelectedIslandText(); })
-				.TextStyle(FAppStyle::Get(), "SmallText")
+				FoliageBakerToolChrome::MakeMuted(
+					TAttribute<FText>::CreateLambda(
+						[this]() { return GetSelectedIslandText(); }))
 			]
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(2.0f, 3.0f, 2.0f, 0.0f)
 			[
-				SNew(STextBlock)
-				.Text_Lambda([this]() { return GetStatusText(); })
-				.AutoWrapText(true)
-				.TextStyle(FAppStyle::Get(), "SmallText")
+				FoliageBakerToolChrome::MakeMuted(
+					TAttribute<FText>::CreateLambda(
+						[this]() { return GetStatusText(); }))
 			]
 		]
 	];
@@ -1671,7 +1656,7 @@ FReply SFoliageBakerLeafUVPreview::ResolveLeafOwnership()
 	const UStaticMesh& StaticMesh = *SourceStaticMesh.Get();
 	bLeafOwnershipDirty = true;
 	FFoliageBakerLeafOwnershipResolveResult ResolveResult =
-		FFoliageBakerTreeHierarchyColorBaker::ResolveLeafOwnership(
+		FFoliageBakerTreeHierarchyBaker::ResolveLeafOwnership(
 			StaticMesh,
 			SourceLODIndex,
 			SelectedMaterialIndex,

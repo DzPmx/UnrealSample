@@ -23,10 +23,10 @@ private:
 	void Bake(EFoliageBakerCardMode Mode);
 	bool CanBake(EFoliageBakerCardMode Mode) const;
 
-	TStrongObjectPtr<UFoliageBakerCardsSettings> SingleBillboardSettings;
+	TStrongObjectPtr<UFoliageBakerCardsSettings> BillboardSettings;
 	TStrongObjectPtr<UFoliageBakerCardsSettings> CrossCardsSettings;
 	TStrongObjectPtr<UFoliageBakerCardsSettings> MultiBillboardSettings;
-	TSharedPtr<FFoliageBakerFeatureController> SingleBillboardController;
+	TSharedPtr<FFoliageBakerFeatureController> BillboardController;
 	TSharedPtr<FFoliageBakerFeatureController> CrossCardsController;
 	TSharedPtr<FFoliageBakerFeatureController> MultiBillboardController;
 };

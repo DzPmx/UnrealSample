@@ -121,8 +121,8 @@ namespace
 		const FFoliageBakerMaterialInstanceAssetParams& Params)
 	{
 		FOwnedMaterialParameterNames Result;
-		AddOwnedParameterName(Result.Texture, Params.BaseColorOpacityTextureParameterName);
-		AddOwnedParameterName(Result.Texture, Params.NormalDepthTextureParameterName);
+		AddOwnedParameterName(Result.Texture, Params.ColorAtlasTextureParameterName);
+		AddOwnedParameterName(Result.Texture, Params.NormalAtlasTextureParameterName);
 		AddOwnedParameterName(Result.Texture, Params.MixTextureParameterName);
 		for (const FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue& Parameter :
 			Params.AdditionalTextureParameterValues)
@@ -2043,53 +2043,6 @@ FString FFoliageBakerGeneratedAssetPath::BuildObjectPath(
 	return (PackagePath / AssetName) + TEXT(".") + AssetName;
 }
 
-bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
-	const UStaticMesh& SourceStaticMesh,
-	const FString& ConfiguredOutputFolder,
-	const FString& AssetNamePrefix,
-	const FString& AssetNameSuffix,
-	FString& OutBasePackageName,
-	FString& OutBaseAssetName,
-	FString& OutError)
-{
-	return BuildGeneratedAssetBasePath(
-		SourceStaticMesh,
-		ConfiguredOutputFolder,
-		FString(),
-		AssetNamePrefix,
-		AssetNameSuffix,
-		OutBasePackageName,
-		OutBaseAssetName,
-		OutError);
-}
-
-bool FFoliageBakerAssetBuilder::BuildGeneratedAssetBasePath(
-	const UStaticMesh& SourceStaticMesh,
-	const FString& ConfiguredOutputFolder,
-	const FString& OutputPackagePathOverride,
-	const FString& AssetNamePrefix,
-	const FString& AssetNameSuffix,
-	FString& OutBasePackageName,
-	FString& OutBaseAssetName,
-	FString& OutError)
-{
-	FFoliageBakerGeneratedAssetPath AssetPath;
-	if (!BuildGeneratedAssetPath(
-			SourceStaticMesh,
-			ConfiguredOutputFolder,
-			OutputPackagePathOverride,
-			AssetNamePrefix,
-			AssetNameSuffix,
-			AssetPath,
-			OutError))
-	{
-		return false;
-	}
-	OutBasePackageName = AssetPath.BuildPackageName();
-	OutBaseAssetName = AssetPath.BuildAssetName();
-	return true;
-}
-
 bool FFoliageBakerAssetBuilder::BuildGeneratedAssetPath(
 	const UStaticMesh& SourceStaticMesh,
 	const FString& ConfiguredOutputFolder,
@@ -2439,8 +2392,8 @@ TStrongObjectPtr<UMaterialInstanceConstant>
 	FFoliageBakerAssetTransaction& AssetTransaction,
 	const FFoliageBakerMaterialInstanceAssetParams& Params,
 	UMaterialInstanceConstant& TemplateMaterialInstance,
-	const TStrongObjectPtr<UTexture2D>& BaseColorOpacityTexture,
-	const TStrongObjectPtr<UTexture2D>& NormalDepthTexture,
+	const TStrongObjectPtr<UTexture2D>& ColorAtlasTexture,
+	const TStrongObjectPtr<UTexture2D>& NormalAtlasTexture,
 	const TStrongObjectPtr<UTexture2D>& MixTexture,
 	FString& OutError)
 {
@@ -2573,17 +2526,17 @@ TStrongObjectPtr<UMaterialInstanceConstant>
 			MaterialInstance.Get());
 		OverrideContext.SetBasePropertyOverrides(Overrides);
 	}
-	if (BaseColorOpacityTexture)
+	if (ColorAtlasTexture)
 	{
 		MaterialInstance->SetTextureParameterValueEditorOnly(
-			FMaterialParameterInfo(Params.BaseColorOpacityTextureParameterName),
-			BaseColorOpacityTexture.Get());
+			FMaterialParameterInfo(Params.ColorAtlasTextureParameterName),
+			ColorAtlasTexture.Get());
 	}
-	if (NormalDepthTexture)
+	if (NormalAtlasTexture)
 	{
 		MaterialInstance->SetTextureParameterValueEditorOnly(
-			FMaterialParameterInfo(Params.NormalDepthTextureParameterName),
-			NormalDepthTexture.Get());
+			FMaterialParameterInfo(Params.NormalAtlasTextureParameterName),
+			NormalAtlasTexture.Get());
 	}
 	if (MixTexture)
 	{

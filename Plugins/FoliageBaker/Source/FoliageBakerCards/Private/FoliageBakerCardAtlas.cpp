@@ -123,7 +123,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 
 	bool CropToUsedSpace(
 		FFoliageBakerProxyGeometry& InOutGeometry,
-		TArray<FColor>& BaseColorOpacityPixels,
+		TArray<FColor>& ColorAtlasPixels,
 		TArray<FColor>& NormalPixels,
 		TArray<FColor>& MixPixels,
 		TArray<FColor>& SourceTriangleIdAndDepthPixels,
@@ -281,14 +281,14 @@ namespace UE::FoliageBaker::Cards::Atlas
 			return true;
 		};
 
-		TArray<FColor> CroppedBaseColorOpacityPixels;
+		TArray<FColor> CroppedColorAtlasPixels;
 		TArray<FColor> CroppedNormalPixels;
 		TArray<FColor> CroppedMixPixels;
 		TArray<FColor> CroppedSourceTriangleIdAndDepthPixels;
 		if (!BuildCroppedPixels(
-				BaseColorOpacityPixels,
+				ColorAtlasPixels,
 				FColor::Transparent,
-				CroppedBaseColorOpacityPixels)
+				CroppedColorAtlasPixels)
 			|| !BuildCroppedPixels(
 				NormalPixels,
 				FColor(128, 128, 255, 0),
@@ -362,7 +362,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 			}
 		}
 
-		BaseColorOpacityPixels = MoveTemp(CroppedBaseColorOpacityPixels);
+		ColorAtlasPixels = MoveTemp(CroppedColorAtlasPixels);
 		NormalPixels = MoveTemp(CroppedNormalPixels);
 		MixPixels = MoveTemp(CroppedMixPixels);
 		SourceTriangleIdAndDepthPixels = MoveTemp(CroppedSourceTriangleIdAndDepthPixels);

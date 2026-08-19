@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/SoftObjectPath.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -96,6 +97,7 @@ public:
 	}
 
 	static bool HasAnyValidStaticMesh(const TArray<TObjectPtr<UStaticMesh>>& SourceStaticMeshes);
+	static bool HasExistingAsset(const FSoftObjectPath& AssetPath);
 	static bool CanBakeFeature(
 		bool bHasMaterialTemplate,
 		bool bHasEnabledOutput,

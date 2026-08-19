@@ -1,4 +1,4 @@
-#include "FoliageBakerTreeHierarchyColorBaker.h"
+#include "FoliageBakerTreeHierarchyBaker.h"
 #include "FoliageBakerAssetBuilder.h"
 #include "FoliageBakerTreeSkeleton.h"
 
@@ -768,8 +768,8 @@ namespace
 				Branch.Label = FString::Printf(TEXT("ID %d"), BranchID);
 			}
 		}
-		PreviewData->Branches[TrunkPreviewBranchIndex].BoneRecord.BakeID = 0;
-		PreviewData->Branches[TrunkPreviewBranchIndex].BoneRecord.ParentBakeID = 0;
+		PreviewData->Branches[TrunkPreviewBranchIndex].BoneRecord.BoneID = 0;
+		PreviewData->Branches[TrunkPreviewBranchIndex].BoneRecord.ParentBoneID = 0;
 		for (int32 PreviewBranchIndex = 0;
 			PreviewBranchIndex < PreviewData->Branches.Num();
 			++PreviewBranchIndex)
@@ -780,8 +780,8 @@ namespace
 			{
 				continue;
 			}
-			Branch.BoneRecord.BakeID = Branch.BranchID + 1;
-			Branch.BoneRecord.ParentBakeID = Branch.ParentBranchID == INDEX_NONE
+			Branch.BoneRecord.BoneID = Branch.BranchID + 1;
+			Branch.BoneRecord.ParentBoneID = Branch.ParentBranchID == INDEX_NONE
 				? 0
 				: Branch.ParentBranchID + 1;
 		}
@@ -1077,7 +1077,7 @@ namespace
 }
 
 FFoliageBakerTreeHierarchyAnalysisResult
-FFoliageBakerTreeHierarchyColorBaker::Analyze(
+FFoliageBakerTreeHierarchyBaker::Analyze(
 	UStaticMesh& StaticMesh,
 	const int32 SourceLODIndex,
 	const int32 LeafMaterialIndex)
@@ -1244,7 +1244,7 @@ FFoliageBakerTreeHierarchyColorBaker::Analyze(
 		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
 			Result.PreviewData->Branches)
 		{
-			if (Branch.BoneRecord.BakeID == INDEX_NONE)
+			if (Branch.BoneRecord.BoneID == INDEX_NONE)
 			{
 				continue;
 			}
@@ -1281,7 +1281,7 @@ FFoliageBakerTreeHierarchyColorBaker::Analyze(
 }
 
 FFoliageBakerLeafOwnershipResolveResult
-FFoliageBakerTreeHierarchyColorBaker::ResolveLeafOwnership(
+FFoliageBakerTreeHierarchyBaker::ResolveLeafOwnership(
 	const UStaticMesh& StaticMesh,
 	const int32 SourceLODIndex,
 	const int32 LeafMaterialIndex,
@@ -1644,7 +1644,7 @@ namespace
 }
 
 FFoliageBakerWindDataBakeResult
-FFoliageBakerTreeHierarchyColorBaker::BakeWindData(
+FFoliageBakerTreeHierarchyBaker::BakeWindData(
 	UStaticMesh& StaticMesh,
 	const int32 SourceLODIndex,
 	const FFoliageBakerTreeHierarchyPreviewData& AnalysisData,

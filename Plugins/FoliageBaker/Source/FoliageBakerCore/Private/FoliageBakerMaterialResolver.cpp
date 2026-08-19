@@ -86,7 +86,7 @@ namespace UE::FoliageBaker::MaterialResolver
 
 	bool FMaterialOutputSelection::HasAnyOutput() const
 	{
-		return bBaseColorOpacity || bNormalMask || bMix;
+		return bColorAtlas || bNormalAtlas || bMix;
 	}
 
 	void FTrunkLeafMaterialAverages::AddSample(

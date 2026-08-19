@@ -12,6 +12,8 @@ public class FoliageBakerEditorCommon : ModuleRules
 				"Core",
 				"CoreUObject",
 				"FoliageBakerCore",
+				"Slate",
+				"SlateCore",
 			}
 		);
 

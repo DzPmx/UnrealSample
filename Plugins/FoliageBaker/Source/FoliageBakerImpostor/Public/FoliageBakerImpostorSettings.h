@@ -52,16 +52,16 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum permitted atlas resolution. Manual mode uses this resolution budget directly; Auto mode stops increasing resolution at this limit. Square tiles are arranged in the configured octahedral frame grid."))
 	int32 TextureResolution = 4096;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", DisplayName = "Opacity SDF Range", Suffix = "px", ToolTip = "Pixel distance from the 0.5 contour to fully inside or outside in BaseColor Alpha. It does not add padding or change the fixed view grid."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", DisplayName = "SDF Range", Suffix = "px", ToolTip = "Pixel distance from the 0.5 contour to fully inside or outside in BaseColor Alpha (vegetation SDF). It does not add padding or change the fixed view grid."))
 	int32 OpacitySdfRangePixels = 16;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / SDF", ToolTip = "RGB stores BaseColor. A stores a whole-vegetation SDF: outside 0, contour 0.5, inside 1."))
 	bool bBakeBaseColorSdf = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Mask / Depth", ToolTip = "RG stores octahedral object/local-space Normal. B stores trunk 0.5 or leaf 1. A stores shared-range linear depth: near 1, far 0, uncovered 0.5."))
-	bool bBakeNormalDepth = true;
+	bool bBakeNormalMaskDepth = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Occlusion / Roughness / Metallic / Emission", ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission."))
 	bool bBakeMix = false;
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
@@ -80,7 +80,7 @@ public:
 	FString BaseColorSdfTextureSuffix = TEXT("_Impostor_DA");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
-	FString NormalDepthTextureSuffix = TEXT("_Impostor_NR");
+	FString NormalMaskDepthTextureSuffix = TEXT("_Impostor_NR");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MixTextureSuffix = TEXT("_Impostor_M");
@@ -106,7 +106,7 @@ public:
 	FName BaseColorSdfTextureParameterName = TEXT("ColorOpacity");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter"))
-	FName NormalDepthTextureParameterName = TEXT("NormalMask");
+	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Packed Masks Parameter"))
 	FName MixTextureParameterName = TEXT("PackedMasks_1");

@@ -75,7 +75,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (EditCondition = "bEnableTrunkCards", EditConditionHides, ToolTip = "Resolution weight for trunk cross-card atlas tiles during packing. Values below 1 reduce trunk tile resolution; values above 1 increase it while reducing space available to foliage billboard tiles."))
 	EBillboardCloudsTrunkCardAtlasScale TrunkCardAtlasScale = EBillboardCloudsTrunkCardAtlasScale::OneX;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (ToolTip = "Material instance or parent material name keywords used to classify ColorOpacity alpha as trunk (0.5). When Trunk Cards is enabled, the same matches are routed into fixed vertical trunk cross-card planes. Empty means every visible pixel is classified as leaf (1)."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Trunk Cards", meta = (ToolTip = "Material instance or parent material name keywords used to classify color-atlas alpha as trunk (0.5). When Trunk Cards is enabled, the same matches are routed into fixed vertical trunk cross-card planes. Empty means every visible pixel is classified as leaf (1)."))
 	TArray<FString> TrunkCardMaterialKeywords = { TEXT("Trunk") };
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (DisplayName = "Resolution Mode", ToolTip = "Auto chooses the smallest power-of-two atlas that reaches the requested world-space texel density. Manual preserves the configured atlas resolution behavior."))
@@ -106,14 +106,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))
 	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::AllPlanes;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (ToolTip = "Generate the BaseColor/Opacity atlas. RGB stores base color and A stores visible source classification: background 0, trunk 0.5, leaf 1."))
-	bool bBakeBaseColorOpacityAtlas = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Base Color / Classification", ToolTip = "RGB stores base color. A stores visible source classification: background 0, trunk 0.5, leaf 1. A is not source opacity."))
+	bool bBakeBaseColorClassification = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (ToolTip = "Generate the Normal/Depth atlas. RGB stores object/local-space normal and A stores shared-range linear depth; the destination material parameter is configured in Material."))
-	bool bBakeNormalMaskAtlas = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Normal / Depth", ToolTip = "RGB stores object/local-space normal. A stores shared-range linear depth (near 1, far 0, uncovered 1). A is not a trunk/leaf mask."))
+	bool bBakeNormalDepth = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (ToolTip = "Generate the packed material atlas. RGBA stores Occlusion, Roughness, Metallic, and Emission; the destination material parameter is configured in Material."))
-	bool bBakeMixAtlas = false;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Occlusion / Roughness / Metallic / Emission", ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission; the destination material parameter is configured in Material."))
+	bool bBakeMix = false;
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Texture output folder relative to the parent of the source Static Mesh folder. For a mesh in /Game/Trees/Meshes, the default creates textures in /Game/Trees/Textures."))
 	FString TextureOutputFolderName = TEXT("Textures");
@@ -127,11 +127,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Prefix added before the source Static Mesh name for every generated atlas texture."))
 	FString TextureNamePrefix = TEXT("T_");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated BaseColor/Opacity atlas texture."))
-	FString BaseColorOpacityTextureSuffix = TEXT("_BillboardClouds_DA");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated BaseColor/Classification atlas texture."))
+	FString BaseColorClassificationTextureSuffix = TEXT("_BillboardClouds_DA");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated object-space normal atlas texture."))
-	FString NormalTextureSuffix = TEXT("_BillboardClouds_NR");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated object-space normal and shared-depth atlas texture."))
+	FString NormalDepthTextureSuffix = TEXT("_BillboardClouds_NR");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated packed Mix atlas texture."))
 	FString MixTextureSuffix = TEXT("_BillboardClouds_M");
@@ -143,7 +143,7 @@ public:
 	FString MaterialInstanceNameSuffix = TEXT("_BillboardClouds");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Parent Material Instance", ToolTip = "Editor Preferences provides the default. The current tool panel can override it for this session. Generated proxy materials are new child Material Instance Constants whose Parent is this instance."))
-	TSoftObjectPtr<UMaterialInstanceConstant> BillboardMaterialTemplate;
+	TSoftObjectPtr<UMaterialInstanceConstant> MaterialInstanceTemplate;
 
 	UPROPERTY(config, EditAnywhere, Category = "Material|Source Bake Override", meta = (DisplayName = "Override Static Switches During Bake", ToolTip = "Creates one transient child Material Instance per unique selected-LOD material and applies every configured Global static switch override that exists on that material. Missing switches emit warnings and the remaining overrides continue. Source material assets are never modified. World Position Offset is evaluated with animation time fixed at zero; Displacement remains disabled."))
 	bool bOverrideBakeStaticSwitch = false;
@@ -153,24 +153,24 @@ public:
 		FFoliageBakerBakeStaticSwitchOverride()
 	};
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Opacity Parameter", ToolTip = "Texture parameter receiving generated BaseColor RGB and trunk/leaf opacity classification in A."))
-	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Classification Parameter", ToolTip = "Texture parameter receiving generated BaseColor RGB and trunk/leaf classification in A. The default parent-material parameter name remains ColorOpacity."))
+	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Depth Parameter", ToolTip = "Texture parameter receiving the generated object/local-space Normal and shared-depth atlas when that output is enabled."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Depth Parameter", ToolTip = "Texture parameter receiving object/local-space Normal RGB and shared linear depth in A. The default parent-material parameter name remains NormalMask."))
 	FName NormalDepthTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission atlas when that output is enabled."))
 	FName MixTextureParameterName = TEXT("Mix");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMixAtlas", DisplayName = "Leaf Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
 	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMixAtlas", DisplayName = "Leaf Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
 	FName LeafSpecularParameterName = TEXT("LeafSpecular");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMixAtlas", DisplayName = "Trunk Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Trunk Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
 	FName TrunkRoughnessParameterName = TEXT("TrunkRoughness");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMixAtlas", DisplayName = "Trunk Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Trunk Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
 	FName TrunkSpecularParameterName = TEXT("TrunkSpecular");
 };

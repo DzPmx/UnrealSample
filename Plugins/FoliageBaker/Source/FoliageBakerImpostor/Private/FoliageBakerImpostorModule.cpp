@@ -65,9 +65,10 @@ bool FFoliageBakerImpostorModule::CanBake() const
 		return false;
 	}
 	return FFoliageBakerFeatureTool::CanBakeFeature(
-		!ToolSettings->MaterialInstanceTemplate.IsNull(),
+		FFoliageBakerFeatureTool::HasExistingAsset(
+			ToolSettings->MaterialInstanceTemplate.ToSoftObjectPath()),
 		ToolSettings->bBakeBaseColorSdf
-			|| ToolSettings->bBakeNormalDepth
+			|| ToolSettings->bBakeNormalMaskDepth
 			|| ToolSettings->bBakeMix,
 		ToolSettings->SourceStaticMeshes);
 }

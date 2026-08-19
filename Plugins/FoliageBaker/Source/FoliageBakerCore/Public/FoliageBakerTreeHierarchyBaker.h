@@ -46,8 +46,8 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyPreviewJoint
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyBoneRecord
 {
-	int32 BakeID = INDEX_NONE;
-	int32 ParentBakeID = INDEX_NONE;
+	int32 BoneID = INDEX_NONE;
+	int32 ParentBoneID = INDEX_NONE;
 	FVector PivotPosition = FVector::ZeroVector;
 	FVector Axis = FVector::ZeroVector;
 	double MinimumAxisProjection = 0.0;
@@ -132,7 +132,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerWindDataBakeResult
 	FString Report;
 };
 
-class FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyColorBaker final
+class FOLIAGEBAKERCORE_API FFoliageBakerTreeHierarchyBaker final
 {
 public:
 	static FFoliageBakerTreeHierarchyAnalysisResult Analyze(

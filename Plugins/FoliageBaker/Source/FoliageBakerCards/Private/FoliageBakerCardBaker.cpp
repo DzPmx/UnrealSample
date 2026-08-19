@@ -31,14 +31,14 @@ namespace
 	bool UsesDoublePlanesTwoViewsBillboard(
 		const FFoliageBakerCardBakeRequest& Request)
 	{
-		return Request.Mode == EFoliageBakerCardMode::SingleBillboard
+		return Request.Mode == EFoliageBakerCardMode::Billboard
 			&& Request.BillboardMode == EFoliageBakerBillboardMode::DoublePlanes;
 	}
 
 	bool UsesSinglePlaneTwoViewsBillboard(
 		const FFoliageBakerCardBakeRequest& Request)
 	{
-		return Request.Mode == EFoliageBakerCardMode::SingleBillboard
+		return Request.Mode == EFoliageBakerCardMode::Billboard
 			&& Request.BillboardMode
 				== EFoliageBakerBillboardMode::SinglePlaneTwoViews;
 	}
@@ -52,7 +52,7 @@ namespace
 	bool UsesSeparateOneSidedCrossFaces(const FFoliageBakerCardBakeRequest& Request)
 	{
 		return Request.Mode == EFoliageBakerCardMode::CrossCards
-			&& Request.CrossCardGeometryMode == EFoliageBakerCrossCardFaceMode::SeparateOneSidedFaces;
+			&& Request.CrossCardFaceMode == EFoliageBakerCrossCardFaceMode::SeparateOneSidedFaces;
 	}
 
 	bool UsesMultiBillboard(const FFoliageBakerCardBakeRequest& Request)
@@ -219,7 +219,7 @@ namespace
 			return false;
 		}
 
-		OutPixels = MoveTemp(Result.BaseColorOpacityPixels);
+		OutPixels = MoveTemp(Result.ColorAtlasPixels);
 		OutNormalPixels = MoveTemp(Result.NormalPixels);
 		OutMixPixels = MoveTemp(Result.MixPixels);
 		OutSourceTriangleIdAndDepth =
@@ -261,7 +261,7 @@ namespace
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.BaseColorOpacityTextureSuffix,
+				EditorSettings.BaseColorClassificationTextureSuffix,
 				AssetDecision);
 		Request.LODGroup = TEXTUREGROUP_World;
 		Request.bSRGB = true;
@@ -295,7 +295,7 @@ namespace
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.NormalDepthTextureSuffix,
+				EditorSettings.NormalClassificationTextureSuffix,
 				AssetDecision);
 		Request.MipBackgroundColor = FColor(128, 128, 255, 0);
 		Request.LODGroup = TEXTUREGROUP_WorldNormalMap;
@@ -522,8 +522,8 @@ namespace
 	FAtlasOutputSelection BuildAtlasOutputSelection(const FFoliageBakerCardBakeRequest& Settings)
 	{
 		FAtlasOutputSelection Selection;
-		Selection.bBaseColorOpacity = Settings.bBakeBaseColorOpacity;
-		Selection.bNormalMask = Settings.bBakeNormalDepth;
+		Selection.bColorAtlas = Settings.bBakeBaseColorClassification;
+		Selection.bNormalAtlas = Settings.bBakeNormalClassification;
 		Selection.bMix = Settings.bBakeMix;
 		Selection.bMaterialScalarAverages = !Settings.bBakeMix;
 		return Selection;
@@ -560,7 +560,7 @@ namespace
 					? FName(TEXT("FoliageBaker.SinglePlaneTwoViewsBillboardLOD"))
 					: UsesDoublePlanesTwoViewsBillboard(Request)
 						? FName(TEXT("FoliageBaker.DoublePlanesBillboardLOD"))
-						: FName(TEXT("FoliageBaker.SingleBillboardLOD"));
+						: FName(TEXT("FoliageBaker.BillboardLOD"));
 		return Params;
 	}
 
@@ -572,22 +572,22 @@ namespace
 		Result.SeparateMeshAssetSuffix = GetCardMeshAssetSuffix(Settings);
 		Result.bPlaceGeneratedAssetsNearReplacedLODAssets =
 			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
-		if (Settings.bBakeBaseColorOpacity)
+		if (Settings.bBakeBaseColorClassification)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Base Color / Opacity"),
+				TEXT("Base Color / Classification"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.BaseColorOpacityTextureSuffix,
+				Settings.BaseColorClassificationTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
-		if (Settings.bBakeNormalDepth)
+		if (Settings.bBakeNormalClassification)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Normal / Mask"),
+				TEXT("Normal / Classification"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.NormalDepthTextureSuffix,
+				Settings.NormalClassificationTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
 		if (Settings.bBakeMix)
@@ -805,7 +805,7 @@ namespace
 			return true;
 		}
 
-		const int32 PlaneCount = EditorSettings.Mode == EFoliageBakerCardMode::SingleBillboard
+		const int32 PlaneCount = EditorSettings.Mode == EFoliageBakerCardMode::Billboard
 			? (UsesTwoViewBillboard(EditorSettings) ? 2 : 1)
 			: FMath::Clamp(EditorSettings.CrossCardPlaneCount, 2, 5);
 		for (int32 PlaneIndex = 0; PlaneIndex < PlaneCount; ++PlaneIndex)
@@ -813,7 +813,7 @@ namespace
 			// Cross planes bake both sides, so their unique physical directions span 180 degrees.
 			const double CrossCaptureAngle = static_cast<double>(PlaneIndex) * UE_DOUBLE_PI
 				/ static_cast<double>(PlaneCount);
-			const FVector Normal = EditorSettings.Mode == EFoliageBakerCardMode::SingleBillboard
+			const FVector Normal = EditorSettings.Mode == EFoliageBakerCardMode::Billboard
 				? PlaneIndex == 0
 					? PrimaryCaptureNormal
 					: RotateHorizontalNormal90Degrees(PrimaryCaptureNormal)
@@ -1004,7 +1004,7 @@ namespace
 		if (!OutData.OutputSelection.HasAnyOutput()
 			&& !EditorSettings.bBakeUpperHemisphereL1Visibility)
 		{
-			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Opacity, Normal/TrunkLeafMask, Mix, or Upper Hemisphere L1 Visibility.");
+			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Classification, Normal/Classification, Mix, or Upper Hemisphere L1 Visibility.");
 			return false;
 		}
 		auto BakeFeatureAtlas = [
@@ -1047,8 +1047,8 @@ namespace
 		{
 			constexpr uint8 AlphaCropThreshold = 1;
 			FAtlasOutputSelection CropOutputSelection;
-			CropOutputSelection.bBaseColorOpacity = true;
-			CropOutputSelection.bNormalMask = false;
+			CropOutputSelection.bColorAtlas = true;
+			CropOutputSelection.bNormalAtlas = false;
 			CropOutputSelection.bMix = false;
 
 			TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyTileCrop> TileCrops;
@@ -1303,7 +1303,7 @@ namespace
 		FProxyMaterialAssetData& OutAssets,
 		FString& OutError)
 	{
-		if (AtlasData.OutputSelection.bBaseColorOpacity)
+		if (AtlasData.OutputSelection.bColorAtlas)
 		{
 			OutAssets.AtlasTexture = CreateAtlasTextureAsset(
 				StaticMesh,
@@ -1321,7 +1321,7 @@ namespace
 			}
 		}
 
-		if (AtlasData.OutputSelection.bNormalMask)
+		if (AtlasData.OutputSelection.bNormalAtlas)
 		{
 			OutAssets.NormalAtlasTexture = CreateNormalAtlasTextureAsset(
 				StaticMesh,
@@ -1365,8 +1365,8 @@ namespace
 		MaterialParams.ExistingAssetPolicy =
 			AssetDecision.ExistingAssetPolicy;
 		MaterialParams.AssetNameVersion = AssetDecision.AssetNameVersion;
-		MaterialParams.BaseColorOpacityTextureParameterName = EditorSettings.BaseColorOpacityTextureParameterName;
-		MaterialParams.NormalDepthTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
+		MaterialParams.ColorAtlasTextureParameterName = EditorSettings.ColorAtlasTextureParameterName;
+		MaterialParams.NormalAtlasTextureParameterName = EditorSettings.NormalClassificationTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
 		MaterialParams.OwnedTextureParameterNames = {
 			EditorSettings.UpperHemisphereL1VisibilityTextureParameterName
@@ -1529,7 +1529,7 @@ namespace
 				? TEXT("UV0 stores each plane's baked tile; UV1.xy stores its local capture direction; UV2.x stores plane selector 0 or 1")
 				: UsesMultiBillboard(Request)
 					? TEXT("UV0 stores each depth layer's baked tile; UV1.xy stores the vertex U/V offset from the shared cluster center and UV2.x stores the signed layer-depth offset in centimeters")
-					: Request.Mode == EFoliageBakerCardMode::SingleBillboard
+					: Request.Mode == EFoliageBakerCardMode::Billboard
 						? TEXT("UV0 stores the single baked tile")
 						: UsesSeparateOneSidedCrossFaces(Request)
 							? TEXT("each physical face stores its own front/back tile in UV0; generated mesh keeps one UV channel")
@@ -1598,9 +1598,9 @@ namespace
 			? TEXT("BuildFromMeshDescriptions full build path")
 			: TEXT("source StaticMesh LOD MeshDescription commit");
 		const FString MaterialParameterDetails = FString::Printf(
-			TEXT("BaseColor/Opacity=%s, Normal/TrunkLeafMask=%s, Mix=%s"),
-			*Request.BaseColorOpacityTextureParameterName.ToString(),
-			*Request.NormalDepthTextureParameterName.ToString(),
+			TEXT("BaseColor/Classification=%s, Normal/Classification=%s, Mix=%s"),
+			*Request.ColorAtlasTextureParameterName.ToString(),
+			*Request.NormalClassificationTextureParameterName.ToString(),
 			*Request.MixTextureParameterName.ToString());
 		const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
 			MaterialScalarParameterNames = {
@@ -1965,15 +1965,15 @@ namespace
 				*Message);
 			return false;
 		};
-		if (!Request.bBakeBaseColorOpacity
-			&& !Request.bBakeNormalDepth
+		if (!Request.bBakeBaseColorClassification
+			&& !Request.bBakeNormalClassification
 			&& !Request.bBakeMix
 			&& !Request.bBakeUpperHemisphereL1Visibility)
 		{
 			return Fail(TEXT("no texture output is enabled."));
 		}
 		if (Request.bBakeUpperHemisphereL1Visibility
-			&& Request.Mode != EFoliageBakerCardMode::SingleBillboard)
+			&& Request.Mode != EFoliageBakerCardMode::Billboard)
 		{
 			return Fail(TEXT("Upper Hemisphere L1 Visibility is currently supported only by Billboard modes."));
 		}
@@ -2003,13 +2003,13 @@ namespace
 			return true;
 		};
 		if (!ValidateTextureParameterName(
-				Request.bBakeBaseColorOpacity,
-				Request.BaseColorOpacityTextureParameterName,
-				TEXT("BaseColor/Opacity"))
+				Request.bBakeBaseColorClassification,
+				Request.ColorAtlasTextureParameterName,
+				TEXT("BaseColor/Classification"))
 			|| !ValidateTextureParameterName(
-				Request.bBakeNormalDepth,
-				Request.NormalDepthTextureParameterName,
-				TEXT("Normal/TrunkLeafMask"))
+				Request.bBakeNormalClassification,
+				Request.NormalClassificationTextureParameterName,
+				TEXT("Normal/Classification"))
 			|| !ValidateTextureParameterName(
 				Request.bBakeMix,
 				Request.MixTextureParameterName,
@@ -2089,8 +2089,8 @@ namespace
 					: UsesDoublePlanesTwoViewsBillboard(Request)
 						? TEXT("_DoubleBillboard")
 						: TEXT("_Billboard");
-		Result.BaseColorOpacityTextureSuffix = FeatureSuffix + Request.BaseColorOpacityTextureSuffix;
-		Result.NormalDepthTextureSuffix = FeatureSuffix + Request.NormalDepthTextureSuffix;
+		Result.BaseColorClassificationTextureSuffix = FeatureSuffix + Request.BaseColorClassificationTextureSuffix;
+		Result.NormalClassificationTextureSuffix = FeatureSuffix + Request.NormalClassificationTextureSuffix;
 		Result.MixTextureSuffix = FeatureSuffix + Request.MixTextureSuffix;
 		Result.UpperHemisphereL1VisibilityTextureSuffix =
 			FeatureSuffix + Request.UpperHemisphereL1VisibilityTextureSuffix;
@@ -2105,8 +2105,8 @@ namespace
 		Result.bCancelled = BuildResult.bCancelled;
 		Result.ProxyMesh = BuildResult.ProxyMesh;
 		Result.SourceMeshLODIndex = BuildResult.SourceMeshLODIndex;
-		Result.ColorOpacityTexture = BuildResult.AtlasTexture;
-		Result.NormalDepthTexture = BuildResult.NormalAtlasTexture;
+		Result.ColorClassificationTexture = BuildResult.AtlasTexture;
+		Result.NormalClassificationTexture = BuildResult.NormalAtlasTexture;
 		Result.MixTexture = BuildResult.MixAtlasTexture;
 		Result.UpperHemisphereL1VisibilityTexture =
 			BuildResult.UpperHemisphereL1VisibilityTexture;

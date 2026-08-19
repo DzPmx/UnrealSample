@@ -62,5 +62,5 @@ private:
 	TSharedPtr<SListView<TSharedPtr<int32>>> DataBakeBranchList;
 	TSharedPtr<SWidgetSwitcher> WorkflowSwitcher;
 	TSharedPtr<SWidgetSwitcher> FeatureSwitcher;
-	TUniquePtr<FAutoConsoleCommand> DebugPreviewCommand;
+	TUniquePtr<FAutoConsoleCommand> DataBakeSetMeshCommand;
 };

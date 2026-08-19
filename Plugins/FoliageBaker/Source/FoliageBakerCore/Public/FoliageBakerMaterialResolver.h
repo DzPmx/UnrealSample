@@ -8,8 +8,8 @@ namespace UE::FoliageBaker::MaterialResolver
 {
 	struct FOLIAGEBAKERCORE_API FMaterialOutputSelection
 	{
-		bool bBaseColorOpacity = true;
-		bool bNormalMask = true;
+		bool bColorAtlas = true;
+		bool bNormalAtlas = true;
 		bool bMix = false;
 		bool bMaterialScalarAverages = false;
 

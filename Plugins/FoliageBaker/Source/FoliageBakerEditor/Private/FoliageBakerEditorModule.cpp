@@ -7,8 +7,9 @@
 #include "FoliageBakerImpostorModule.h"
 #include "FoliageBakerImpostorSettings.h"
 #include "FoliageBakerFeatureTool.h"
+#include "FoliageBakerToolChrome.h"
 #include "FoliageBakerLeafUVPreview.h"
-#include "FoliageBakerTreeHierarchyColorBaker.h"
+#include "FoliageBakerTreeHierarchyBaker.h"
 #include "FoliageBakerTreeHierarchyPreview.h"
 #include "FoliageBakerTreeHierarchySettings.h"
 #include "AssetRegistry/AssetData.h"
@@ -23,6 +24,7 @@
 #include "PropertyCustomizationHelpers.h"
 #include "PropertyEditorModule.h"
 #include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
 #include "Templates/SubclassOf.h"
 #include "ToolMenus.h"
 #include "UObject/ObjectPtr.h"
@@ -36,7 +38,6 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSplitter.h"
-#include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SNullWidget.h"
@@ -54,7 +55,7 @@ namespace
 	constexpr int32 BillboardFeatureIndex = 0;
 	const FName EditorSettingsContainerName(TEXT("Editor"));
 	const FName PluginsSettingsCategoryName(TEXT("Plugins"));
-	const FName SingleBillboardSettingsSectionName(TEXT("FoliageBakerSingleBillboard"));
+	const FName BillboardSettingsSectionName(TEXT("FoliageBakerBillboard"));
 	const FName CrossCardsSettingsSectionName(TEXT("FoliageBakerCrossCards"));
 	const FName ImpostorSettingsSectionName(TEXT("FoliageBakerImpostor"));
 	const FName MultiBillboardSettingsSectionName(TEXT("FoliageBakerMultiBillboard"));
@@ -175,12 +176,12 @@ namespace
 		static const TArray<FFoliageBakerEditorPreferenceDescriptor> Descriptors =
 		{
 			{
-				SingleBillboardSettingsSectionName,
+				BillboardSettingsSectionName,
 				LOCTEXT("BillboardSettingsName", "Foliage Baker - Billboard"),
 				LOCTEXT(
 					"BillboardSettingsDescription",
 					"Configure Single Plane - One View, Single Plane - Two Views, and Double Planes - Two Views preferences, including their default Parent Material Instances."),
-				UFoliageBakerSingleBillboardSettings::StaticClass()
+				UFoliageBakerBillboardSettings::StaticClass()
 			},
 			{
 				CrossCardsSettingsSectionName,
@@ -235,9 +236,9 @@ void FFoliageBakerEditorModule::StartupModule()
 		.SetMenuType(ETabSpawnerMenuType::Hidden);
 
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FFoliageBakerEditorModule::RegisterMenus));
-	DebugPreviewCommand = MakeUnique<FAutoConsoleCommand>(
-		TEXT("FoliageBaker.DebugPreview"),
-		TEXT("Open one Static Mesh object path in the hierarchy tool. Select the Leaf Material Section, then run Analyze Hierarchy."),
+	DataBakeSetMeshCommand = MakeUnique<FAutoConsoleCommand>(
+		TEXT("FoliageBaker.DataBake.SetMesh"),
+		TEXT("Open the Data Bake tab and assign one Static Mesh object path. Select the Leaf Material, then run Analyze Hierarchy."),
 		FConsoleCommandWithArgsDelegate::CreateLambda(
 			[this](const TArray<FString>& Arguments)
 			{
@@ -251,6 +252,7 @@ void FFoliageBakerEditorModule::StartupModule()
 					return;
 				}
 				FGlobalTabmanager::Get()->TryInvokeTab(FoliageBakerToolTabName);
+				HandleWorkflowChanged(DataBakeWorkflowIndex);
 				EnsureDataBakeSettings();
 				DataBakeSettings->SourceStaticMesh = StaticMesh;
 				RefreshDataBakeSourceInput();
@@ -261,7 +263,7 @@ void FFoliageBakerEditorModule::ShutdownModule()
 {
 	FEditorDelegates::OnEditorPreExit.RemoveAll(this);
 	UnregisterEditorPreferences();
-	DebugPreviewCommand.Reset();
+	DataBakeSetMeshCommand.Reset();
 
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
@@ -400,17 +402,23 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 			{
 				HandleWorkflowChanged(NewWorkflowIndex);
 			})
-		.UniformPadding(FMargin(30.0f, 8.0f))
+		.UniformPadding(FMargin(22.0f, 6.0f))
 		+ SSegmentedControl<int32>::Slot(DataBakeWorkflowIndex)
 		.Text(LOCTEXT("DataBakeWorkflowTab", "Data Bake"))
+		.ToolTip(LOCTEXT(
+			"DataBakeWorkflowTabTooltip",
+			"Analyze one tree, resolve leaf ownership, and bake wind data into UV1, PivPos, and PivAxis."))
 		+ SSegmentedControl<int32>::Slot(ProxyBakeWorkflowIndex)
-		.Text(LOCTEXT("ProxyBakeWorkflowTab", "Proxy Bake"));
+		.Text(LOCTEXT("ProxyBakeWorkflowTab", "Proxy Bake"))
+		.ToolTip(LOCTEXT(
+			"ProxyBakeWorkflowTabTooltip",
+			"Bake Billboard, Cross Cards, Impostor, MultiBillboard, or BillboardClouds proxies from a source LOD."));
 
 	TSharedRef<SSegmentedControl<int32>> FeatureTabs =
 		SNew(SSegmentedControl<int32>)
 		.Value_Lambda([this]() { return GetActiveFeatureIndex(); })
 		.OnValueChanged_Lambda([this](const int32 NewFeatureIndex) { HandleFeatureChanged(NewFeatureIndex); })
-		.UniformPadding(FMargin(22.0f, 7.0f))
+		.UniformPadding(FMargin(16.0f, 6.0f))
 		.MaxSegmentsPerLine(GetFeatureDescriptors().Num());
 
 	for (int32 FeatureIndex = 0; FeatureIndex < GetFeatureDescriptors().Num(); ++FeatureIndex)
@@ -430,7 +438,7 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 				{
 				case EFoliageBakerFeatureKind::Billboard:
 					return CardsModule.CreateFeaturePanel(
-						EFoliageBakerCardMode::SingleBillboard);
+						EFoliageBakerCardMode::Billboard);
 				case EFoliageBakerFeatureKind::CrossCards:
 					return CardsModule.CreateFeaturePanel(
 						EFoliageBakerCardMode::CrossCards);
@@ -458,59 +466,46 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 		SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
-		.Padding(10.0f, 0.0f, 10.0f, 6.0f)
+		.Padding(12.0f, 0.0f, 12.0f, 8.0f)
 		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(FMargin(14.0f, 10.0f))
-			[
-				FeatureTabs
-			]
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(10.0f, 0.0f, 10.0f, 6.0f)
-		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(FMargin(14.0f, 10.0f))
-			[
+			FoliageBakerToolChrome::MakeCard(
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
 				.AutoHeight()
 				[
-					SNew(STextBlock)
-					.Text_Lambda([this]() { return GetActiveFeatureTitle(); })
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					FeatureTabs
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(0.0f, 3.0f, 0.0f, 0.0f)
+				.Padding(0.0f, 10.0f, 0.0f, 0.0f)
 				[
-					SNew(STextBlock)
-					.Text_Lambda([this]() { return GetActiveFeatureDescription(); })
-					.AutoWrapText(true)
+					FoliageBakerToolChrome::MakeTitle(
+						TAttribute<FText>::CreateLambda(
+							[this]() { return GetActiveFeatureTitle(); }))
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(0.0f, 5.0f, 0.0f, 0.0f)
+				.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 				[
-					SNew(STextBlock)
-					.Text_Lambda([this]() { return GetActiveFeatureMetadata(); })
-					.TextStyle(FAppStyle::Get(), "SmallText")
+					FoliageBakerToolChrome::MakeMuted(
+						TAttribute<FText>::CreateLambda(
+							[this]() { return GetActiveFeatureDescription(); }))
 				]
-			]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+				[
+					FoliageBakerToolChrome::MakeMuted(
+						TAttribute<FText>::CreateLambda(
+							[this]() { return GetActiveFeatureMetadata(); }))
+				],
+				FMargin(14.0f, 12.0f))
 		]
 		+ SVerticalBox::Slot()
 		.FillHeight(1.0f)
-		.Padding(10.0f, 0.0f, 10.0f, 10.0f)
+		.Padding(0.0f, 0.0f, 0.0f, 0.0f)
 		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(1.0f)
-			[
-				FeatureSwitcher.ToSharedRef()
-			]
+			FeatureSwitcher.ToSharedRef()
 		];
 
 	SAssignNew(WorkflowSwitcher, SWidgetSwitcher)
@@ -529,12 +524,9 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(10.0f, 10.0f, 10.0f, 6.0f)
+			.Padding(12.0f, 12.0f, 12.0f, 8.0f)
 			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(FMargin(14.0f, 12.0f))
-				[
+				FoliageBakerToolChrome::MakeCard(
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot()
 					.AutoHeight()
@@ -544,12 +536,18 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 						.AutoWidth()
 						.VAlign(VAlign_Center)
 						[
-							SNew(SBox)
-							.WidthOverride(32.0f)
-							.HeightOverride(32.0f)
+							SNew(SBorder)
+							.BorderImage(FoliageBakerToolChrome::RecessedBrush())
+							.Padding(FMargin(8.0f))
 							[
-								SNew(SImage)
-								.Image(FAppStyle::GetBrush("LevelEditor.Tabs.Details"))
+								SNew(SBox)
+								.WidthOverride(24.0f)
+								.HeightOverride(24.0f)
+								[
+									SNew(SImage)
+									.Image(FAppStyle::GetBrush("ClassIcon.StaticMesh"))
+									.ColorAndOpacity(FSlateColor::UseForeground())
+								]
 							]
 						]
 						+ SHorizontalBox::Slot()
@@ -567,20 +565,31 @@ TSharedRef<SDockTab> FFoliageBakerEditorModule::SpawnToolTab(const FSpawnTabArgs
 							]
 							+ SVerticalBox::Slot()
 							.AutoHeight()
-							.Padding(0.0f, 2.0f, 0.0f, 0.0f)
+							.Padding(0.0f, 3.0f, 0.0f, 0.0f)
 							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("FoliageBakerHeaderSubtitle", "Choose between foliage data processing and proxy generation workflows."))
+								FoliageBakerToolChrome::MakeMuted(
+									TAttribute<FText>::CreateLambda(
+										[this]()
+										{
+											return GetActiveWorkflowIndex() == DataBakeWorkflowIndex
+												? LOCTEXT(
+													"FoliageBakerHeaderSubtitleData",
+													"Analyze hierarchy, resolve leaf ownership, and bake wind textures.")
+												: LOCTEXT(
+													"FoliageBakerHeaderSubtitleProxy",
+													"Capture a source LOD into a far-field foliage proxy.");
+										}),
+									false)
 							]
 						]
 					]
 					+ SVerticalBox::Slot()
 					.AutoHeight()
-					.Padding(0.0f, 14.0f, 0.0f, 0.0f)
+					.Padding(0.0f, 12.0f, 0.0f, 0.0f)
 					[
 						WorkflowTabs
-					]
-				]
+					],
+					FMargin(14.0f, 12.0f))
 			]
 			+ SVerticalBox::Slot()
 			.FillHeight(1.0f)
@@ -626,12 +635,9 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
-		.Padding(10.0f, 0.0f, 10.0f, 6.0f)
+		.Padding(12.0f, 0.0f, 12.0f, 8.0f)
 		[
-			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(FMargin(12.0f, 10.0f))
-			[
+			FoliageBakerToolChrome::MakeCard(
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
 				.AutoHeight()
@@ -641,34 +647,30 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 					.FillWidth(1.0f)
 					.VAlign(VAlign_Center)
 					[
-						SNew(STextBlock)
-						.Text(LOCTEXT(
+						FoliageBakerToolChrome::MakeTitle(LOCTEXT(
 							"TreeHierarchyDataBakeTitle",
-							"Tree Data Bake"))
-						.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+							"Data Bake"))
 					]
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
 					.VAlign(VAlign_Center)
 					[
-						SNew(STextBlock)
-						.Text(LOCTEXT(
-							"TreeHierarchySingleMeshMode",
-							"Single Static Mesh workflow"))
-						.TextStyle(FAppStyle::Get(), "SmallText")
+						FoliageBakerToolChrome::MakeCountBadge(
+							LOCTEXT(
+								"TreeHierarchySingleMeshMode",
+								"Single mesh"),
+							false)
 					]
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(0.0f, 8.0f, 0.0f, 0.0f)
+				.Padding(0.0f, 10.0f, 0.0f, 0.0f)
 				[
-					SNew(SWrapBox)
-					.UseAllottedSize(true)
-					.InnerSlotPadding(FVector2D(10.0f, 6.0f))
-					+ SWrapBox::Slot()
-					.FillEmptySpace(true)
-					.FillLineWhenSizeLessThan(760.0f)
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
 					.VAlign(VAlign_Center)
+					.Padding(0.0f, 0.0f, 12.0f, 0.0f)
 					[
 						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot()
@@ -680,6 +682,8 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 							.Text(LOCTEXT(
 								"TreeHierarchySourceMeshLabel",
 								"Static Mesh"))
+							.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+							.TextStyle(FAppStyle::Get(), "SmallText")
 						]
 						+ SHorizontalBox::Slot()
 						.FillWidth(1.0f)
@@ -710,7 +714,8 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 								})
 						]
 					]
-					+ SWrapBox::Slot()
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
 					.VAlign(VAlign_Center)
 					[
 						SNew(SHorizontalBox)
@@ -723,6 +728,8 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 							.Text(LOCTEXT(
 								"TreeHierarchySourceLODLabel",
 								"LOD"))
+							.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+							.TextStyle(FAppStyle::Get(), "SmallText")
 						]
 						+ SHorizontalBox::Slot()
 						.AutoWidth()
@@ -762,107 +769,90 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(0.0f, 8.0f, 0.0f, 0.0f)
+				.Padding(0.0f, 12.0f, 0.0f, 0.0f)
 				[
-					SNew(SWrapBox)
-					.UseAllottedSize(true)
-					.InnerSlotPadding(FVector2D(8.0f, 6.0f))
-					+ SWrapBox::Slot()
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.Padding(0.0f, 0.0f, 6.0f, 0.0f)
 					[
-						SNew(SBox)
-						.MinDesiredWidth(180.0f)
-						[
-							SNew(SButton)
-							.HAlign(HAlign_Center)
-							.Text(LOCTEXT(
-								"AnalyzeTreeHierarchyButton",
-								"1  Analyze Hierarchy"))
-							.ToolTipText(LOCTEXT(
+						FoliageBakerToolChrome::MakeStepButton(
+							1,
+							LOCTEXT("AnalyzeTreeHierarchyButton", "Analyze Hierarchy"),
+							LOCTEXT(
 								"AnalyzeTreeHierarchyTooltip",
-								"Analyze trunk and branch geometry after excluding the selected Leaf Material Section. The Static Mesh asset is not modified."))
-							.IsEnabled_Lambda(
-								[this]()
-								{
-									return CanAnalyzeTreeHierarchy();
-								})
-							.OnClicked_Lambda(
+								"Analyze trunk and branch geometry after excluding the selected Leaf Material Section. The Static Mesh asset is not modified."),
+							FOnClicked::CreateLambda(
 								[this]()
 								{
 									AnalyzeTreeHierarchy();
 									return FReply::Handled();
-								})
-						]
-					]
-					+ SWrapBox::Slot()
-					[
-						SNew(SBox)
-						.MinDesiredWidth(180.0f)
-						[
-							SNew(SButton)
-							.HAlign(HAlign_Center)
-							.Text(LOCTEXT(
-								"ResolveDataBakeLeafOwnershipButton",
-								"2  Resolve Leaves"))
-							.ToolTipText(LOCTEXT(
-								"ResolveDataBakeLeafOwnershipTooltip",
-								"Resolve complete UV0 Pivot/Tip templates onto physical leaf geometry and assign each leaf record to its nearest analyzed trunk or branch surface."))
-							.IsEnabled_Lambda(
+								}),
+							TAttribute<bool>::CreateLambda(
 								[this]()
 								{
-									return CanResolveDataBakeLeafOwnership();
-								})
-							.OnClicked_Lambda(
+									return CanAnalyzeTreeHierarchy();
+								}))
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.Padding(6.0f, 0.0f)
+					[
+						FoliageBakerToolChrome::MakeStepButton(
+							2,
+							LOCTEXT("ResolveDataBakeLeafOwnershipButton", "Resolve Leaves"),
+							LOCTEXT(
+								"ResolveDataBakeLeafOwnershipTooltip",
+								"Resolve complete UV0 Pivot/Tip templates onto physical leaf geometry and assign each leaf record to its nearest analyzed trunk or branch surface."),
+							FOnClicked::CreateLambda(
 								[this]()
 								{
 									ResolveDataBakeLeafOwnership();
 									return FReply::Handled();
-								})
-						]
-					]
-					+ SWrapBox::Slot()
-					[
-						SNew(SBox)
-						.MinDesiredWidth(180.0f)
-						[
-							SNew(SButton)
-							.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
-							.HAlign(HAlign_Center)
-							.Text(LOCTEXT(
-								"BakeWindDataButton",
-								"3  Bake Wind Data"))
-							.ToolTipText(LOCTEXT(
-								"BakeWindDataTooltip",
-								"Write bone texel centers to UV1 and create the linked PivPos/PivAxis data textures beside the selected Static Mesh."))
-							.IsEnabled_Lambda(
+								}),
+							TAttribute<bool>::CreateLambda(
 								[this]()
 								{
-									return CanBakeWindData();
-								})
-							.OnClicked_Lambda(
+									return CanResolveDataBakeLeafOwnership();
+								}))
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.Padding(6.0f, 0.0f, 0.0f, 0.0f)
+					[
+						FoliageBakerToolChrome::MakeStepButton(
+							3,
+							LOCTEXT("BakeWindDataButton", "Bake Wind Data"),
+							LOCTEXT(
+								"BakeWindDataTooltip",
+								"Write bone texel centers to UV1 and create the linked PivPos/PivAxis data textures beside the selected Static Mesh."),
+							FOnClicked::CreateLambda(
 								[this]()
 								{
 									BakeWindData();
 									return FReply::Handled();
-								})
-						]
+								}),
+							TAttribute<bool>::CreateLambda(
+								[this]()
+								{
+									return CanBakeWindData();
+								}),
+							true)
 					]
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+				.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 				[
-					SNew(STextBlock)
-					.Text(LOCTEXT(
+					FoliageBakerToolChrome::MakeMuted(LOCTEXT(
 						"TreeHierarchyDataBakeWorkflowHint",
-						"Choose Leaf Material before Analyze. Mark UV0 Pivot/Tip templates, Resolve Leaves, then Bake Wind Data. Bake writes UV1 plus PivPos/PivAxis assets."))
-					.AutoWrapText(true)
-					.TextStyle(FAppStyle::Get(), "SmallText")
-				]
-			]
+						"Choose Leaf Material before Analyze. Mark UV0 Pivot/Tip templates, Resolve Leaves, then Bake Wind Data."))
+				],
+				FMargin(14.0f, 12.0f))
 		]
 		+ SVerticalBox::Slot()
 		.FillHeight(1.0f)
-		.Padding(10.0f, 0.0f, 10.0f, 10.0f)
+		.Padding(12.0f, 0.0f, 12.0f, 12.0f)
 		[
 			SNew(SSplitter)
 			.Orientation(Orient_Horizontal)
@@ -871,43 +861,16 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 			.Value(0.55f)
 			.MinSize(420.0f)
 			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(1.0f)
-				[
+				FoliageBakerToolChrome::MakeCard(
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot()
 					.AutoHeight()
-					.Padding(10.0f, 8.0f)
 					[
-						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT(
-								"TreeHierarchyPreviewTitle",
-								"Hierarchy"))
-							.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-						]
-						+ SHorizontalBox::Slot()
-						.FillWidth(1.0f)
-						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT(
+						FoliageBakerToolChrome::MakeSectionHeader(
+							LOCTEXT("TreeHierarchyPreviewTitle", "Hierarchy"),
+							LOCTEXT(
 								"TreeHierarchyPreviewSubtitle",
-								"Trunk, branches, and resolved leaf axes"))
-							.AutoWrapText(true)
-							.TextStyle(FAppStyle::Get(), "SmallText")
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
-						.VAlign(VAlign_Center)
-						[
+								"Trunk, branches, and resolved leaf axes"),
 							SNew(SCheckBox)
 							.IsChecked(ECheckBoxState::Checked)
 							.ToolTipText(LOCTEXT(
@@ -928,8 +891,7 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 								.Text(LOCTEXT(
 									"TreeHierarchyShowDebug",
 									"Debug"))
-							]
-						]
+							])
 					]
 					+ SVerticalBox::Slot()
 					.FillHeight(1.0f)
@@ -951,28 +913,23 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 									+ SVerticalBox::Slot()
 									.AutoHeight()
 									[
-										SNew(STextBlock)
-										.Text(LOCTEXT(
+										FoliageBakerToolChrome::MakeTitle(LOCTEXT(
 											"TreeHierarchyBranchListTitle",
 											"Branches"))
-										.Font(FAppStyle::GetFontStyle("NormalFontBold"))
 									]
 									+ SVerticalBox::Slot()
 									.AutoHeight()
+									.Padding(0.0f, 2.0f, 0.0f, 0.0f)
 									[
-										SNew(STextBlock)
-										.Text(LOCTEXT(
+										FoliageBakerToolChrome::MakeMuted(LOCTEXT(
 											"TreeHierarchyBranchListHint",
 											"Ctrl / Shift: multi-select"))
-										.TextStyle(FAppStyle::Get(), "SmallText")
 									]
 								]
 								+ SVerticalBox::Slot()
 								.FillHeight(1.0f)
 								[
-									SNew(SBorder)
-									.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-									[
+									FoliageBakerToolChrome::MakeRecessedPanel(
 										SAssignNew(
 											DataBakeBranchList,
 											SListView<TSharedPtr<int32>>)
@@ -1005,8 +962,7 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 												(void)BranchID;
 												(void)SelectionType;
 												RefreshDataBakeBranchSelection();
-											})
-									]
+											}))
 								]
 							]
 						]
@@ -1016,51 +972,30 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 							DataBakePreview.ToSharedRef()
 						]
 					]
-				]
+				,
+				FMargin(0.0f))
 			]
 			+ SSplitter::Slot()
 			.Value(0.45f)
 			.MinSize(420.0f)
 			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(1.0f)
-				[
+				FoliageBakerToolChrome::MakeCard(
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot()
 					.AutoHeight()
-					.Padding(10.0f, 8.0f)
 					[
-						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT(
-								"LeafUVPreviewTitle",
-								"Leaf UV & Ownership"))
-							.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-						]
-						+ SHorizontalBox::Slot()
-						.FillWidth(1.0f)
-						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT(
+						FoliageBakerToolChrome::MakeSectionHeader(
+							LOCTEXT("LeafUVPreviewTitle", "Leaf UV & Ownership"),
+							LOCTEXT(
 								"LeafUVPreviewSubtitle",
-								"UV0 templates  |  Pivot / Tip  |  Parent Branch"))
-							.AutoWrapText(true)
-							.TextStyle(FAppStyle::Get(), "SmallText")
-						]
+								"UV0 templates  ·  Pivot / Tip  ·  Parent Branch"))
 					]
 					+ SVerticalBox::Slot()
 					.FillHeight(1.0f)
 					[
 						DataBakeLeafUVPreview.ToSharedRef()
-					]
-				]
+					],
+					FMargin(0.0f))
 			]
 		];
 }
@@ -1126,7 +1061,7 @@ void FFoliageBakerEditorModule::AnalyzeTreeHierarchy()
 					UStaticMesh& StaticMesh)
 				{
 					const FFoliageBakerTreeHierarchyAnalysisResult Result =
-						FFoliageBakerTreeHierarchyColorBaker::Analyze(
+						FFoliageBakerTreeHierarchyBaker::Analyze(
 							StaticMesh,
 							Settings->SourceLODIndex,
 							LeafMaterialIndex);
@@ -1219,7 +1154,7 @@ void FFoliageBakerEditorModule::BakeWindData()
 					UStaticMesh& StaticMesh)
 				{
 					const FFoliageBakerWindDataBakeResult Result =
-						FFoliageBakerTreeHierarchyColorBaker::BakeWindData(
+						FFoliageBakerTreeHierarchyBaker::BakeWindData(
 							StaticMesh,
 							SourceLODIndex,
 							*AnalysisData,
@@ -1285,10 +1220,7 @@ void FFoliageBakerEditorModule::BakeWindData()
 		.SupportsMinimize(false);
 	const TWeakPtr<SWindow> WeakSummaryWindow = SummaryWindow;
 	SummaryWindow->SetContent(
-		SNew(SBorder)
-		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-		.Padding(16.0f)
-		[
+		FoliageBakerToolChrome::MakeCard(
 			SNew(SBox)
 			.MaxDesiredWidth(760.0f)
 			[
@@ -1315,6 +1247,7 @@ void FFoliageBakerEditorModule::BakeWindData()
 				.Padding(0.0f, 16.0f, 0.0f, 0.0f)
 				[
 					SNew(SButton)
+					.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
 					.Text(LOCTEXT("BakeWindDataSummaryOk", "OK"))
 					.OnClicked_Lambda([WeakSummaryWindow]()
 					{
@@ -1326,8 +1259,8 @@ void FFoliageBakerEditorModule::BakeWindData()
 						return FReply::Handled();
 					})
 				]
-			]
-		]);
+			],
+			FMargin(20.0f, 16.0f)));
 	FSlateApplication::Get().AddModalWindow(
 		SummaryWindow,
 		FSlateApplication::Get().GetActiveTopLevelWindow());

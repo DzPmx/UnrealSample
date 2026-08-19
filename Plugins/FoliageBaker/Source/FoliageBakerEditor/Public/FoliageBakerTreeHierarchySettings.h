@@ -7,7 +7,7 @@
 
 class UStaticMesh;
 
-UCLASS(Transient, PrioritizeCategories = ("Mesh"), meta = (DisplayName = "Tree Hierarchy Data Bake"))
+UCLASS(Transient, PrioritizeCategories = ("Mesh"), meta = (DisplayName = "Data Bake"))
 class FOLIAGEBAKEREDITOR_API UFoliageBakerTreeHierarchySettings final : public UObject
 {
 	GENERATED_BODY()

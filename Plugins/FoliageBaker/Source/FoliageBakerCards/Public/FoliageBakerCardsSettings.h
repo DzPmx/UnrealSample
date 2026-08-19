@@ -13,7 +13,7 @@ class UStaticMesh;
 UENUM()
 enum class EFoliageBakerCardMode : uint8
 {
-	SingleBillboard UMETA(DisplayName = "Single Billboard"),
+	Billboard UMETA(DisplayName = "Billboard"),
 	CrossCards UMETA(DisplayName = "Cross Cards"),
 	MultiBillboard UMETA(DisplayName = "MultiBillboard")
 };
@@ -42,13 +42,16 @@ enum class EFoliageBakerCrossCardFaceMode : uint8
 	SeparateOneSidedFaces UMETA(DisplayName = "Separate One-Sided Faces")
 };
 
-UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard & Cross Cards"))
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker Cards"))
 class FOLIAGEBAKERCARDS_API UFoliageBakerCardsSettings : public UObject
 {
 	GENERATED_BODY()
 
 public:
 	UFoliageBakerCardsSettings();
+
+	virtual void PostInitProperties() override;
+	virtual void PostReloadConfig(FProperty* PropertyThatWasLoaded) override;
 
 	UPROPERTY(Transient, EditAnywhere, Category = "Mesh", meta = (ToolTip = "Static Mesh assets baked from the selected Source LOD. Add assets directly or use Add Content Browser Selection."))
 	TArray<TObjectPtr<UStaticMesh>> SourceStaticMeshes;
@@ -58,12 +61,12 @@ public:
 
 
 	UPROPERTY(config)
-	EFoliageBakerCardMode Mode = EFoliageBakerCardMode::SingleBillboard;
+	EFoliageBakerCardMode Mode = EFoliageBakerCardMode::Billboard;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Billboard Mode", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Single Plane - One View captures one view and emits one camera-facing plane. Single Plane - Two Views captures the selected primary axis plus a second horizontal axis rotated 90 degrees around local +Z, packs the primary tile above the second tile, stores them in UV0 and UV1, and emits one plane. Double Planes - Two Views captures the same two views, uses the same fixed vertical atlas layout, and emits two parallel planes."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Billboard Mode", EditCondition = "Mode == EFoliageBakerCardMode::Billboard", EditConditionHides, ToolTip = "Single Plane - One View captures one view and emits one camera-facing plane. Single Plane - Two Views captures the selected primary axis plus a second horizontal axis rotated 90 degrees around local +Z, packs the primary tile above the second tile, stores them in UV0 and UV1, and emits one plane. Double Planes - Two Views captures the same two views, uses the same fixed vertical atlas layout, and emits two parallel planes."))
 	EFoliageBakerBillboardMode BillboardMode = EFoliageBakerBillboardMode::SinglePlane;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Capture Axis", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard || Mode == EFoliageBakerCardMode::MultiBillboard", EditConditionHides, ToolTip = "Camera is placed on the selected local axis and looks toward the source geometry. Both two-view Billboard modes derive their second capture direction by rotating this axis 90 degrees around local +Z. MultiBillboard uses this axis as the shared normal and depth-slicing direction for every cluster's parallel Billboard stack."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (DisplayName = "Capture Axis", EditCondition = "Mode == EFoliageBakerCardMode::Billboard || Mode == EFoliageBakerCardMode::MultiBillboard", EditConditionHides, ToolTip = "Camera is placed on the selected local axis and looks toward the source geometry. Both two-view Billboard modes derive their second capture direction by rotating this axis 90 degrees around local +Z. MultiBillboard uses this axis as the shared normal and depth-slicing direction for every cluster's parallel Billboard stack."))
 	EFoliageBakerSingleCaptureAxis SingleCaptureAxis = EFoliageBakerSingleCaptureAxis::PositiveX;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature", meta = (ClampMin = "2", ClampMax = "5", EditCondition = "Mode == EFoliageBakerCardMode::CrossCards", EditConditionHides, ToolTip = "Number of vertical planes distributed evenly over 180 degrees. Every plane is baked from both sides, and all planes intersect on the vertical axis through the source Static Mesh local origin (asset pivot)."))
@@ -100,7 +103,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Minimum Atlas Resolution", EditCondition = "TextureResolutionMode == EFoliageBakerTextureResolutionMode::AutoWorldTexelSize", EditConditionHides, ToolTip = "Smallest power-of-two square packing canvas Auto mode may select before optional outer atlas cropping. Non-power-of-two values are rounded up."))
 	int32 MinimumTextureAtlasResolution = 64;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Maximum permitted atlas resolution. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", EditCondition = "Mode == EFoliageBakerCardMode::Billboard", EditConditionHides, ToolTip = "Maximum permitted atlas resolution. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
 	int32 SingleTextureResolution = 4096;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", EditCondition = "Mode == EFoliageBakerCardMode::CrossCards", EditConditionHides, ToolTip = "Maximum permitted atlas resolution. Manual mode scales tiles to use this limit; Auto mode stops increasing resolution at this limit."))
@@ -118,28 +121,28 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "bPreserveAlphaMaskValues", EditConditionHides, DisplayName = "Mip Mask Coverage Threshold", ToolTip = "Minimum fraction of covered Mip 0 samples required to keep a destination mip pixel. Lower values preserve fuller foliage silhouettes; higher values remove more thin coverage."))
 	float MipMaskCoverageThreshold = 0.35f;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Optimization", meta = (DisplayName = "Trim Unused Atlas Space", ToolTip = "Enabled: tightly removes unused outer atlas rows and columns using block-aligned dimensions, which may be non-power-of-two. Disabled: fits the atlas to the used UV tile bounds, rounds each dimension up to a power of two, and balances the remaining block-aligned space around the tiles, allowing rectangular outputs such as 512x1024. UV-island RGB padding fills all remaining atlas pixels and every generated mip. In this mode a non-power-of-two maximum resolution is rounded down to the nearest power of two. Per-view alpha bounds are always cropped independently."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Optimization", meta = (DisplayName = "Trim Unused Atlas Space", ToolTip = "Enabled: tightly removes unused outer atlas rows and columns using block-aligned dimensions, which may be non-power-of-two. Disabled: fits the atlas to the used UV tile bounds, rounds each dimension up to a power of two, and balances the remaining block-aligned space around the tiles, allowing rectangular outputs such as 512x1024. UV-island RGB padding fills all remaining atlas pixels and every generated mip. In this mode a non-power-of-two maximum resolution is rounded down to the nearest power of two. Per-view alpha bounds are always cropped independently. Billboard, Cross Cards, and MultiBillboard default this off."))
 	bool bTrimUnusedAtlasSpace = false;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / Opacity", ToolTip = "RGB stores base color. A stores visible source classification: background 0, trunk 0.5, leaf 1."))
-	bool bBakeBaseColorOpacity = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / Classification", ToolTip = "RGB stores base color. A stores visible source classification: background 0, trunk 0.5, leaf 1. A is not source opacity."))
+	bool bBakeBaseColorClassification = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Trunk Leaf Mask", ToolTip = "RGB stores object/local-space normal for Single Plane - One View and Cross Cards. Both two-view Billboard modes re-express each view's normal in its capture Facing/Right/Up frame so both views use the same billboard decoder. A stores the visible trunk/leaf classification after source opacity clipping: background 0, trunk 0.5, leaf 1."))
-	bool bBakeNormalDepth = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Classification", ToolTip = "RGB stores object/local-space normal for Single Plane - One View and Cross Cards. Both two-view Billboard modes re-express each view's normal in its capture Facing/Right/Up frame so both views use the same billboard decoder. A stores the same trunk/leaf classification as the color atlas: background 0, trunk 0.5, leaf 1. A is not depth."))
+	bool bBakeNormalClassification = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission. The destination material texture parameter is configured in Material."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Occlusion / Roughness / Metallic / Emission", ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission. The destination material texture parameter is configured in Material."))
 	bool bBakeMix = false;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Upper Hemisphere L1 Visibility", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Bakes low-frequency self-visibility for source-local light directions over the upper hemisphere. RGB store signed X/Y/Z directional coefficients remapped from -1..1 to 0..1; A stores the constant coefficient. Runtime reconstruction is saturate(A + dot(RGB * 2 - 1, BakedLightDirection)). BakedLightDirection points toward the light and must be transformed back through the Billboard WPO rotation into the original bake frame."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Upper Hemisphere L1 Visibility", EditCondition = "Mode == EFoliageBakerCardMode::Billboard", EditConditionHides, ToolTip = "Bakes low-frequency self-visibility for source-local light directions over the upper hemisphere. RGB store signed X/Y/Z directional coefficients remapped from -1..1 to 0..1; A stores the constant coefficient. Runtime reconstruction is saturate(A + dot(RGB * 2 - 1, BakedLightDirection)). BakedLightDirection points toward the light and must be transformed back through the Billboard WPO rotation into the original bake frame."))
 	bool bBakeUpperHemisphereL1Visibility = false;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "1024", DisplayName = "L1 Visibility Texture Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum dimension of the generated L1 coefficient atlas. The Billboard atlas aspect ratio and normalized tile layout are preserved, and every tile is resized independently to prevent cross-tile filtering."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "1024", DisplayName = "L1 Visibility Texture Resolution", EditCondition = "Mode == EFoliageBakerCardMode::Billboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum dimension of the generated L1 coefficient atlas. The Billboard atlas aspect ratio and normalized tile layout are preserved, and every tile is resized independently to prevent cross-tile filtering."))
 	int32 UpperHemisphereL1TextureResolution = 512;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "4", ClampMax = "32", DisplayName = "L1 Visibility Samples", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Number of uniformly distributed upper-hemisphere directions used to fit the four L1 visibility coefficients. Higher values improve stability but increase offline bake time."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "4", ClampMax = "32", DisplayName = "L1 Visibility Samples", EditCondition = "Mode == EFoliageBakerCardMode::Billboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Number of uniformly distributed upper-hemisphere directions used to fit the four L1 visibility coefficients. Higher values improve stability but increase offline bake time."))
 	int32 UpperHemisphereL1SampleCount = 12;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "1024", DisplayName = "L1 Shadow Map Resolution", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum internal masked shadow-map dimension used for each sampled light direction. Each receiver uses a fixed 5x5 PCF depth-comparison kernel before L1 fitting. This does not change the generated coefficient atlas resolution."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (ClampMin = "64", ClampMax = "1024", DisplayName = "L1 Shadow Map Resolution", EditCondition = "Mode == EFoliageBakerCardMode::Billboard && bBakeUpperHemisphereL1Visibility", EditConditionHides, ToolTip = "Maximum internal masked shadow-map dimension used for each sampled light direction. Each receiver uses a fixed 5x5 PCF depth-comparison kernel before L1 fitting. This does not change the generated coefficient atlas resolution."))
 	int32 UpperHemisphereL1ShadowMapResolution = 1024;
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
@@ -154,16 +157,16 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString TextureNamePrefix = TEXT("T_");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Base Color / Opacity Texture Suffix"))
-	FString BaseColorOpacityTextureSuffix = TEXT("_DA");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Base Color / Classification Texture Suffix"))
+	FString BaseColorClassificationTextureSuffix = TEXT("_DA");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Normal / Mask Texture Suffix"))
-	FString NormalDepthTextureSuffix = TEXT("_NR");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Normal / Classification Texture Suffix"))
+	FString NormalClassificationTextureSuffix = TEXT("_NR");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MixTextureSuffix = TEXT("_M");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Upper Hemisphere L1 Visibility Texture Suffix", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides))
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Upper Hemisphere L1 Visibility Texture Suffix", EditCondition = "Mode == EFoliageBakerCardMode::Billboard", EditConditionHides))
 	FString UpperHemisphereL1VisibilityTextureSuffix = TEXT("_L1V");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
@@ -183,16 +186,16 @@ public:
 		FFoliageBakerBakeStaticSwitchOverride()
 	};
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Opacity Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and trunk/leaf opacity classification in A."))
-	FName BaseColorOpacityTextureParameterName = TEXT("ColorOpacity");
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Classification Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and trunk/leaf classification in A. The default parent-material parameter name remains ColorOpacity."))
+	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Trunk Leaf Mask Parameter", ToolTip = "Texture parameter receiving Normal RGB and the trunk/leaf classification in A. Both two-view Billboard modes use the shared capture-frame convention required by their billboard decoders."))
-	FName NormalDepthTextureParameterName = TEXT("NormalMask");
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Classification Parameter", ToolTip = "Texture parameter receiving Normal RGB and trunk/leaf classification in A. Both two-view Billboard modes use the shared capture-frame convention required by their billboard decoders. The default parent-material parameter name remains NormalMask."))
+	FName NormalClassificationTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission texture when that output is enabled."))
 	FName MixTextureParameterName = TEXT("Mix");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Upper Hemisphere L1 Visibility Parameter", EditCondition = "Mode == EFoliageBakerCardMode::SingleBillboard", EditConditionHides, ToolTip = "Texture parameter receiving the optional upper-hemisphere L1 self-visibility coefficient atlas. The plugin only assigns this parameter; it does not modify the parent material graph."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Upper Hemisphere L1 Visibility Parameter", EditCondition = "Mode == EFoliageBakerCardMode::Billboard", EditConditionHides, ToolTip = "Texture parameter receiving the optional upper-hemisphere L1 self-visibility coefficient atlas. The plugin only assigns this parameter; it does not modify the parent material graph."))
 	FName UpperHemisphereL1VisibilityTextureParameterName = TEXT("UpperHemisphereL1Visibility");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Leaf Roughness Parameter", ToolTip = "Scalar parameter receiving the average baked Roughness of visible leaf pixels when Mix output is disabled and valid leaf pixels exist."))
@@ -206,15 +209,18 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (EditCondition = "!bBakeMix", DisplayName = "Trunk Specular Parameter", ToolTip = "Scalar parameter receiving the average baked Specular of visible trunk pixels when Mix output is disabled and valid trunk pixels exist."))
 	FName TrunkSpecularParameterName = TEXT("TrunkSpecular");
+
+private:
+	void RedirectDeletedParentMaterialTemplate();
 };
 
 UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Billboard"))
-class FOLIAGEBAKERCARDS_API UFoliageBakerSingleBillboardSettings final : public UFoliageBakerCardsSettings
+class FOLIAGEBAKERCARDS_API UFoliageBakerBillboardSettings final : public UFoliageBakerCardsSettings
 {
 	GENERATED_BODY()
 
 public:
-	UFoliageBakerSingleBillboardSettings();
+	UFoliageBakerBillboardSettings();
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Single Plane - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlaneTwoViews", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used by Single Plane - Two Views Billboard when Upper Hemisphere L1 Visibility is disabled. The generated mesh stores the upper primary atlas tile in UV0, the lower +90-degree atlas tile in UV1, and the primary local capture direction in UV2.xy. The parent material owns view-angle selection or blending."))
 	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneTwoViewsMaterialInstanceTemplate;
@@ -222,14 +228,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Double Planes - Two Views Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::DoublePlanes", EditConditionHides, ToolTip = "Editor Preferences provides the default. The current Billboard tool panel can override it for this session. Used by Double Planes - Two Views Billboard when Upper Hemisphere L1 Visibility is disabled. The generated mesh provides the per-plane atlas tile in UV0, local capture direction in UV1.xy, and plane selector 0 or 1 in UV2.x for view-angle Dither blending and dynamic plane spacing."))
 	TSoftObjectPtr<UMaterialInstanceConstant> DoublePlanesMaterialInstanceTemplate;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material|SH Shadow", meta = (DisplayName = "Single Plane - One View SH Shadow Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlane", EditConditionHides, ToolTip = "Parent Material Instance used instead of the standard template when Upper Hemisphere L1 Visibility is baked for Single Plane - One View."))
-	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneSHShadowMaterialInstanceTemplate;
+	UPROPERTY(config, EditAnywhere, Category = "Material|L1 Visibility", meta = (DisplayName = "Single Plane - One View L1 Visibility Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlane", EditConditionHides, ToolTip = "Parent Material Instance used instead of the standard template when Upper Hemisphere L1 Visibility is baked for Single Plane - One View."))
+	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneL1VisibilityMaterialInstanceTemplate;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material|SH Shadow", meta = (DisplayName = "Single Plane - Two Views SH Shadow Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlaneTwoViews", EditConditionHides, ToolTip = "Parent Material Instance used instead of the regular Two View template when Upper Hemisphere L1 Visibility is baked for Single Plane - Two Views."))
-	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneTwoViewsSHShadowMaterialInstanceTemplate;
+	UPROPERTY(config, EditAnywhere, Category = "Material|L1 Visibility", meta = (DisplayName = "Single Plane - Two Views L1 Visibility Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::SinglePlaneTwoViews", EditConditionHides, ToolTip = "Parent Material Instance used instead of the regular Two View template when Upper Hemisphere L1 Visibility is baked for Single Plane - Two Views."))
+	TSoftObjectPtr<UMaterialInstanceConstant> SinglePlaneTwoViewsL1VisibilityMaterialInstanceTemplate;
 
-	UPROPERTY(config, EditAnywhere, Category = "Material|SH Shadow", meta = (DisplayName = "Double Planes - Two Views SH Shadow Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::DoublePlanes", EditConditionHides, ToolTip = "Parent Material Instance used instead of the regular Two View template when Upper Hemisphere L1 Visibility is baked for Double Planes - Two Views."))
-	TSoftObjectPtr<UMaterialInstanceConstant> DoublePlanesSHShadowMaterialInstanceTemplate;
+	UPROPERTY(config, EditAnywhere, Category = "Material|L1 Visibility", meta = (DisplayName = "Double Planes - Two Views L1 Visibility Parent Material Instance", EditCondition = "BillboardMode == EFoliageBakerBillboardMode::DoublePlanes", EditConditionHides, ToolTip = "Parent Material Instance used instead of the regular Two View template when Upper Hemisphere L1 Visibility is baked for Double Planes - Two Views."))
+	TSoftObjectPtr<UMaterialInstanceConstant> DoublePlanesL1VisibilityMaterialInstanceTemplate;
 };
 
 UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Mesh", "Feature", "Asset", "Material"), meta = (DisplayName = "Foliage Baker - Cross Cards"))

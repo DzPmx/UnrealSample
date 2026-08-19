@@ -129,9 +129,9 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			FString& OutError)
 		{
 			if (Result.SourceTriangleIdAndDepth.Num() == ExpectedPixelCount
-				&& (!OutputSelection.bBaseColorOpacity
+				&& (!OutputSelection.bColorAtlas
 					|| Result.BaseColor.Num() == ExpectedPixelCount)
-				&& (!OutputSelection.bNormalMask
+				&& (!OutputSelection.bNormalAtlas
 					|| Result.ObjectSpaceNormal.Num() == ExpectedPixelCount)
 				&& (!OutputSelection.bMix
 					|| Result.PackedMix.Num() == ExpectedPixelCount)
@@ -206,8 +206,8 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				Inputs.Settings.AtlasVConvention
 				== PlaneCover::EAtlasVConvention::
 					GeometryMinVToTextureMaxV;
-			TileRequest.bBakeBaseColor = Policy.OutputSelection.bBaseColorOpacity;
-			TileRequest.bBakeObjectSpaceNormal = Policy.OutputSelection.bNormalMask;
+			TileRequest.bBakeBaseColor = Policy.OutputSelection.bColorAtlas;
+			TileRequest.bBakeObjectSpaceNormal = Policy.OutputSelection.bNormalAtlas;
 			TileRequest.bBakePackedMix = Policy.OutputSelection.bMix;
 			TileRequest.bBakeRoughnessSpecular =
 				Policy.OutputSelection.bMaterialScalarAverages;
@@ -400,11 +400,11 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 							TileResult.Roughness[TilePixelIndex].R,
 							TileResult.Specular[TilePixelIndex].R);
 					}
-					if (Policy.OutputSelection.bBaseColorOpacity)
+					if (Policy.OutputSelection.bColorAtlas)
 					{
 						FColor Color = TileResult.BaseColor[TilePixelIndex];
 						Color.A = ClassificationValue;
-						Context.OutResult.BaseColorOpacityPixels[AtlasPixelIndex] = Color;
+						Context.OutResult.ColorAtlasPixels[AtlasPixelIndex] = Color;
 					}
 					Context.AtlasCoverage[AtlasPixelIndex] = true;
 
@@ -413,7 +413,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 						Context.OutResult.SourceTriangleIdAndDepthPixels[AtlasPixelIndex] =
 							TileResult.SourceTriangleIdAndDepth[TilePixelIndex];
 					}
-					if (Policy.OutputSelection.bNormalMask)
+					if (Policy.OutputSelection.bNormalAtlas)
 					{
 						FColor Normal = TileResult.ObjectSpaceNormal[TilePixelIndex];
 						if (Policy.bConvertNormalsToCaptureFrame)
@@ -537,8 +537,8 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		}
 		const int32 AtlasPixelCount = static_cast<int32>(AtlasPixelCount64);
 
-		OutResult.BaseColorOpacityPixels.Init(FColor(0, 0, 0, 0), AtlasPixelCount);
-		if (Policy.OutputSelection.bNormalMask)
+		OutResult.ColorAtlasPixels.Init(FColor(0, 0, 0, 0), AtlasPixelCount);
+		if (Policy.OutputSelection.bNormalAtlas)
 		{
 			OutResult.NormalPixels.Init(
 				ProjectedMaterialBake::EncodeObjectSpaceNormalToColor(
@@ -644,11 +644,11 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		}
 
 		Atlas::FillTransparentRGBInsideTiles(
-			OutResult.BaseColorOpacityPixels,
+			OutResult.ColorAtlasPixels,
 			Stats.Width,
 			Stats.Height,
 			PlaneInfos);
-		if (Policy.OutputSelection.bNormalMask)
+		if (Policy.OutputSelection.bNormalAtlas)
 		{
 			Atlas::FillTransparentRGBInsideTiles(
 				OutResult.NormalPixels,
@@ -712,8 +712,8 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 		FPolicy CropPolicy = Policy;
 		CropPolicy.OutputSelection = MaterialResolver::FMaterialOutputSelection();
-		CropPolicy.OutputSelection.bBaseColorOpacity = true;
-		CropPolicy.OutputSelection.bNormalMask = false;
+		CropPolicy.OutputSelection.bColorAtlas = true;
+		CropPolicy.OutputSelection.bNormalAtlas = false;
 		CropPolicy.OutputSelection.bMix = false;
 		CropPolicy.OutputSelection.bMaterialScalarAverages = false;
 		CropPolicy.bCaptureSourceTriangleIdAndDepth = false;
@@ -803,7 +803,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 			TArray<PlaneCover::FPlaneProxyTileCrop> PrepassCrops;
 			const int32 PrepassCroppedPlaneCount =
 				Atlas::BuildAlphaAwareTileCrops(
-					PrepassResult.BaseColorOpacityPixels,
+					PrepassResult.ColorAtlasPixels,
 					PrepassResult.Stats.Width,
 					PrepassResult.Stats.Height,
 					PrepassPlaneInfos,
