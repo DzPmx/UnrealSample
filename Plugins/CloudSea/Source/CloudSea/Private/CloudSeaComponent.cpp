@@ -46,6 +46,21 @@ bool UCloudSeaComponent::TryGetView(FVector& OutViewLocation, FRotator& OutViewR
 	}
 
 	const UWorld& World = *GetWorld();
+
+#if WITH_EDITOR
+	// SIE and ejected PIE render through the level viewport while the player camera remains elsewhere.
+	if (GCurrentLevelEditingViewportClient != nullptr)
+	{
+		const FLevelEditorViewportClient& ViewportClient = *GCurrentLevelEditingViewportClient;
+		if (ViewportClient.GetWorld() == &World && ViewportClient.IsPerspective())
+		{
+			OutViewLocation = ViewportClient.GetViewLocation();
+			OutViewRotation = ViewportClient.GetViewRotation();
+			return true;
+		}
+	}
+#endif
+
 	if (World.IsGameWorld())
 	{
 		const TWeakObjectPtr<APlayerCameraManager> CameraManager =
@@ -59,19 +74,6 @@ bool UCloudSeaComponent::TryGetView(FVector& OutViewLocation, FRotator& OutViewR
 
 		return false;
 	}
-
-#if WITH_EDITOR
-	if (GCurrentLevelEditingViewportClient != nullptr)
-	{
-		const FLevelEditorViewportClient& ViewportClient = *GCurrentLevelEditingViewportClient;
-		if (ViewportClient.GetWorld() == &World && ViewportClient.IsPerspective())
-		{
-			OutViewLocation = ViewportClient.GetViewLocation();
-			OutViewRotation = ViewportClient.GetViewRotation();
-			return true;
-		}
-	}
-#endif
 
 	return false;
 }
