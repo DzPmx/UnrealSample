@@ -28,6 +28,10 @@
 			"TargetAllowList": [
 				"Editor"
 			]
+		},
+		{
+			"Name": "CloudSea",
+			"Enabled": true
 		}
 	]
 }
