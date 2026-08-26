@@ -1,5 +1,6 @@
 #include "CloudSeaComponent.h"
 
+#include "CoreGlobals.h"
 #include "Components/StaticMeshComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/Actor.h"
@@ -11,6 +12,14 @@
 #include "Editor.h"
 #include "LevelEditorViewport.h"
 #endif
+
+namespace
+{
+	constexpr double DiskHeightCompressionFactor = 10.0;
+	constexpr double DiskHeightRemainderFactor = DiskHeightCompressionFactor - 1.0;
+	constexpr double DiskProxyNearClipSafetyFactor = 1.5;
+	constexpr double DiskProxyNearClipSafetyPadding = 10.0;
+}
 
 UCloudSeaComponent::UCloudSeaComponent()
 {
@@ -25,8 +34,21 @@ UCloudSeaComponent::UCloudSeaComponent()
 void UCloudSeaComponent::OnRegister()
 {
 	Super::OnRegister();
+#if WITH_EDITOR
+	FEditorDelegates::OnEditorCameraMoved.AddUObject(
+		this,
+		&UCloudSeaComponent::HandleEditorCameraMoved);
+#endif
 	InitializeMaterialDriver();
 	UpdateCloudSeaTransform();
+}
+
+void UCloudSeaComponent::OnUnregister()
+{
+#if WITH_EDITOR
+	FEditorDelegates::OnEditorCameraMoved.RemoveAll(this);
+#endif
+	Super::OnUnregister();
 }
 
 void UCloudSeaComponent::TickComponent(
@@ -38,7 +60,21 @@ void UCloudSeaComponent::TickComponent(
 	UpdateCloudSeaTransform();
 }
 
-bool UCloudSeaComponent::TryGetView(FVector& OutViewLocation, FRotator& OutViewRotation) const
+#if WITH_EDITOR
+void UCloudSeaComponent::HandleEditorCameraMoved(
+	const FVector&,
+	const FRotator&,
+	ELevelViewportType,
+	int32)
+{
+	UpdateCloudSeaTransform();
+}
+#endif
+
+bool UCloudSeaComponent::TryGetView(
+	FVector& OutViewLocation,
+	FRotator& OutViewRotation,
+	float& OutNearClipPlane) const
 {
 	if (GetWorld() == nullptr)
 	{
@@ -46,6 +82,7 @@ bool UCloudSeaComponent::TryGetView(FVector& OutViewLocation, FRotator& OutViewR
 	}
 
 	const UWorld& World = *GetWorld();
+	OutNearClipPlane = GNearClippingPlane;
 
 #if WITH_EDITOR
 	// SIE and ejected PIE render through the level viewport while the player camera remains elsewhere.
@@ -56,6 +93,7 @@ bool UCloudSeaComponent::TryGetView(FVector& OutViewLocation, FRotator& OutViewR
 		{
 			OutViewLocation = ViewportClient.GetViewLocation();
 			OutViewRotation = ViewportClient.GetViewRotation();
+			OutNearClipPlane = ViewportClient.GetNearClipPlane();
 			return true;
 		}
 	}
@@ -105,7 +143,8 @@ void UCloudSeaComponent::UpdateCloudSeaTransform()
 {
 	FVector ViewLocation;
 	FRotator ViewRotation;
-	if (!TryGetView(ViewLocation, ViewRotation))
+	float NearClipPlane;
+	if (!TryGetView(ViewLocation, ViewRotation, NearClipPlane))
 	{
 		return;
 	}
@@ -115,11 +154,30 @@ void UCloudSeaComponent::UpdateCloudSeaTransform()
 	const double CloudLayerTopWorldHeight =
 		CloudLayerBaseWorldHeight
 		- ReferenceCloudLayerRayMarchData.R * WorldUnitsPerMaterialUnit;
+	const double SignedCameraDepthBelowCloudTopMaterialUnits =
+		(CloudLayerTopWorldHeight - ViewLocation.Z) / WorldUnitsPerMaterialUnit;
+	const double CameraHeightAboveCloudTopWorldUnits =
+		FMath::Max(ViewLocation.Z - CloudLayerTopWorldHeight, 0.0);
+	const double DiskRayMarchTransitionAlpha = FMath::SmoothStep(
+		0.0,
+		static_cast<double>(DiskRayMarchTransitionWorldDistance),
+		CameraHeightAboveCloudTopWorldUnits);
+	const bool bUseReferenceMirrorTransition =
+		VerticalRenderingMode == ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;
+	const float DiskTransitionStartMarchDistanceMaterialUnits =
+		bUseReferenceMirrorTransition
+		? FullScreenTransitionMarchDistance
+		: ReferenceRayMarchDistanceLimits.G;
+	const float ActiveDiskRayMarchDistanceMaterialUnits = FMath::Lerp(
+		DiskTransitionStartMarchDistanceMaterialUnits,
+		ReferenceRayMarchDistanceLimits.G,
+		static_cast<float>(DiskRayMarchTransitionAlpha));
 	const bool bUseFullScreenProxy =
 		ViewLocation.Z <= CloudLayerTopWorldHeight;
 
 	FVector CloudSeaLocation;
 	FQuat CloudSeaRotation;
+	double CloudSeaWorldRadius = ProxyWorldRadius;
 	if (bUseFullScreenProxy)
 	{
 		const FVector ViewForward = ViewRotation.Vector();
@@ -128,22 +186,48 @@ void UCloudSeaComponent::UpdateCloudSeaTransform()
 	}
 	else
 	{
+		const double CompressedCameraDepthBelowCloudTopMaterialUnits =
+			SignedCameraDepthBelowCloudTopMaterialUnits / DiskHeightCompressionFactor;
+		CloudSeaWorldRadius =
+			DiskHeightCompressionFactor
+			* FMath::Sqrt(
+				FMath::Square(ActiveDiskRayMarchDistanceMaterialUnits)
+				- FMath::Square(CompressedCameraDepthBelowCloudTopMaterialUnits))
+			* WorldUnitsPerMaterialUnit;
+		const double ReconstructedDiskProxyWorldOffset =
+			CompressedCameraDepthBelowCloudTopMaterialUnits
+			* WorldUnitsPerMaterialUnit
+			* (DiskMarchFarDistance / ActiveDiskRayMarchDistanceMaterialUnits);
+		const double DesiredDiskProxyWorldOffset = bFollowCameraHeightWithDiskProxy
+			? ReconstructedDiskProxyWorldOffset
+			: CloudLayerTopWorldHeight - ViewLocation.Z;
+		const double DiskProxyWorldOffset = FMath::Min(
+			DesiredDiskProxyWorldOffset,
+			-(static_cast<double>(NearClipPlane) * DiskProxyNearClipSafetyFactor
+				+ DiskProxyNearClipSafetyPadding));
+		const double DiskProxyWorldZ = ViewLocation.Z + DiskProxyWorldOffset;
 		CloudSeaLocation = FVector(
 			ViewLocation.X,
 			ViewLocation.Y,
-			ViewLocation.Z - DiskProxyCameraVerticalOffset);
+			DiskProxyWorldZ);
 		CloudSeaRotation = FQuat::Identity;
 	}
 
-	const FVector CloudSeaScale(ProxyWorldRadius, ProxyWorldRadius, 1.0);
+	const FVector CloudSeaScale(CloudSeaWorldRadius, CloudSeaWorldRadius, 1.0);
 	const FTransform CloudSeaTransform(CloudSeaRotation, CloudSeaLocation, CloudSeaScale);
 	SetWorldTransform(CloudSeaTransform, false, nullptr, ETeleportType::TeleportPhysics);
-	UpdateMaterialParameters(ViewLocation, bUseFullScreenProxy);
+	UpdateMaterialParameters(
+		ViewLocation,
+		bUseFullScreenProxy,
+		SignedCameraDepthBelowCloudTopMaterialUnits,
+		ActiveDiskRayMarchDistanceMaterialUnits);
 }
 
 void UCloudSeaComponent::UpdateMaterialParameters(
 	const FVector& ViewLocation,
-	bool bUseFullScreenProxy)
+	bool bUseFullScreenProxy,
+	double SignedCameraDepthBelowCloudTopMaterialUnits,
+	float ActiveDiskRayMarchDistanceMaterialUnits)
 {
 	if (DynamicMaterial == nullptr)
 	{
@@ -174,12 +258,31 @@ void UCloudSeaComponent::UpdateMaterialParameters(
 	DynamicMaterial->SetVectorParameterValue(TEXT("SecondaryLightRadiance"), SecondaryLightRadiance);
 
 	FLinearColor CameraRelativeCloudLayerRayMarchData = ReferenceCloudLayerRayMarchData;
-	const double SignedCameraDepthBelowLayerBase =
-		(CloudLayerBaseWorldHeight - ViewLocation.Z) / WorldUnitsPerMaterialUnit;
-	CameraRelativeCloudLayerRayMarchData.G =
-		SignedCameraDepthBelowLayerBase - CameraRelativeCloudLayerRayMarchData.R;
+	if (bUseFullScreenProxy)
+	{
+		CameraRelativeCloudLayerRayMarchData.G = SignedCameraDepthBelowCloudTopMaterialUnits;
+		CameraRelativeCloudLayerRayMarchData.A = 0.0f;
+	}
+	else if (bFollowCameraHeightWithDiskProxy)
+	{
+		CameraRelativeCloudLayerRayMarchData.G =
+			SignedCameraDepthBelowCloudTopMaterialUnits / DiskHeightCompressionFactor;
+		CameraRelativeCloudLayerRayMarchData.A =
+			CameraRelativeCloudLayerRayMarchData.G * DiskHeightRemainderFactor;
+	}
+	else
+	{
+		CameraRelativeCloudLayerRayMarchData.G = SignedCameraDepthBelowCloudTopMaterialUnits;
+		CameraRelativeCloudLayerRayMarchData.A = 0.0f;
+	}
 
 	FLinearColor CameraRelativeRayMarchDistanceLimits = ReferenceRayMarchDistanceLimits;
+	if (!bUseFullScreenProxy)
+	{
+		CameraRelativeRayMarchDistanceLimits.G =
+			ActiveDiskRayMarchDistanceMaterialUnits;
+	}
+
 	float DensityVolumeZSign = 1.0f;
 	const bool bUseReferenceMirrorTransition =
 		VerticalRenderingMode == ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;

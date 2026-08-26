@@ -7,6 +7,10 @@
 class UMaterialInstanceDynamic;
 class UStaticMeshComponent;
 
+#if WITH_EDITOR
+enum ELevelViewportType : int;
+#endif
+
 UENUM(BlueprintType)
 enum class ECloudSeaVerticalRenderingMode : uint8
 {
@@ -30,16 +34,32 @@ public:
 
 protected:
 	virtual void OnRegister() override;
+	virtual void OnUnregister() override;
 	virtual void TickComponent(
 		float DeltaTime,
 		ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
-	bool TryGetView(FVector& OutViewLocation, FRotator& OutViewRotation) const;
+	bool TryGetView(
+		FVector& OutViewLocation,
+		FRotator& OutViewRotation,
+		float& OutNearClipPlane) const;
 	void InitializeMaterialDriver();
 	void UpdateCloudSeaTransform();
-	void UpdateMaterialParameters(const FVector& ViewLocation, bool bUseFullScreenProxy);
+	void UpdateMaterialParameters(
+		const FVector& ViewLocation,
+		bool bUseFullScreenProxy,
+		double SignedCameraDepthBelowCloudTopMaterialUnits,
+		float ActiveDiskRayMarchDistanceMaterialUnits);
+
+#if WITH_EDITOR
+	void HandleEditorCameraMoved(
+		const FVector& ViewLocation,
+		const FRotator& ViewRotation,
+		ELevelViewportType ViewportType,
+		int32 ViewIndex);
+#endif
 
 	TWeakObjectPtr<UStaticMeshComponent> ProxyMeshComponent;
 
@@ -51,17 +71,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Camera")
 	int32 CameraPlayerIndex = 0;
 
-	/** World-space distance below the camera used by the cloud-above proxy disk. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Proxy Transform")
-	double DiskProxyCameraVerticalOffset = 297.1015625;
-
-	/** Radius applied to both local X and Y of the unit proxy disk. */
+	/** Radius applied to the camera-facing full-screen proxy; the disk radius is derived per frame. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Proxy Transform")
 	double ProxyWorldRadius = 949966.6875;
 
 	/** Distance in front of the camera used by the full-screen proxy plane. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Proxy Transform")
 	double FullScreenProxyCameraDistance = 297.1015625;
+
+	/** Moves the cloud-above disk and its ray-march slices with the camera; when disabled, they remain world-anchored. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Proxy Transform")
+	bool bFollowCameraHeightWithDiskProxy = true;
 
 	/** Fixed world-space height of the cloud layer base. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|World Anchoring")
@@ -99,12 +119,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Material|Ray March")
 	float FullScreenTransitionMarchDistance = 750.0f;
 
+	/** World-space height above the cloud top over which the disk march distance reaches its configured limit. */
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadWrite,
+		Category = "Cloud Sea|Material|Ray March",
+		meta = (ClampMin = "1.0", UIMin = "1.0"))
+	float DiskRayMarchTransitionWorldDistance = 1000.0f;
+
 	/** Selects the reference mirrored transition or one physical cloud layer without screen prefill. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Material|Ray March")
 	ECloudSeaVerticalRenderingMode VerticalRenderingMode =
 		ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;
 
-	/** RGBA: negative layer height, signed camera depth below cloud top, prefill opacity, disk offset numerator. */
+	/** RGBA: negative layer height, mode-space camera depth below cloud top, prefill opacity, disk offset remainder. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Material|Reference")
 	FLinearColor ReferenceCloudLayerRayMarchData = FLinearColor(-50.0f, -1.3785701990127563f, 0.0f, -12.407132148742676f);
 
