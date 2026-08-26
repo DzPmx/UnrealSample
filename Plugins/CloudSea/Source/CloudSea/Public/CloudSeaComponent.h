@@ -7,6 +7,13 @@
 class UMaterialInstanceDynamic;
 class UStaticMeshComponent;
 
+UENUM(BlueprintType)
+enum class ECloudSeaVerticalRenderingMode : uint8
+{
+	ReferenceMirrorWithPrefill UMETA(DisplayName = "Reference Mirror with Prefill"),
+	SingleLayerWithoutPrefill UMETA(DisplayName = "Single Layer without Prefill")
+};
+
 /**
  * Drives disk and camera-facing cloud-sea proxies whose material ray-marches
  * one fixed world-space cloud layer.
@@ -91,6 +98,11 @@ public:
 	/** Reference full-screen march distance at either edge of the layer transition. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Material|Ray March")
 	float FullScreenTransitionMarchDistance = 750.0f;
+
+	/** Selects the reference mirrored transition or one physical cloud layer without screen prefill. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Material|Ray March")
+	ECloudSeaVerticalRenderingMode VerticalRenderingMode =
+		ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;
 
 	/** RGBA: negative layer height, signed camera depth below cloud top, prefill opacity, disk offset numerator. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Material|Reference")

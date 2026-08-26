@@ -181,7 +181,9 @@ void UCloudSeaComponent::UpdateMaterialParameters(
 
 	FLinearColor CameraRelativeRayMarchDistanceLimits = ReferenceRayMarchDistanceLimits;
 	float DensityVolumeZSign = 1.0f;
-	if (bUseFullScreenProxy)
+	const bool bUseReferenceMirrorTransition =
+		VerticalRenderingMode == ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;
+	if (bUseFullScreenProxy && bUseReferenceMirrorTransition)
 	{
 		const float CloudLayerHeight = -ReferenceCloudLayerRayMarchData.R;
 		const float CameraDepthBelowTop = CameraRelativeCloudLayerRayMarchData.G;
