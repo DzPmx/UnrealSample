@@ -79,10 +79,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Proxy Transform")
 	double FullScreenProxyCameraDistance = 297.1015625;
 
-	/** Moves the cloud-above disk and its ray-march slices with the camera; when disabled, they remain world-anchored. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Proxy Transform")
-	bool bFollowCameraHeightWithDiskProxy = true;
-
 	/** Fixed world-space height of the cloud layer base. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|World Anchoring")
 	double CloudLayerBaseWorldHeight = 62595.295533;
@@ -132,7 +128,7 @@ public:
 	ECloudSeaVerticalRenderingMode VerticalRenderingMode =
 		ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;
 
-	/** RGBA: negative layer height, mode-space camera depth below cloud top, prefill opacity, disk offset remainder. */
+	/** RGBA: negative layer height, mode-space camera depth below cloud top, prefill opacity, proxy depth-restoration numerator. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Sea|Material|Reference")
 	FLinearColor ReferenceCloudLayerRayMarchData = FLinearColor(-50.0f, -1.3785701990127563f, 0.0f, -12.407132148742676f);
 

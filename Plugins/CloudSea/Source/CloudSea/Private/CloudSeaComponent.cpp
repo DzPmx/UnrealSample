@@ -198,11 +198,8 @@ void UCloudSeaComponent::UpdateCloudSeaTransform()
 			CompressedCameraDepthBelowCloudTopMaterialUnits
 			* WorldUnitsPerMaterialUnit
 			* (DiskMarchFarDistance / ActiveDiskRayMarchDistanceMaterialUnits);
-		const double DesiredDiskProxyWorldOffset = bFollowCameraHeightWithDiskProxy
-			? ReconstructedDiskProxyWorldOffset
-			: CloudLayerTopWorldHeight - ViewLocation.Z;
 		const double DiskProxyWorldOffset = FMath::Min(
-			DesiredDiskProxyWorldOffset,
+			ReconstructedDiskProxyWorldOffset,
 			-(static_cast<double>(NearClipPlane) * DiskProxyNearClipSafetyFactor
 				+ DiskProxyNearClipSafetyPadding));
 		const double DiskProxyWorldZ = ViewLocation.Z + DiskProxyWorldOffset;
@@ -257,49 +254,62 @@ void UCloudSeaComponent::UpdateMaterialParameters(
 	DynamicMaterial->SetVectorParameterValue(TEXT("SecondaryLightDirection"), SecondaryLightDirection);
 	DynamicMaterial->SetVectorParameterValue(TEXT("SecondaryLightRadiance"), SecondaryLightRadiance);
 
-	FLinearColor CameraRelativeCloudLayerRayMarchData = ReferenceCloudLayerRayMarchData;
+	const float CameraDepthBelowCloudTopMaterialUnits =
+		static_cast<float>(SignedCameraDepthBelowCloudTopMaterialUnits);
+	FLinearColor CameraRelativeCloudLayerRayMarchData(
+		ReferenceCloudLayerRayMarchData.R,
+		CameraDepthBelowCloudTopMaterialUnits,
+		0.0f,
+		0.0f);
+	FLinearColor CameraRelativeRayMarchDistanceLimits = ReferenceRayMarchDistanceLimits;
+	const bool bUseReferenceMirrorTransition =
+		VerticalRenderingMode == ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;
+	const float CameraDepthBelowCloudBaseMaterialUnits =
+		CameraRelativeCloudLayerRayMarchData.R
+		+ CameraDepthBelowCloudTopMaterialUnits;
 	if (bUseFullScreenProxy)
 	{
-		CameraRelativeCloudLayerRayMarchData.G = SignedCameraDepthBelowCloudTopMaterialUnits;
-		CameraRelativeCloudLayerRayMarchData.A = 0.0f;
+		// Keep the mirrored layer and its prefill transition intact before compressing the gap below it.
+		const float FullScreenCompressionAnchorDepthBelowCloudBaseMaterialUnits =
+			bUseReferenceMirrorTransition ? -CameraRelativeCloudLayerRayMarchData.R : 0.0f;
+		const float CameraDistanceBelowFullScreenCompressionAnchorMaterialUnits =
+			CameraDepthBelowCloudBaseMaterialUnits
+			- FullScreenCompressionAnchorDepthBelowCloudBaseMaterialUnits;
+		if (CameraDistanceBelowFullScreenCompressionAnchorMaterialUnits > 0.0f)
+		{
+			const float CompressedCameraDistanceBelowAnchorMaterialUnits =
+				CameraDistanceBelowFullScreenCompressionAnchorMaterialUnits
+				/ static_cast<float>(DiskHeightCompressionFactor);
+			CameraRelativeCloudLayerRayMarchData.G =
+				-CameraRelativeCloudLayerRayMarchData.R
+				+ FullScreenCompressionAnchorDepthBelowCloudBaseMaterialUnits
+				+ CompressedCameraDistanceBelowAnchorMaterialUnits;
+			CameraRelativeCloudLayerRayMarchData.A =
+				CameraDistanceBelowFullScreenCompressionAnchorMaterialUnits
+				- CompressedCameraDistanceBelowAnchorMaterialUnits;
+		}
 	}
-	else if (bFollowCameraHeightWithDiskProxy)
+	else
 	{
 		CameraRelativeCloudLayerRayMarchData.G =
 			SignedCameraDepthBelowCloudTopMaterialUnits / DiskHeightCompressionFactor;
 		CameraRelativeCloudLayerRayMarchData.A =
 			CameraRelativeCloudLayerRayMarchData.G * DiskHeightRemainderFactor;
-	}
-	else
-	{
-		CameraRelativeCloudLayerRayMarchData.G = SignedCameraDepthBelowCloudTopMaterialUnits;
-		CameraRelativeCloudLayerRayMarchData.A = 0.0f;
-	}
-
-	FLinearColor CameraRelativeRayMarchDistanceLimits = ReferenceRayMarchDistanceLimits;
-	if (!bUseFullScreenProxy)
-	{
 		CameraRelativeRayMarchDistanceLimits.G =
 			ActiveDiskRayMarchDistanceMaterialUnits;
 	}
 
 	float DensityVolumeZSign = 1.0f;
-	const bool bUseReferenceMirrorTransition =
-		VerticalRenderingMode == ECloudSeaVerticalRenderingMode::ReferenceMirrorWithPrefill;
 	if (bUseFullScreenProxy && bUseReferenceMirrorTransition)
 	{
 		const float CloudLayerHeight = -ReferenceCloudLayerRayMarchData.R;
-		const float CameraDepthBelowTop = CameraRelativeCloudLayerRayMarchData.G;
-		const float CameraDepthBelowBase =
-			CameraRelativeCloudLayerRayMarchData.R
-			+ CameraRelativeCloudLayerRayMarchData.G;
-		const bool bCameraBelowLayer = CameraDepthBelowBase > 0.0f;
+		const bool bCameraBelowLayer = CameraDepthBelowCloudBaseMaterialUnits > 0.0f;
 
 		float PrefillCoordinate;
 		if (bCameraBelowLayer)
 		{
 			const float NormalizedDepthBelowBase = FMath::Clamp(
-				CameraDepthBelowBase / CloudLayerHeight,
+				CameraDepthBelowCloudBaseMaterialUnits / CloudLayerHeight,
 				0.0f,
 				1.0f);
 			CameraRelativeRayMarchDistanceLimits.G =
@@ -310,7 +320,7 @@ void UCloudSeaComponent::UpdateMaterialParameters(
 		else
 		{
 			const float NormalizedDepthBelowTop = FMath::Clamp(
-				CameraDepthBelowTop / CloudLayerHeight,
+				CameraDepthBelowCloudTopMaterialUnits / CloudLayerHeight,
 				0.0f,
 				1.0f);
 			CameraRelativeRayMarchDistanceLimits.G =
@@ -324,10 +334,6 @@ void UCloudSeaComponent::UpdateMaterialParameters(
 			1.0f);
 		CameraRelativeCloudLayerRayMarchData.B =
 			FMath::Square(FMath::Square(PrefillBase));
-	}
-	else
-	{
-		CameraRelativeCloudLayerRayMarchData.B = 0.0f;
 	}
 
 	DynamicMaterial->SetVectorParameterValue(
