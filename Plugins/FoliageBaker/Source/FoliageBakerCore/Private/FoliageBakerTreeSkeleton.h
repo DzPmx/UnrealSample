@@ -59,5 +59,6 @@ class FFoliageBakerTreeSkeleton final
 public:
 	static FFoliageBakerTreeSkeletonResult Build(
 		const TArray<FFoliageBakerTreeSkeletonTriangle>& Triangles,
-		const FVector& Pivot);
+		const FVector& Pivot,
+		int32 VoxelResolution = 800);
 };

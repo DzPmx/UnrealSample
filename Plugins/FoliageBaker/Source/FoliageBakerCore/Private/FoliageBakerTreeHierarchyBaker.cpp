@@ -765,7 +765,9 @@ namespace
 				Branch.BranchID = BranchID;
 				Branch.ParentBranchID = SkeletonEdge.ParentBranchID;
 				Branch.Color = FLinearColor(MakeBranchColor(StaticMesh, BranchID));
-				Branch.Label = FString::Printf(TEXT("ID %d"), BranchID);
+				Branch.Label = Branch.ParentBranchID == INDEX_NONE
+					? FString::Printf(TEXT("Branch %d"), BranchID)
+					: FString::Printf(TEXT("Subbranch %d"), BranchID);
 			}
 		}
 		PreviewData->Branches[TrunkPreviewBranchIndex].BoneRecord.BoneID = 0;
@@ -827,6 +829,17 @@ namespace
 			}
 		}
 
+		TArray<int32> PrimaryPreviewBranchIndices;
+		for (int32 PreviewBranchIndex = 0;
+			PreviewBranchIndex < PreviewData->Branches.Num();
+			++PreviewBranchIndex)
+		{
+			const int32 ParentBranchID =
+				PreviewData->Branches[PreviewBranchIndex].ParentBranchID;
+			PrimaryPreviewBranchIndices.Add(ParentBranchID == INDEX_NONE
+				? PreviewBranchIndex
+				: PreviewBranchIndexByID.FindChecked(ParentBranchID));
+		}
 		TArray<TArray<double>> CandidateAreaByComponentAndPreviewBranch;
 		CandidateAreaByComponentAndPreviewBranch.SetNum(
 			WoodTriangleComponents.Num());
@@ -883,6 +896,34 @@ namespace
 		{
 			const TArray<double>& CandidateAreas =
 				CandidateAreaByComponentAndPreviewBranch[ComponentIndex];
+			// Keep a primary branch's votes together before choosing which of
+			// its branches owns the entire component.
+			TArray<double> PrimaryCandidateAreas;
+			PrimaryCandidateAreas.Init(-1.0, PreviewData->Branches.Num());
+			for (int32 PreviewBranchIndex = 0;
+				PreviewBranchIndex < CandidateAreas.Num();
+				++PreviewBranchIndex)
+			{
+				if (CandidateAreas[PreviewBranchIndex] >= 0.0)
+				{
+					double& PrimaryArea = PrimaryCandidateAreas[
+						PrimaryPreviewBranchIndices[PreviewBranchIndex]];
+					PrimaryArea = FMath::Max(PrimaryArea, 0.0)
+						+ CandidateAreas[PreviewBranchIndex];
+				}
+			}
+			int32 OwnerPrimaryPreviewBranchIndex = INDEX_NONE;
+			double OwnerPrimaryArea = -1.0;
+			for (int32 PreviewBranchIndex = 0;
+				PreviewBranchIndex < PrimaryCandidateAreas.Num();
+				++PreviewBranchIndex)
+			{
+				if (PrimaryCandidateAreas[PreviewBranchIndex] > OwnerPrimaryArea)
+				{
+					OwnerPrimaryArea = PrimaryCandidateAreas[PreviewBranchIndex];
+					OwnerPrimaryPreviewBranchIndex = PreviewBranchIndex;
+				}
+			}
 			int32 CandidateCount = 0;
 			int32 OwnerPreviewBranchIndex = INDEX_NONE;
 			double OwnerArea = -1.0;
@@ -896,7 +937,9 @@ namespace
 					continue;
 				}
 				++CandidateCount;
-				if (CandidateArea > OwnerArea)
+				if (PrimaryPreviewBranchIndices[PreviewBranchIndex]
+						== OwnerPrimaryPreviewBranchIndex
+					&& CandidateArea > OwnerArea)
 				{
 					OwnerArea = CandidateArea;
 					OwnerPreviewBranchIndex = PreviewBranchIndex;
@@ -957,6 +1000,23 @@ namespace
 			MixedWoodComponentCount,
 			ReassignedWoodTriangleCount);
 
+		// Parent bone measurements include the geometry moved to its children.
+		// UV ownership remains exclusive to each component's selected branch.
+		TArray<TArray<int32>> BoneTriangleIndicesByPreviewBranchIndex =
+			OwnedTriangleIndicesByPreviewBranchIndex;
+		for (int32 PreviewBranchIndex = 0;
+			PreviewBranchIndex < PreviewData->Branches.Num();
+			++PreviewBranchIndex)
+		{
+			const int32 PrimaryPreviewBranchIndex =
+				PrimaryPreviewBranchIndices[PreviewBranchIndex];
+			if (PrimaryPreviewBranchIndex != PreviewBranchIndex)
+			{
+				BoneTriangleIndicesByPreviewBranchIndex[PrimaryPreviewBranchIndex].Append(
+					OwnedTriangleIndicesByPreviewBranchIndex[PreviewBranchIndex]);
+			}
+		}
+
 		for (int32 PreviewBranchIndex = 0;
 			PreviewBranchIndex < PreviewData->Branches.Num();
 			++PreviewBranchIndex)
@@ -998,7 +1058,7 @@ namespace
 			BuildHierarchyBoneRecord(
 				Triangles,
 				VertexPositions,
-				OwnedTriangleIndicesByPreviewBranchIndex[PreviewBranchIndex],
+				BoneTriangleIndicesByPreviewBranchIndex[PreviewBranchIndex],
 				PivotPosition,
 				Branch.BoneRecord);
 			if (!bTrunk)
@@ -1080,7 +1140,8 @@ FFoliageBakerTreeHierarchyAnalysisResult
 FFoliageBakerTreeHierarchyBaker::Analyze(
 	UStaticMesh& StaticMesh,
 	const int32 SourceLODIndex,
-	const int32 LeafMaterialIndex)
+	const int32 LeafMaterialIndex,
+	const int32 VoxelResolution)
 {
 	FFoliageBakerTreeHierarchyAnalysisResult Result;
 	if (SourceLODIndex < 0
@@ -1200,7 +1261,8 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 	const FFoliageBakerTreeSkeletonResult Skeleton =
 		FFoliageBakerTreeSkeleton::Build(
 			SkeletonTriangles,
-			TreePivot);
+			TreePivot,
+			VoxelResolution);
 	UE_LOG(
 		LogFoliageBakerTreeHierarchy,
 		Display,
@@ -1236,6 +1298,8 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 
 	Result.bSucceeded = true;
 	int32 BoneRecordCount = 0;
+	int32 PrimaryBranchCount = 0;
+	int32 SubbranchCount = 0;
 	int32 ZeroAxisBoneRecordCount = 0;
 	double MaximumAxisExtent = 0.0;
 	double MaximumBehindPivotProjection = 0.0;
@@ -1249,6 +1313,9 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 				continue;
 			}
 			++BoneRecordCount;
+			PrimaryBranchCount += Branch.BranchID != INDEX_NONE
+				&& Branch.ParentBranchID == INDEX_NONE ? 1 : 0;
+			SubbranchCount += Branch.ParentBranchID != INDEX_NONE ? 1 : 0;
 			ZeroAxisBoneRecordCount += Branch.BoneRecord.Axis.IsNearlyZero()
 				? 1
 				: 0;
@@ -1261,11 +1328,13 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 		}
 	}
 	Result.Report = FString::Printf(
-		TEXT("%s\n  analyzed LOD %d wood hierarchy with Leaf Material Section %d excluded: %d branch group(s), %d virtual bone(s), %d trunk/branch axis record(s) (%d zero-axis, maximum %.3f cm axis extent, %.3f cm behind-pivot projection), %d source wood component(s) (median %d, maximum %d triangles). No Leaf Cluster was created and no asset data was written.\n  %s"),
+		TEXT("%s\n  analyzed LOD %d wood hierarchy with Leaf Material Section %d excluded: %d branch group(s) (%d primary, %d subbranch), %d virtual bone(s), %d trunk/branch axis record(s) (%d zero-axis, maximum %.3f cm axis extent, %.3f cm behind-pivot projection), %d source wood component(s) (median %d, maximum %d triangles). Voxel resolution %d. Hierarchy: trunk -> primary branch -> subbranch -> leaf; deeper wood forks remain in the subbranch. No Leaf Cluster was created and no asset data was written.\n  %s"),
 		*StaticMesh.GetName(),
 		SourceLODIndex,
 		LeafMaterialIndex,
 		Result.BranchCount,
+		PrimaryBranchCount,
+		SubbranchCount,
 		Result.PreviewData.IsValid()
 			? Result.PreviewData->SkeletonEdges.Num()
 			: 0,
@@ -1276,6 +1345,7 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 		WoodTriangleComponents.Num(),
 		MedianWoodComponentTriangleCount,
 		MaximumWoodComponentTriangleCount,
+		VoxelResolution,
 		*Skeleton.Report);
 	return Result;
 }

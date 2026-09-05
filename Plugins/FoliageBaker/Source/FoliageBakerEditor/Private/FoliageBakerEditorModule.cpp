@@ -43,7 +43,7 @@
 #include "Widgets/SNullWidget.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
-#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STreeView.h"
 
 #define LOCTEXT_NAMESPACE "FFoliageBakerEditorModule"
 
@@ -291,6 +291,7 @@ void FFoliageBakerEditorModule::ReleaseToolResources()
 	DataBakeLeafUVPreview.Reset();
 	DataBakePreviewData.Reset();
 	DataBakeBranchOptions.Reset();
+	DataBakeBranchChildren.Reset();
 	SelectedDataBakeBranchIDs.Reset();
 	DataBakeBranchList.Reset();
 	DataBakeSettings.Reset();
@@ -609,6 +610,7 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 	DataBakeSettings->SourceStaticMesh = nullptr;
 	DataBakePreviewData.Reset();
 	DataBakeBranchOptions.Reset();
+	DataBakeBranchChildren.Reset();
 	SelectedDataBakeBranchIDs.Reset();
 	DataBakeBranchList.Reset();
 
@@ -769,6 +771,72 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
+				.Padding(0.0f, 10.0f, 0.0f, 0.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("TreeHierarchyVoxelResolutionLabel", "Voxel Resolution"))
+						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+						.TextStyle(FAppStyle::Get(), "SmallText")
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						SNew(SBox)
+						.WidthOverride(88.0f)
+						[
+							SNew(SNumericEntryBox<int32>)
+							.AllowSpin(true)
+							.MinValue(800)
+							.MaxValue(1000)
+							.MinSliderValue(800)
+							.MaxSliderValue(1000)
+							.ToolTipText(LOCTEXT(
+								"TreeHierarchyVoxelResolutionTooltip",
+								"Cells along the longest wood bounds dimension. Higher values increase detail and memory use. Changing this value clears the hierarchy and resolved leaves."))
+							.Value_Lambda(
+								[this]() -> TOptional<int32>
+								{
+									return DataBakeSettings.IsValid()
+										? TOptional<int32>(DataBakeSettings->VoxelResolution)
+										: TOptional<int32>();
+								})
+							.OnValueCommitted_Lambda(
+								[this](
+									const int32 VoxelResolution,
+									const ETextCommit::Type CommitType)
+								{
+									(void)CommitType;
+									EnsureDataBakeSettings();
+									const int32 NewVoxelResolution = FMath::Clamp(
+										VoxelResolution,
+										800,
+										1000);
+									if (DataBakeSettings->VoxelResolution != NewVoxelResolution)
+									{
+										DataBakeSettings->VoxelResolution = NewVoxelResolution;
+										DataBakePreviewData.Reset();
+										RefreshDataBakeBranchOptions();
+										if (DataBakePreview.IsValid())
+										{
+											DataBakePreview->ClearPreview();
+										}
+										if (DataBakeLeafUVPreview.IsValid())
+										{
+											DataBakeLeafUVPreview->SetPreviewData(nullptr);
+										}
+									}
+								})
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
 				.Padding(0.0f, 12.0f, 0.0f, 0.0f)
 				[
 					SNew(SHorizontalBox)
@@ -902,7 +970,7 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 						.Padding(6.0f, 0.0f, 4.0f, 6.0f)
 						[
 							SNew(SBox)
-							.WidthOverride(150.0f)
+							.WidthOverride(200.0f)
 							[
 								SNew(SVerticalBox)
 								+ SVerticalBox::Slot()
@@ -932,8 +1000,19 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 									FoliageBakerToolChrome::MakeRecessedPanel(
 										SAssignNew(
 											DataBakeBranchList,
-											SListView<TSharedPtr<int32>>)
-										.ListItemsSource(&DataBakeBranchOptions)
+											STreeView<TSharedPtr<int32>>)
+										.TreeItemsSource(&DataBakeBranchOptions)
+										.OnGetChildren_Lambda(
+											[this](
+												const TSharedPtr<int32> BranchID,
+												TArray<TSharedPtr<int32>>& OutChildren)
+											{
+												if (BranchID.IsValid()
+													&& DataBakeBranchChildren.Contains(*BranchID))
+												{
+													OutChildren = DataBakeBranchChildren.FindChecked(*BranchID);
+												}
+											})
 										.SelectionMode(ESelectionMode::Multi)
 										.OnGenerateRow_Lambda(
 											[](
@@ -946,11 +1025,13 @@ TSharedRef<SWidget> FFoliageBakerEditorModule::CreateDataBakePanel()
 												[
 													SNew(STextBlock)
 													.Text(BranchID.IsValid()
-														? FText::Format(
+														? (*BranchID == INDEX_NONE
+															? LOCTEXT("TreeHierarchyTrunkOption", "Trunk")
+															: FText::Format(
 															LOCTEXT(
 																"TreeHierarchyBranchOption",
 																"Branch ID {0}"),
-															FText::AsNumber(*BranchID))
+															FText::AsNumber(*BranchID)))
 														: FText::GetEmpty())
 												];
 											})
@@ -1064,7 +1145,8 @@ void FFoliageBakerEditorModule::AnalyzeTreeHierarchy()
 						FFoliageBakerTreeHierarchyBaker::Analyze(
 							StaticMesh,
 							Settings->SourceLODIndex,
-							LeafMaterialIndex);
+							LeafMaterialIndex,
+							Settings->VoxelResolution);
 					if (Result.bSucceeded
 						&& Result.PreviewData.IsValid()
 						&& StaticMesh.GetPathName() == PreviewSourcePath)
@@ -1305,27 +1387,48 @@ void FFoliageBakerEditorModule::HandleDataBakeLeafMaterialChanged(
 void FFoliageBakerEditorModule::RefreshDataBakeBranchOptions()
 {
 	DataBakeBranchOptions.Reset();
+	DataBakeBranchChildren.Reset();
 	SelectedDataBakeBranchIDs.Reset();
 	if (DataBakePreviewData.IsValid())
 	{
 		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
 			DataBakePreviewData->Branches)
 		{
-			if (Branch.BranchID != INDEX_NONE)
+			if (Branch.BranchID == INDEX_NONE)
 			{
 				DataBakeBranchOptions.Add(MakeShared<int32>(Branch.BranchID));
 			}
-		}
-		DataBakeBranchOptions.Sort(
-			[](const TSharedPtr<int32>& First, const TSharedPtr<int32>& Second)
+			else
 			{
-				return *First < *Second;
-			});
+				DataBakeBranchChildren.FindOrAdd(Branch.ParentBranchID).Add(
+					MakeShared<int32>(Branch.BranchID));
+			}
+		}
+		for (TPair<int32, TArray<TSharedPtr<int32>>>& Entry : DataBakeBranchChildren)
+		{
+			Entry.Value.Sort(
+				[](const TSharedPtr<int32>& First, const TSharedPtr<int32>& Second)
+				{
+					return *First < *Second;
+				});
+		}
 	}
 	if (DataBakeBranchList.IsValid())
 	{
 		DataBakeBranchList->ClearSelection();
-		DataBakeBranchList->RequestListRefresh();
+		DataBakeBranchList->ClearExpandedItems();
+		DataBakeBranchList->RequestTreeRefresh();
+		for (const TSharedPtr<int32>& Root : DataBakeBranchOptions)
+		{
+			DataBakeBranchList->SetItemExpansion(Root, true);
+		}
+		for (const TPair<int32, TArray<TSharedPtr<int32>>>& Entry : DataBakeBranchChildren)
+		{
+			for (const TSharedPtr<int32>& Branch : Entry.Value)
+			{
+				DataBakeBranchList->SetItemExpansion(Branch, true);
+			}
+		}
 	}
 	if (DataBakePreview.IsValid())
 	{

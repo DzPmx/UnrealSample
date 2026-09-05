@@ -14,7 +14,7 @@ class UFoliageBakerTreeHierarchySettings;
 struct FToolMenuContext;
 struct FFoliageBakerTreeHierarchyPreviewData;
 template <typename OptionType>
-class SListView;
+class STreeView;
 
 class FFoliageBakerEditorModule final : public IModuleInterface
 {
@@ -58,8 +58,9 @@ private:
 	TSharedPtr<SFoliageBakerLeafUVPreview> DataBakeLeafUVPreview;
 	TSharedPtr<FFoliageBakerTreeHierarchyPreviewData> DataBakePreviewData;
 	TArray<TSharedPtr<int32>> DataBakeBranchOptions;
+	TMap<int32, TArray<TSharedPtr<int32>>> DataBakeBranchChildren;
 	TSet<int32> SelectedDataBakeBranchIDs;
-	TSharedPtr<SListView<TSharedPtr<int32>>> DataBakeBranchList;
+	TSharedPtr<STreeView<TSharedPtr<int32>>> DataBakeBranchList;
 	TSharedPtr<SWidgetSwitcher> WorkflowSwitcher;
 	TSharedPtr<SWidgetSwitcher> FeatureSwitcher;
 	TUniquePtr<FAutoConsoleCommand> DataBakeSetMeshCommand;

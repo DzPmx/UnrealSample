@@ -18,4 +18,7 @@ public:
 
 	UPROPERTY(Transient, EditAnywhere, Category = "Mesh", meta = (ClampMin = "0", ClampMax = "7", DisplayName = "Source LOD Index", ToolTip = "Source Static Mesh LOD used for hierarchy analysis and UV0 leaf ownership resolution."))
 	int32 SourceLODIndex = 0;
+
+	UPROPERTY(Transient, EditAnywhere, Category = "Mesh", meta = (ClampMin = "800", ClampMax = "1000", DisplayName = "Voxel Resolution", ToolTip = "Cells along the longest wood bounds dimension. Used by solidification, GPU skeletonization, and CPU fallback. Higher values increase detail and memory use."))
+	int32 VoxelResolution = 800;
 };

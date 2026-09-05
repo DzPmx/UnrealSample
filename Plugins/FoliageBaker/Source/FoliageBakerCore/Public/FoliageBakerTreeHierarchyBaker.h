@@ -138,7 +138,8 @@ public:
 	static FFoliageBakerTreeHierarchyAnalysisResult Analyze(
 		UStaticMesh& StaticMesh,
 		int32 SourceLODIndex,
-		int32 LeafMaterialIndex);
+		int32 LeafMaterialIndex,
+		int32 VoxelResolution = 800);
 
 	static FFoliageBakerLeafOwnershipResolveResult ResolveLeafOwnership(
 		const UStaticMesh& StaticMesh,

@@ -17,8 +17,6 @@ namespace
 	using UE::Geometry::TImplicitSolidify;
 	using UE::Geometry::TSweepingMeshSDF;
 
-	constexpr int32 TargetVoxelResolution = 800;
-	constexpr int32 CpuFallbackVoxelResolution = 800;
 	constexpr double OccupancyExpansionCellScale = 0.0;
 	constexpr double CoverageRadiusScale = 1.6;
 	constexpr double MinimumExtractedPathCellCount = 4.0;
@@ -777,6 +775,65 @@ namespace
 		}
 	}
 
+	void AssignPrimaryBranch(
+		const int32 StartEdgeIndex,
+		const TArray<TArray<int32>>& OutgoingEdges,
+		const TArray<double>& SubtreeScores,
+		TArray<FFoliageBakerTreeSkeletonEdge>& Edges,
+		int32& NextBranchID)
+	{
+		const int32 PrimaryBranchID = NextBranchID++;
+		int32 EdgeIndex = StartEdgeIndex;
+		while (Edges.IsValidIndex(EdgeIndex) && !Edges[EdgeIndex].bTrunk)
+		{
+			FFoliageBakerTreeSkeletonEdge& Edge = Edges[EdgeIndex];
+			Edge.BranchID = PrimaryBranchID;
+			Edge.ParentBranchID = INDEX_NONE;
+			if (!OutgoingEdges.IsValidIndex(Edge.EndNodeID))
+			{
+				break;
+			}
+			const TArray<int32>& ChildEdges = OutgoingEdges[Edge.EndNodeID];
+			int32 ContinuationEdgeIndex = INDEX_NONE;
+			double BestScore = -1.0;
+			for (const int32 ChildEdgeIndex : ChildEdges)
+			{
+				if (!Edges.IsValidIndex(ChildEdgeIndex) || Edges[ChildEdgeIndex].bTrunk)
+				{
+					continue;
+				}
+				const FFoliageBakerTreeSkeletonEdge& ChildEdge = Edges[ChildEdgeIndex];
+				const double Score = PolylineLength(ChildEdge.Polyline)
+					* FMath::Square(FMath::Max(ChildEdge.Radius, 1.0))
+					+ (SubtreeScores.IsValidIndex(ChildEdge.EndNodeID)
+						? SubtreeScores[ChildEdge.EndNodeID]
+						: 0.0);
+				if (Score > BestScore)
+				{
+					BestScore = Score;
+					ContinuationEdgeIndex = ChildEdgeIndex;
+				}
+			}
+			for (const int32 ChildEdgeIndex : ChildEdges)
+			{
+				if (!Edges.IsValidIndex(ChildEdgeIndex)
+					|| Edges[ChildEdgeIndex].bTrunk
+					|| ChildEdgeIndex == ContinuationEdgeIndex)
+				{
+					continue;
+				}
+				// Deeper forks stay in this subbranch so leaves remain at level four.
+				AssignBranchSubtree(
+					ChildEdgeIndex,
+					NextBranchID++,
+					PrimaryBranchID,
+					OutgoingEdges,
+					Edges);
+			}
+			EdgeIndex = ContinuationEdgeIndex;
+		}
+	}
+
 	double MeasureSourceRadius(
 		const FVector& Position,
 		const TMeshAABBTree3<FDynamicMesh3>& SourceSpatial,
@@ -961,12 +1018,12 @@ namespace
 				{
 					continue;
 				}
-				AssignBranchSubtree(
+				AssignPrimaryBranch(
 					EdgeIndex,
-					NextBranchID++,
-					INDEX_NONE,
 					OutgoingEdges,
-					Result.Edges);
+					SubtreeScores,
+					Result.Edges,
+					NextBranchID);
 			}
 		}
 		if (OutgoingEdges.IsValidIndex(Result.RootNodeID))
@@ -978,12 +1035,12 @@ namespace
 				{
 					continue;
 				}
-				AssignBranchSubtree(
+				AssignPrimaryBranch(
 					EdgeIndex,
-					NextBranchID++,
-					INDEX_NONE,
 					OutgoingEdges,
-					Result.Edges);
+					SubtreeScores,
+					Result.Edges,
+					NextBranchID);
 			}
 		}
 
@@ -1498,7 +1555,8 @@ namespace
 
 FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 	const TArray<FFoliageBakerTreeSkeletonTriangle>& Triangles,
-	const FVector& Pivot)
+	const FVector& Pivot,
+	const int32 VoxelResolution)
 {
 	FFoliageBakerTreeSkeletonResult Result;
 	if (Triangles.IsEmpty())
@@ -1535,7 +1593,7 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 	}
 
 	const FAxisAlignedBox3d SourceBounds = SourceMesh.GetBounds();
-	const double CellSize = SourceBounds.MaxDim() / CpuFallbackVoxelResolution;
+	const double CellSize = SourceBounds.MaxDim() / VoxelResolution;
 	if (!FMath::IsFinite(CellSize) || CellSize <= UE_DOUBLE_SMALL_NUMBER)
 	{
 		Result.Report = TEXT("Wood bounds cannot define a finite voxel size.");
@@ -1578,7 +1636,7 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 			SolidTriangles,
 			FBox(FVector(SourceBounds.Min), FVector(SourceBounds.Max)),
 			Pivot,
-			TargetVoxelResolution);
+			VoxelResolution);
 	if (GpuSkeleton.bSucceeded
 		&& BuildSparseGpuSkeletonGraph(
 			GpuSkeleton,
