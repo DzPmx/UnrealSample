@@ -139,7 +139,8 @@ public:
 		UStaticMesh& StaticMesh,
 		int32 SourceLODIndex,
 		int32 LeafMaterialIndex,
-		int32 VoxelResolution = 800);
+		int32 VoxelResolution = 800,
+		bool bGenerateSubbranches = true);
 
 	static FFoliageBakerLeafOwnershipResolveResult ResolveLeafOwnership(
 		const UStaticMesh& StaticMesh,

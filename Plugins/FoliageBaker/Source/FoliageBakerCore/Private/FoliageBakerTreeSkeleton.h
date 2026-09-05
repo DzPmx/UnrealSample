@@ -60,5 +60,6 @@ public:
 	static FFoliageBakerTreeSkeletonResult Build(
 		const TArray<FFoliageBakerTreeSkeletonTriangle>& Triangles,
 		const FVector& Pivot,
-		int32 VoxelResolution = 800);
+		int32 VoxelResolution = 800,
+		bool bGenerateSubbranches = true);
 };

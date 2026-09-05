@@ -512,7 +512,10 @@ public:
 		for (const FFoliageBakerTreeHierarchyPreviewBranch& Branch :
 			PreviewData->Branches)
 		{
-			if (Branch.Label.IsEmpty())
+			if (Branch.Label.IsEmpty()
+				|| (!HighlightedBranchIDs.IsEmpty()
+					&& Branch.BranchID != INDEX_NONE
+					&& !HighlightedBranchIDs.Contains(Branch.BranchID)))
 			{
 				continue;
 			}

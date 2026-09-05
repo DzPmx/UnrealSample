@@ -850,7 +850,8 @@ namespace
 
 	int32 ApplyTreeSemantics(
 		const FVector& Pivot,
-		FFoliageBakerTreeSkeletonResult& Result)
+		FFoliageBakerTreeSkeletonResult& Result,
+		const bool bGenerateSubbranches)
 	{
 		TArray<TArray<int32>> OutgoingEdges;
 		OutgoingEdges.SetNum(Result.Nodes.Num());
@@ -1018,12 +1019,24 @@ namespace
 				{
 					continue;
 				}
-				AssignPrimaryBranch(
-					EdgeIndex,
-					OutgoingEdges,
-					SubtreeScores,
-					Result.Edges,
-					NextBranchID);
+				if (bGenerateSubbranches)
+				{
+					AssignPrimaryBranch(
+						EdgeIndex,
+						OutgoingEdges,
+						SubtreeScores,
+						Result.Edges,
+						NextBranchID);
+				}
+				else
+				{
+					AssignBranchSubtree(
+						EdgeIndex,
+						NextBranchID++,
+						INDEX_NONE,
+						OutgoingEdges,
+						Result.Edges);
+				}
 			}
 		}
 		if (OutgoingEdges.IsValidIndex(Result.RootNodeID))
@@ -1035,12 +1048,24 @@ namespace
 				{
 					continue;
 				}
-				AssignPrimaryBranch(
-					EdgeIndex,
-					OutgoingEdges,
-					SubtreeScores,
-					Result.Edges,
-					NextBranchID);
+				if (bGenerateSubbranches)
+				{
+					AssignPrimaryBranch(
+						EdgeIndex,
+						OutgoingEdges,
+						SubtreeScores,
+						Result.Edges,
+						NextBranchID);
+				}
+				else
+				{
+					AssignBranchSubtree(
+						EdgeIndex,
+						NextBranchID++,
+						INDEX_NONE,
+						OutgoingEdges,
+						Result.Edges);
+				}
 			}
 		}
 
@@ -1556,7 +1581,8 @@ namespace
 FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 	const TArray<FFoliageBakerTreeSkeletonTriangle>& Triangles,
 	const FVector& Pivot,
-	const int32 VoxelResolution)
+	const int32 VoxelResolution,
+	const bool bGenerateSubbranches)
 {
 	FFoliageBakerTreeSkeletonResult Result;
 	if (Triangles.IsEmpty())
@@ -1682,7 +1708,10 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 			}
 		}
 
-		const int32 BranchCount = ApplyTreeSemantics(Pivot, Result);
+		const int32 BranchCount = ApplyTreeSemantics(
+			Pivot,
+			Result,
+			bGenerateSubbranches);
 		Result.bSucceeded = !Result.Nodes.IsEmpty() && !Result.Edges.IsEmpty();
 		Result.Report = FString::Printf(
 			TEXT("%s %d node(s), %d edge(s), %d branch group(s), %d uncovered wood triangle(s), %.2f maximum wood coverage ratio."),
@@ -2295,7 +2324,10 @@ FFoliageBakerTreeSkeletonResult FFoliageBakerTreeSkeleton::Build(
 			Result.Nodes[Edge.EndNodeID].ParentNodeID = StartNodeID;
 		}
 	}
-	const int32 BranchCount = ApplyTreeSemantics(Pivot, Result);
+	const int32 BranchCount = ApplyTreeSemantics(
+		Pivot,
+		Result,
+		bGenerateSubbranches);
 
 	for (const FFoliageBakerTreeSkeletonTriangle& Triangle : Triangles)
 	{

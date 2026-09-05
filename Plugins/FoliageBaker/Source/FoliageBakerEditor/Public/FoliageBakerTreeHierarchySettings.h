@@ -7,12 +7,23 @@
 
 class UStaticMesh;
 
-UCLASS(Transient, PrioritizeCategories = ("Mesh"), meta = (DisplayName = "Data Bake"))
+UENUM()
+enum class EFoliageBakerPivotHierarchy : uint8
+{
+	ThreeLevels UMETA(DisplayName = "3 Levels (Trunk / Branch / Leaf)"),
+	FourLevels UMETA(DisplayName = "4 Levels (Trunk / Branch / Subbranch / Leaf)")
+};
+
+UCLASS(config = EditorPerProjectUserSettings, Transient, PrioritizeCategories = ("Hierarchy", "Mesh"), meta = (DisplayName = "Foliage Baker - Data Bake"))
 class FOLIAGEBAKEREDITOR_API UFoliageBakerTreeHierarchySettings final : public UObject
 {
 	GENERATED_BODY()
 
 public:
+	UPROPERTY(config, EditAnywhere, Category = "Hierarchy", meta = (DisplayName = "Pivot Hierarchy", ToolTip = "Select whether Analyze Hierarchy groups all non-trunk descendants into one Branch level, or separates one Subbranch level before Leaf bones. The setting is applied the next time Analyze Hierarchy runs."))
+	EFoliageBakerPivotHierarchy PivotHierarchy =
+		EFoliageBakerPivotHierarchy::FourLevels;
+
 	UPROPERTY(Transient, EditAnywhere, Category = "Mesh", meta = (DisplayName = "Source Static Mesh", ToolTip = "The single Static Mesh whose selected source LOD is analyzed and edited in Data Bake."))
 	TObjectPtr<UStaticMesh> SourceStaticMesh;
 

@@ -1141,7 +1141,8 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 	UStaticMesh& StaticMesh,
 	const int32 SourceLODIndex,
 	const int32 LeafMaterialIndex,
-	const int32 VoxelResolution)
+	const int32 VoxelResolution,
+	const bool bGenerateSubbranches)
 {
 	FFoliageBakerTreeHierarchyAnalysisResult Result;
 	if (SourceLODIndex < 0
@@ -1262,7 +1263,8 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 		FFoliageBakerTreeSkeleton::Build(
 			SkeletonTriangles,
 			TreePivot,
-			VoxelResolution);
+			VoxelResolution,
+			bGenerateSubbranches);
 	UE_LOG(
 		LogFoliageBakerTreeHierarchy,
 		Display,
@@ -1327,8 +1329,11 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 				FMath::Max(-Branch.BoneRecord.MinimumAxisProjection, 0.0));
 		}
 	}
+	const FString HierarchyDescription = bGenerateSubbranches
+		? TEXT("trunk -> primary branch -> subbranch -> leaf; deeper wood forks remain in the subbranch")
+		: TEXT("trunk -> branch -> leaf; every non-trunk descendant remains in its trunk-attached branch");
 	Result.Report = FString::Printf(
-		TEXT("%s\n  analyzed LOD %d wood hierarchy with Leaf Material Section %d excluded: %d branch group(s) (%d primary, %d subbranch), %d virtual bone(s), %d trunk/branch axis record(s) (%d zero-axis, maximum %.3f cm axis extent, %.3f cm behind-pivot projection), %d source wood component(s) (median %d, maximum %d triangles). Voxel resolution %d. Hierarchy: trunk -> primary branch -> subbranch -> leaf; deeper wood forks remain in the subbranch. No Leaf Cluster was created and no asset data was written.\n  %s"),
+		TEXT("%s\n  analyzed LOD %d wood hierarchy with Leaf Material Section %d excluded: %d branch group(s) (%d primary, %d subbranch), %d virtual bone(s), %d trunk/branch axis record(s) (%d zero-axis, maximum %.3f cm axis extent, %.3f cm behind-pivot projection), %d source wood component(s) (median %d, maximum %d triangles). Voxel resolution %d. Hierarchy: %s. No Leaf Cluster was created and no asset data was written.\n  %s"),
 		*StaticMesh.GetName(),
 		SourceLODIndex,
 		LeafMaterialIndex,
@@ -1346,6 +1351,7 @@ FFoliageBakerTreeHierarchyBaker::Analyze(
 		MedianWoodComponentTriangleCount,
 		MaximumWoodComponentTriangleCount,
 		VoxelResolution,
+		*HierarchyDescription,
 		*Skeleton.Report);
 	return Result;
 }
