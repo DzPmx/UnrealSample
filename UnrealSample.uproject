@@ -32,6 +32,10 @@
 		{
 			"Name": "CloudSea",
 			"Enabled": true
+		},
+		{
+			"Name": "VibeUE",
+			"Enabled": true
 		}
 	]
 }
