@@ -408,11 +408,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					}
 					Context.AtlasCoverage[AtlasPixelIndex] = true;
 
-					if (Policy.bCaptureSourceTriangleIdAndDepth)
-					{
-						Context.OutResult.SourceTriangleIdAndDepthPixels[AtlasPixelIndex] =
-							TileResult.SourceTriangleIdAndDepth[TilePixelIndex];
-					}
 					if (Policy.OutputSelection.bNormalAtlas)
 					{
 						FColor Normal = TileResult.ObjectSpaceNormal[TilePixelIndex];
@@ -549,12 +544,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		if (Policy.OutputSelection.bMix)
 		{
 			OutResult.MixPixels.Init(FColor(255, 128, 0, 0), AtlasPixelCount);
-		}
-		if (Policy.bCaptureSourceTriangleIdAndDepth)
-		{
-			OutResult.SourceTriangleIdAndDepthPixels.Init(
-				FColor::Black,
-				AtlasPixelCount);
 		}
 
 		int64 PackedPaddedTilePixels = 0;
@@ -716,7 +705,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		CropPolicy.OutputSelection.bNormalAtlas = false;
 		CropPolicy.OutputSelection.bMix = false;
 		CropPolicy.OutputSelection.bMaterialScalarAverages = false;
-		CropPolicy.bCaptureSourceTriangleIdAndDepth = false;
 		CropPolicy.DiagnosticName =
 			GetDiagnosticName(Policy) + TEXT(" target-density alpha crop prepass");
 

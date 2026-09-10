@@ -1,6 +1,5 @@
 #include "FoliageBakerCardAtlas.h"
 
-#include "FoliageBakerAtlasTools.h"
 #include "StaticMeshAttributes.h"
 
 namespace UE::FoliageBaker::Cards::Atlas
@@ -126,7 +125,6 @@ namespace UE::FoliageBaker::Cards::Atlas
 		TArray<FColor>& ColorAtlasPixels,
 		TArray<FColor>& NormalPixels,
 		TArray<FColor>& MixPixels,
-		TArray<FColor>& SourceTriangleIdAndDepthPixels,
 		ProjectedAtlasBake::FStats& InOutStats,
 		const EOuterCropMode CropMode,
 		FString& OutError)
@@ -284,7 +282,6 @@ namespace UE::FoliageBaker::Cards::Atlas
 		TArray<FColor> CroppedColorAtlasPixels;
 		TArray<FColor> CroppedNormalPixels;
 		TArray<FColor> CroppedMixPixels;
-		TArray<FColor> CroppedSourceTriangleIdAndDepthPixels;
 		if (!BuildCroppedPixels(
 				ColorAtlasPixels,
 				FColor::Transparent,
@@ -296,11 +293,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 			|| !BuildCroppedPixels(
 				MixPixels,
 				FColor(255, 128, 0, 0),
-				CroppedMixPixels)
-			|| !BuildCroppedPixels(
-				SourceTriangleIdAndDepthPixels,
-				FColor::Black,
-				CroppedSourceTriangleIdAndDepthPixels))
+				CroppedMixPixels))
 		{
 			OutError = TEXT("Atlas pixel count did not match the atlas dimensions during outer-space cropping.");
 			return false;
@@ -365,7 +358,6 @@ namespace UE::FoliageBaker::Cards::Atlas
 		ColorAtlasPixels = MoveTemp(CroppedColorAtlasPixels);
 		NormalPixels = MoveTemp(CroppedNormalPixels);
 		MixPixels = MoveTemp(CroppedMixPixels);
-		SourceTriangleIdAndDepthPixels = MoveTemp(CroppedSourceTriangleIdAndDepthPixels);
 		InOutStats.Width = NewWidth;
 		InOutStats.Height = NewHeight;
 
@@ -386,63 +378,6 @@ namespace UE::FoliageBaker::Cards::Atlas
 			? 100.0 * static_cast<double>(PackedPaddedTilePixels) / static_cast<double>(NewAtlasPixelCount)
 			: 0.0;
 		SynchronizeGeometryStats();
-		return true;
-	}
-
-	bool ResizeTileIsolated(
-		const TArray<FColor>& SourcePixels,
-		const ProjectedAtlasBake::FStats& SourceStats,
-		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& SourcePlaneInfos,
-		const int32 RequestedMaximumDimension,
-		const FColor BackgroundColor,
-		TArray<FColor>& OutPixels,
-		ProjectedAtlasBake::FStats& OutStats,
-		TArray<PlaneCover::FPlaneProxyPlaneInfo>& OutPlaneInfos,
-		FString& OutError)
-	{
-		int32 OutputWidth = 0;
-		int32 OutputHeight = 0;
-		if (!UE::FoliageBaker::Atlas::ResizeTileIsolated(
-				SourcePixels,
-				SourceStats.Width,
-				SourceStats.Height,
-				SourcePlaneInfos,
-				FMath::Clamp(RequestedMaximumDimension, 64, 1024),
-				BackgroundColor,
-				OutPixels,
-				OutputWidth,
-				OutputHeight,
-				OutPlaneInfos,
-				OutError))
-		{
-			return false;
-		}
-
-		OutStats = SourceStats;
-		OutStats.Width = OutputWidth;
-		OutStats.Height = OutputHeight;
-		OutStats.TileResolution = FMath::Max(
-			1,
-			FMath::RoundToInt(
-				SourceStats.TileResolution
-					* FMath::Min(
-						static_cast<double>(OutputWidth) / SourceStats.Width,
-						static_cast<double>(OutputHeight) / SourceStats.Height)));
-		int64 PackedTilePixels = 0;
-		for (const PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : OutPlaneInfos)
-		{
-			PackedTilePixels += static_cast<int64>(PlaneInfo.AtlasTileSize.X)
-				* PlaneInfo.AtlasTileSize.Y;
-			if (PlaneInfo.bHasBackFaceAtlas)
-			{
-				PackedTilePixels += static_cast<int64>(PlaneInfo.BackAtlasTileSize.X)
-					* PlaneInfo.BackAtlasTileSize.Y;
-			}
-		}
-		const int64 TargetPixelCount = static_cast<int64>(OutputWidth) * OutputHeight;
-		OutStats.PackedTileUtilizationPercent = TargetPixelCount > 0
-			? 100.0 * static_cast<double>(PackedTilePixels) / static_cast<double>(TargetPixelCount)
-			: 0.0;
 		return true;
 	}
 }

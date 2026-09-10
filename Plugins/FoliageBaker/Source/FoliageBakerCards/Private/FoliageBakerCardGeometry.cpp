@@ -297,7 +297,7 @@ namespace UE::FoliageBaker::Cards::Geometry
 		}
 
 		// Runtime UV payloads are derived from a copy so capture metadata remains
-		// stable for atlas tiles, mip generation, and L1 visibility reconstruction.
+		// stable for atlas tiles and mip generation.
 		TArray<PlaneCover::FPlaneProxyPlaneInfo> OutputPlaneInfos = CaptureGeometry.PlaneInfos;
 		for (int32 PlaneIndex = 0; PlaneIndex < OutputPlaneInfos.Num(); ++PlaneIndex)
 		{

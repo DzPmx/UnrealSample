@@ -29,21 +29,6 @@ namespace
 			const UFoliageBakerBillboardSettings& BillboardModeSettings =
 				*CastChecked<UFoliageBakerBillboardSettings>(
 					&ToolSettings);
-			if (ToolSettings.bBakeUpperHemisphereL1Visibility)
-			{
-				switch (ToolSettings.BillboardMode)
-				{
-				case EFoliageBakerBillboardMode::SinglePlane:
-					return BillboardModeSettings.SinglePlaneL1VisibilityMaterialInstanceTemplate;
-				case EFoliageBakerBillboardMode::SinglePlaneTwoViews:
-					return BillboardModeSettings.SinglePlaneTwoViewsL1VisibilityMaterialInstanceTemplate;
-				case EFoliageBakerBillboardMode::DoublePlanes:
-					return BillboardModeSettings.DoublePlanesL1VisibilityMaterialInstanceTemplate;
-				default:
-					checkNoEntry();
-					return TSoftObjectPtr<UMaterialInstanceConstant>();
-				}
-			}
 			if (ToolSettings.BillboardMode
 				== EFoliageBakerBillboardMode::SinglePlaneTwoViews)
 			{
@@ -93,20 +78,9 @@ namespace
 			Settings.bOverrideBakeStaticSwitch;
 		Request.BakeStaticSwitchOverrides =
 			Settings.BakeStaticSwitchOverrides;
-		Request.bBakeUpperHemisphereL1Visibility =
-			IsBillboardMode(Settings.Mode)
-			&& Settings.bBakeUpperHemisphereL1Visibility;
-		Request.UpperHemisphereL1TextureResolution =
-			Settings.UpperHemisphereL1TextureResolution;
-		Request.UpperHemisphereL1SampleCount =
-			Settings.UpperHemisphereL1SampleCount;
-		Request.UpperHemisphereL1ShadowMapResolution =
-			Settings.UpperHemisphereL1ShadowMapResolution;
 		Request.ColorAtlasTextureParameterName = Settings.ColorAtlasTextureParameterName;
 		Request.NormalClassificationTextureParameterName = Settings.NormalClassificationTextureParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;
-		Request.UpperHemisphereL1VisibilityTextureParameterName =
-			Settings.UpperHemisphereL1VisibilityTextureParameterName;
 		Request.LeafRoughnessParameterName = Settings.LeafRoughnessParameterName;
 		Request.LeafSpecularParameterName = Settings.LeafSpecularParameterName;
 		Request.TrunkRoughnessParameterName = Settings.TrunkRoughnessParameterName;
@@ -119,8 +93,6 @@ namespace
 		Request.BaseColorClassificationTextureSuffix = Settings.BaseColorClassificationTextureSuffix;
 		Request.NormalClassificationTextureSuffix = Settings.NormalClassificationTextureSuffix;
 		Request.MixTextureSuffix = Settings.MixTextureSuffix;
-		Request.UpperHemisphereL1VisibilityTextureSuffix =
-			Settings.UpperHemisphereL1VisibilityTextureSuffix;
 		Request.MaterialInstanceNamePrefix = Settings.MaterialInstanceNamePrefix;
 		Request.MaterialInstanceNameSuffix = Settings.MaterialInstanceNameSuffix;
 		return Request;
@@ -260,9 +232,7 @@ bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 			&& bHasLeafKeyword,
 		Settings->bBakeBaseColorClassification
 			|| Settings->bBakeNormalClassification
-			|| Settings->bBakeMix
-			|| (IsBillboardMode(Mode)
-				&& Settings->bBakeUpperHemisphereL1Visibility),
+			|| Settings->bBakeMix,
 		Settings->SourceStaticMeshes);
 }
 

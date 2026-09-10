@@ -77,7 +77,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		ENormalAlphaMode NormalAlphaMode = ENormalAlphaMode::TrunkLeafClassification;
 		EInvalidMaterialPolicy InvalidMaterialPolicy = EInvalidMaterialPolicy::Fail;
 		bool bConvertNormalsToCaptureFrame = false;
-		bool bCaptureSourceTriangleIdAndDepth = false;
 		bool bIncludeCrackReductionForTrunkCards = true;
 		FString DiagnosticName = TEXT("Projected atlas");
 		FString MaterialAlphaPolicyDetails;
@@ -88,7 +87,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		TArray<FColor> ColorAtlasPixels;
 		TArray<FColor> NormalPixels;
 		TArray<FColor> MixPixels;
-		TArray<FColor> SourceTriangleIdAndDepthPixels;
 		FStats Stats;
 	};
 

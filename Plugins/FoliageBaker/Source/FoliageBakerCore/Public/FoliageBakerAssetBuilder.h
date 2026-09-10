@@ -137,12 +137,6 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerPlaneAtlasTextureAssetParams
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 {
-	struct FTextureParameterValue
-	{
-		FName ParameterName = NAME_None;
-		TObjectPtr<UTexture2D> Texture;
-	};
-
 	struct FVectorParameterValue
 	{
 		FName ParameterName = NAME_None;
@@ -164,11 +158,9 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerMaterialInstanceAssetParams
 	FName ColorAtlasTextureParameterName = NAME_None;
 	FName NormalAtlasTextureParameterName = NAME_None;
 	FName MixTextureParameterName = NAME_None;
-	TArray<FTextureParameterValue> AdditionalTextureParameterValues;
 	TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue> ScalarParameterValues;
 	TArray<FVectorParameterValue> VectorParameterValues;
 	TArray<FStaticSwitchParameterValue> StaticSwitchParameterValues;
-	TArray<FName> OwnedTextureParameterNames;
 	TArray<FName> OwnedScalarParameterNames;
 	TOptional<bool> TwoSidedOverride;
 };

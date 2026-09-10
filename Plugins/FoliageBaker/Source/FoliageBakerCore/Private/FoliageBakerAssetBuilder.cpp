@@ -124,11 +124,6 @@ namespace
 		AddOwnedParameterName(Result.Texture, Params.ColorAtlasTextureParameterName);
 		AddOwnedParameterName(Result.Texture, Params.NormalAtlasTextureParameterName);
 		AddOwnedParameterName(Result.Texture, Params.MixTextureParameterName);
-		for (const FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue& Parameter :
-			Params.AdditionalTextureParameterValues)
-		{
-			AddOwnedParameterName(Result.Texture, Parameter.ParameterName);
-		}
 		for (const UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue& Parameter :
 			Params.ScalarParameterValues)
 		{
@@ -144,7 +139,6 @@ namespace
 		{
 			AddOwnedParameterName(Result.StaticSwitch, Parameter.ParameterName);
 		}
-		AddOwnedParameterNames(Result.Texture, Params.OwnedTextureParameterNames);
 		AddOwnedParameterNames(Result.Scalar, Params.OwnedScalarParameterNames);
 		return Result;
 	}
@@ -2543,16 +2537,6 @@ TStrongObjectPtr<UMaterialInstanceConstant>
 		MaterialInstance->SetTextureParameterValueEditorOnly(
 			FMaterialParameterInfo(Params.MixTextureParameterName),
 			MixTexture.Get());
-	}
-	for (const FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue& TextureParameter
-		: Params.AdditionalTextureParameterValues)
-	{
-		if (!TextureParameter.ParameterName.IsNone() && TextureParameter.Texture)
-		{
-			MaterialInstance->SetTextureParameterValueEditorOnly(
-				FMaterialParameterInfo(TextureParameter.ParameterName),
-				TextureParameter.Texture.Get());
-		}
 	}
 	for (const UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue& ScalarParameter
 		: Params.ScalarParameterValues)

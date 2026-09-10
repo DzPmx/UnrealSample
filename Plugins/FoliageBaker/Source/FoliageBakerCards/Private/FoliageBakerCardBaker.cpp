@@ -4,7 +4,6 @@
 #include "FoliageBakerAtlasTools.h"
 #include "FoliageBakerCardAtlas.h"
 #include "FoliageBakerCardGeometry.h"
-#include "FoliageBakerL1Visibility.h"
 #include "FoliageBakerMaterialResolver.h"
 #include "FoliageBakerMultiBillboardLayout.h"
 #include "FoliageBakerPlaneCover.h"
@@ -160,15 +159,13 @@ namespace
 
 	UE::FoliageBaker::ProjectedAtlasBake::FPolicy BuildCardAtlasPolicy(
 		const FAtlasOutputSelection& OutputSelection,
-		const bool bConvertNormalsToCaptureFrame,
-		const bool bCaptureSourceDepth)
+		const bool bConvertNormalsToCaptureFrame)
 	{
 		UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy;
 		Policy.OutputSelection = OutputSelection;
 		Policy.NormalAlphaMode =
 			UE::FoliageBaker::ProjectedAtlasBake::ENormalAlphaMode::TrunkLeafClassification;
 		Policy.bConvertNormalsToCaptureFrame = bConvertNormalsToCaptureFrame;
-		Policy.bCaptureSourceTriangleIdAndDepth = bCaptureSourceDepth;
 		Policy.DiagnosticName = TEXT("Card atlas");
 		Policy.MaterialAlphaPolicyDetails =
 			TEXT("\n    card BaseColor/source-triangle-id/normal/Mix=per-tile source masked shader with shared GPU depth; all materials compete in one depth buffer; no CPU material-property fallback");
@@ -186,11 +183,9 @@ namespace
 		const UE::FoliageBaker::PlaneCover::FPlaneProxySettings& Settings,
 		const FAtlasOutputSelection& OutputSelection,
 		const bool bConvertNormalsToCaptureFrame,
-		const bool bCaptureSourceDepth,
 		TArray<FColor>& OutPixels,
 		TArray<FColor>& OutNormalPixels,
 		TArray<FColor>& OutMixPixels,
-		TArray<FColor>& OutSourceTriangleIdAndDepth,
 		FAtlasBakeStats& OutStats,
 		FString& OutError)
 	{
@@ -206,8 +201,7 @@ namespace
 		const UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy =
 			BuildCardAtlasPolicy(
 				OutputSelection,
-				bConvertNormalsToCaptureFrame,
-				bCaptureSourceDepth);
+				bConvertNormalsToCaptureFrame);
 
 		UE::FoliageBaker::ProjectedAtlasBake::FResult Result;
 		if (!UE::FoliageBaker::ProjectedAtlasBake::Bake(
@@ -222,8 +216,6 @@ namespace
 		OutPixels = MoveTemp(Result.ColorAtlasPixels);
 		OutNormalPixels = MoveTemp(Result.NormalPixels);
 		OutMixPixels = MoveTemp(Result.MixPixels);
-		OutSourceTriangleIdAndDepth =
-			MoveTemp(Result.SourceTriangleIdAndDepthPixels);
 		OutStats = MoveTemp(Result.Stats);
 		return true;
 	}
@@ -349,40 +341,6 @@ namespace
 			OutError);
 	}
 
-	TStrongObjectPtr<UTexture2D> CreateUpperHemisphereL1VisibilityTextureAsset(
-		const UStaticMesh& SourceStaticMesh,
-		FFoliageBakerAssetTransaction& AssetTransaction,
-		const FFoliageBakerCardBakeRequest& EditorSettings,
-		const FString& OutputPackagePathOverride,
-		const FFoliageBakerExistingAssetDecision& AssetDecision,
-		const TArray<FColor>& Pixels,
-		const FAtlasBakeStats& AtlasStats,
-		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		FString& OutError)
-	{
-		FFoliageBakerPlaneAtlasTextureAssetParams Request =
-			MakeCardAtlasTextureAssetRequest(
-				EditorSettings,
-				OutputPackagePathOverride,
-				EditorSettings.UpperHemisphereL1VisibilityTextureSuffix,
-				AssetDecision);
-		Request.MipBackgroundColor = FColor(128, 128, 128, 255);
-		Request.LODGroup = TEXTUREGROUP_WorldSpecular;
-		Request.bSRGB = false;
-		Request.bFillMipPaddingAlpha = true;
-		Request.EmptyPixelsError =
-			TEXT("No upper-hemisphere L1 visibility pixels were generated.");
-		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
-			SourceStaticMesh,
-			AssetTransaction,
-			Request,
-			Pixels,
-			AtlasStats.Width,
-			AtlasStats.Height,
-			PlaneInfos,
-			OutError);
-	}
-
 	const TCHAR* GetMeshOutputModeText(const EFoliageBakerMeshAssetOutputMode OutputMode)
 	{
 		switch (OutputMode)
@@ -411,7 +369,7 @@ namespace
 
 	struct FProxyMeshBuildData : FFoliageBakerProxyGeometry
 	{
-		// The inherited geometry stays in capture space through atlas and L1 baking.
+		// The inherited geometry stays in capture space through atlas baking.
 		TArray<int32> MultiBillboardPlaneGroupIndices;
 		// Runtime-only UV payloads and retained trunk geometry live in this copy.
 		FMeshDescription OutputMeshDescription;
@@ -428,12 +386,7 @@ namespace
 		TArray<FColor> AtlasPixels;
 		TArray<FColor> NormalAtlasPixels;
 		TArray<FColor> MixAtlasPixels;
-		TArray<FColor> SourceTriangleIdAndDepthPixels;
-		TArray<FColor> UpperHemisphereL1VisibilityPixels;
 		FAtlasBakeStats AtlasStats;
-		FAtlasBakeStats UpperHemisphereL1VisibilityStats;
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>
-			UpperHemisphereL1VisibilityPlaneInfos;
 	};
 
 	struct FProxyMaterialRecipe
@@ -448,7 +401,6 @@ namespace
 		TStrongObjectPtr<UTexture2D> AtlasTexture;
 		TStrongObjectPtr<UTexture2D> NormalAtlasTexture;
 		TStrongObjectPtr<UTexture2D> MixAtlasTexture;
-		TStrongObjectPtr<UTexture2D> UpperHemisphereL1VisibilityTexture;
 		TStrongObjectPtr<UMaterialInstanceConstant> Material;
 	};
 
@@ -497,7 +449,6 @@ namespace
 		TStrongObjectPtr<UTexture2D> AtlasTexture;
 		TStrongObjectPtr<UTexture2D> NormalAtlasTexture;
 		TStrongObjectPtr<UTexture2D> MixAtlasTexture;
-		TStrongObjectPtr<UTexture2D> UpperHemisphereL1VisibilityTexture;
 		TStrongObjectPtr<UMaterialInstanceConstant> Material;
 	};
 
@@ -597,15 +548,6 @@ namespace
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
 				Settings.MixTextureSuffix,
-				EFoliageBakerGeneratedAssetLocation::Texture});
-		}
-		if (Settings.bBakeUpperHemisphereL1Visibility)
-		{
-			Result.GeneratedAssets.Add({
-				TEXT("Upper Hemisphere L1 Visibility"),
-				Settings.TextureOutputFolderName,
-				Settings.TextureNamePrefix,
-				Settings.UpperHemisphereL1VisibilityTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
 		Result.GeneratedAssets.Add({
@@ -1001,10 +943,9 @@ namespace
 		FString& OutError)
 	{
 		OutData.OutputSelection = BuildAtlasOutputSelection(EditorSettings);
-		if (!OutData.OutputSelection.HasAnyOutput()
-			&& !EditorSettings.bBakeUpperHemisphereL1Visibility)
+		if (!OutData.OutputSelection.HasAnyOutput())
 		{
-			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Classification, Normal/Classification, Mix, or Upper Hemisphere L1 Visibility.");
+			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Classification, Normal/Classification, or Mix.");
 			return false;
 		}
 		auto BakeFeatureAtlas = [
@@ -1013,11 +954,9 @@ namespace
 			&MeshData,
 			&OutError,
 			&StaticMesh](const FAtlasOutputSelection& OutputSelection,
-			const bool bCaptureSourceDepth,
 			TArray<FColor>& AtlasPixels,
 			TArray<FColor>& NormalPixels,
 			TArray<FColor>& MixPixels,
-			TArray<FColor>& SourceTriangleIdAndDepthPixels,
 			FAtlasBakeStats& AtlasStats) -> bool
 		{
 			return BakeCardAtlasOrthographic(
@@ -1031,11 +970,9 @@ namespace
 				CoverData.Settings,
 				OutputSelection,
 				UsesTwoViewBillboard(EditorSettings),
-				bCaptureSourceDepth,
 				AtlasPixels,
 				NormalPixels,
 				MixPixels,
-				SourceTriangleIdAndDepthPixels,
 				AtlasStats,
 				OutError);
 		};
@@ -1067,8 +1004,7 @@ namespace
 				const UE::FoliageBaker::ProjectedAtlasBake::FPolicy CropPolicy =
 					BuildCardAtlasPolicy(
 						CropOutputSelection,
-						UsesTwoViewBillboard(EditorSettings),
-						false);
+						UsesTwoViewBillboard(EditorSettings));
 				UE::FoliageBaker::ProjectedAtlasBake::FTargetDensityAlphaCropStats
 					TargetDensityCropStats;
 				if (!UE::FoliageBaker::ProjectedAtlasBake::BuildTargetDensityAlphaAwareTileCrops(
@@ -1101,15 +1037,12 @@ namespace
 				TArray<FColor> CropAtlasPixels;
 				TArray<FColor> CropNormalPixels;
 				TArray<FColor> CropMixPixels;
-				TArray<FColor> CropSourceTriangleIdAndDepthPixels;
 				FAtlasBakeStats CropStats;
 				if (!BakeFeatureAtlas(
 						CropOutputSelection,
-						false,
 						CropAtlasPixels,
 						CropNormalPixels,
 						CropMixPixels,
-						CropSourceTriangleIdAndDepthPixels,
 						CropStats))
 				{
 					return false;
@@ -1154,11 +1087,9 @@ namespace
 
 		if (!BakeFeatureAtlas(
 			OutData.OutputSelection,
-			EditorSettings.bBakeUpperHemisphereL1Visibility,
 			OutData.AtlasPixels,
 			OutData.NormalAtlasPixels,
 			OutData.MixAtlasPixels,
-			OutData.SourceTriangleIdAndDepthPixels,
 			OutData.AtlasStats))
 		{
 			return false;
@@ -1172,7 +1103,6 @@ namespace
 				OutData.AtlasPixels,
 				OutData.NormalAtlasPixels,
 				OutData.MixAtlasPixels,
-				OutData.SourceTriangleIdAndDepthPixels,
 				OutData.AtlasStats,
 				EditorSettings.bTrimUnusedAtlasSpace
 					? CardAtlas::EOuterCropMode::TightBlockAligned
@@ -1180,42 +1110,6 @@ namespace
 				OutError))
 		{
 			return false;
-		}
-		if (EditorSettings.bBakeUpperHemisphereL1Visibility)
-		{
-			TArray<FColor> FullResolutionL1VisibilityPixels;
-			if (!UE::FoliageBaker::L1Visibility::BakeUpperHemisphere(
-					StaticMesh,
-					CoverData.SourceLODBounds,
-					CoverData.FixedFrameWPOBounds,
-					CoverData.FixedFrameWPOTriangles,
-					CoverData.Triangles,
-					CoverData.BakeMaterialOverrides,
-					MeshData.PlaneInfos,
-					CoverData.Settings,
-					OutData.SourceTriangleIdAndDepthPixels,
-					OutData.AtlasStats.Width,
-					OutData.AtlasStats.Height,
-					EditorSettings.UpperHemisphereL1SampleCount,
-					EditorSettings.UpperHemisphereL1ShadowMapResolution,
-					FullResolutionL1VisibilityPixels,
-					OutError))
-			{
-				return false;
-			}
-			if (!CardAtlas::ResizeTileIsolated(
-					FullResolutionL1VisibilityPixels,
-					OutData.AtlasStats,
-					MeshData.PlaneInfos,
-					EditorSettings.UpperHemisphereL1TextureResolution,
-					FColor(128, 128, 128, 255),
-					OutData.UpperHemisphereL1VisibilityPixels,
-					OutData.UpperHemisphereL1VisibilityStats,
-					OutData.UpperHemisphereL1VisibilityPlaneInfos,
-					OutError))
-			{
-				return false;
-			}
 		}
 		return true;
 	}
@@ -1368,9 +1262,6 @@ namespace
 		MaterialParams.ColorAtlasTextureParameterName = EditorSettings.ColorAtlasTextureParameterName;
 		MaterialParams.NormalAtlasTextureParameterName = EditorSettings.NormalClassificationTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
-		MaterialParams.OwnedTextureParameterNames = {
-			EditorSettings.UpperHemisphereL1VisibilityTextureParameterName
-		};
 		MaterialParams.OwnedScalarParameterNames = {
 			EditorSettings.LeafRoughnessParameterName,
 			EditorSettings.LeafSpecularParameterName,
@@ -1378,34 +1269,6 @@ namespace
 			EditorSettings.TrunkSpecularParameterName
 		};
 		MaterialParams.ScalarParameterValues = MaterialRecipe.ScalarParameterValues;
-		if (EditorSettings.bBakeUpperHemisphereL1Visibility)
-		{
-			OutAssets.UpperHemisphereL1VisibilityTexture =
-				CreateUpperHemisphereL1VisibilityTextureAsset(
-					StaticMesh,
-					AssetTransaction,
-					EditorSettings,
-					OutputFolders.TexturePackagePath,
-					AssetDecision,
-					AtlasData.UpperHemisphereL1VisibilityPixels,
-					AtlasData.UpperHemisphereL1VisibilityStats,
-					AtlasData.UpperHemisphereL1VisibilityPlaneInfos,
-					OutError);
-			if (!OutAssets.UpperHemisphereL1VisibilityTexture)
-			{
-				return false;
-			}
-		}
-		if (OutAssets.UpperHemisphereL1VisibilityTexture)
-		{
-			FFoliageBakerMaterialInstanceAssetParams::FTextureParameterValue&
-				L1VisibilityParameter =
-					MaterialParams.AdditionalTextureParameterValues.AddDefaulted_GetRef();
-			L1VisibilityParameter.ParameterName =
-				EditorSettings.UpperHemisphereL1VisibilityTextureParameterName;
-			L1VisibilityParameter.Texture =
-				OutAssets.UpperHemisphereL1VisibilityTexture.Get();
-		}
 		MaterialParams.TwoSidedOverride = MaterialRecipe.TwoSidedOverride;
 		OutAssets.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,
@@ -1497,8 +1360,6 @@ namespace
 		OutResult.AtlasTexture = MaterialAssets.AtlasTexture;
 		OutResult.NormalAtlasTexture = MaterialAssets.NormalAtlasTexture;
 		OutResult.MixAtlasTexture = MaterialAssets.MixAtlasTexture;
-		OutResult.UpperHemisphereL1VisibilityTexture =
-			MaterialAssets.UpperHemisphereL1VisibilityTexture;
 		OutResult.Material = MaterialAssets.Material;
 		return true;
 	}
@@ -1696,18 +1557,6 @@ namespace
 			MeshData.OutputStats.AveragePlaneToShadingNormalAngleDegrees,
 			MeshBuildPathDetails,
 			*WindingDetails);
-		if (MaterialAssets.UpperHemisphereL1VisibilityTexture)
-		{
-			Report += FString::Printf(
-				TEXT("\n  upper-hemisphere L1 visibility atlas: %s, size=%dx%d, configured maximum dimension=%d, RGB=capture-frame signed Cnormal/CaxisU/CaxisV remapped to 0..1, A=C0, samples=%d, internal shadow resolution=%d, material parameter=%s"),
-				*MaterialAssets.UpperHemisphereL1VisibilityTexture->GetPathName(),
-				MaterialAssets.UpperHemisphereL1VisibilityTexture->GetSizeX(),
-				MaterialAssets.UpperHemisphereL1VisibilityTexture->GetSizeY(),
-				Request.UpperHemisphereL1TextureResolution,
-				Request.UpperHemisphereL1SampleCount,
-				Request.UpperHemisphereL1ShadowMapResolution,
-				*Request.UpperHemisphereL1VisibilityTextureParameterName.ToString());
-		}
 		if (UsesMultiBillboard(Request))
 		{
 			Report += Request.bIncludeReducedTrunk
@@ -1942,10 +1791,6 @@ namespace
 		{
 			OutCreatedAssets.Add(BuildResult.MixAtlasTexture);
 		}
-		if (BuildResult.UpperHemisphereL1VisibilityTexture)
-		{
-			OutCreatedAssets.Add(BuildResult.UpperHemisphereL1VisibilityTexture);
-		}
 		if (BuildResult.Material)
 		{
 			OutCreatedAssets.Add(BuildResult.Material);
@@ -1967,15 +1812,9 @@ namespace
 		};
 		if (!Request.bBakeBaseColorClassification
 			&& !Request.bBakeNormalClassification
-			&& !Request.bBakeMix
-			&& !Request.bBakeUpperHemisphereL1Visibility)
+			&& !Request.bBakeMix)
 		{
 			return Fail(TEXT("no texture output is enabled."));
-		}
-		if (Request.bBakeUpperHemisphereL1Visibility
-			&& Request.Mode != EFoliageBakerCardMode::Billboard)
-		{
-			return Fail(TEXT("Upper Hemisphere L1 Visibility is currently supported only by Billboard modes."));
 		}
 
 		TSet<FName> UsedTextureParameterNames;
@@ -2013,11 +1852,7 @@ namespace
 			|| !ValidateTextureParameterName(
 				Request.bBakeMix,
 				Request.MixTextureParameterName,
-				TEXT("Mix"))
-			|| !ValidateTextureParameterName(
-				Request.bBakeUpperHemisphereL1Visibility,
-				Request.UpperHemisphereL1VisibilityTextureParameterName,
-				TEXT("Upper Hemisphere L1 Visibility")))
+				TEXT("Mix")))
 		{
 			return false;
 		}
@@ -2073,12 +1908,6 @@ namespace
 		Result.AlphaCropGuardPixels = FMath::Clamp(Request.AlphaCropGuardPixels, 2, 16);
 		Result.MipMaskCoverageThreshold =
 			FMath::Clamp(Request.MipMaskCoverageThreshold, 0.01f, 1.0f);
-		Result.UpperHemisphereL1TextureResolution =
-			FMath::Clamp(Request.UpperHemisphereL1TextureResolution, 64, 1024);
-		Result.UpperHemisphereL1SampleCount =
-			FMath::Clamp(Request.UpperHemisphereL1SampleCount, 4, 32);
-		Result.UpperHemisphereL1ShadowMapResolution =
-			FMath::Clamp(Request.UpperHemisphereL1ShadowMapResolution, 64, 1024);
 
 		const FString FeatureSuffix = Request.Mode == EFoliageBakerCardMode::CrossCards
 			? TEXT("_Cross")
@@ -2092,8 +1921,6 @@ namespace
 		Result.BaseColorClassificationTextureSuffix = FeatureSuffix + Request.BaseColorClassificationTextureSuffix;
 		Result.NormalClassificationTextureSuffix = FeatureSuffix + Request.NormalClassificationTextureSuffix;
 		Result.MixTextureSuffix = FeatureSuffix + Request.MixTextureSuffix;
-		Result.UpperHemisphereL1VisibilityTextureSuffix =
-			FeatureSuffix + Request.UpperHemisphereL1VisibilityTextureSuffix;
 		Result.MaterialInstanceNameSuffix = FeatureSuffix + Request.MaterialInstanceNameSuffix;
 		return Result;
 	}
@@ -2108,8 +1935,6 @@ namespace
 		Result.ColorClassificationTexture = BuildResult.AtlasTexture;
 		Result.NormalClassificationTexture = BuildResult.NormalAtlasTexture;
 		Result.MixTexture = BuildResult.MixAtlasTexture;
-		Result.UpperHemisphereL1VisibilityTexture =
-			BuildResult.UpperHemisphereL1VisibilityTexture;
 		Result.MaterialInstance = BuildResult.Material;
 		Result.Report = BuildResult.Report;
 		AppendCardCreatedAssets(BuildResult, Result.CreatedAssets);

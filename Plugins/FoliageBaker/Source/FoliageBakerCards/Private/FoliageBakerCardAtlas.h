@@ -24,19 +24,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 		TArray<FColor>& ColorAtlasPixels,
 		TArray<FColor>& NormalPixels,
 		TArray<FColor>& MixPixels,
-		TArray<FColor>& SourceTriangleIdAndDepthPixels,
 		ProjectedAtlasBake::FStats& InOutStats,
 		EOuterCropMode CropMode,
-		FString& OutError);
-
-	bool ResizeTileIsolated(
-		const TArray<FColor>& SourcePixels,
-		const ProjectedAtlasBake::FStats& SourceStats,
-		const TArray<PlaneCover::FPlaneProxyPlaneInfo>& SourcePlaneInfos,
-		int32 RequestedMaximumDimension,
-		FColor BackgroundColor,
-		TArray<FColor>& OutPixels,
-		ProjectedAtlasBake::FStats& OutStats,
-		TArray<PlaneCover::FPlaneProxyPlaneInfo>& OutPlaneInfos,
 		FString& OutError);
 }

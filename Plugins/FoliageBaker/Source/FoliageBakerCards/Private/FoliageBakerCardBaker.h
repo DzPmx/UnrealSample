@@ -42,14 +42,9 @@ struct FFoliageBakerCardBakeRequest
 	TArray<FFoliageBakerBakeStaticSwitchOverride> BakeStaticSwitchOverrides = {
 		FFoliageBakerBakeStaticSwitchOverride()
 	};
-	bool bBakeUpperHemisphereL1Visibility = false;
-	int32 UpperHemisphereL1TextureResolution = 512;
-	int32 UpperHemisphereL1SampleCount = 12;
-	int32 UpperHemisphereL1ShadowMapResolution = 1024;
 	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
 	FName NormalClassificationTextureParameterName = TEXT("NormalMask");
 	FName MixTextureParameterName = TEXT("Mix");
-	FName UpperHemisphereL1VisibilityTextureParameterName = TEXT("UpperHemisphereL1Visibility");
 	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
 	FName LeafSpecularParameterName = TEXT("LeafSpecular");
 	FName TrunkRoughnessParameterName = TEXT("TrunkRoughness");
@@ -62,7 +57,6 @@ struct FFoliageBakerCardBakeRequest
 	FString BaseColorClassificationTextureSuffix = TEXT("_DA");
 	FString NormalClassificationTextureSuffix = TEXT("_NR");
 	FString MixTextureSuffix = TEXT("_M");
-	FString UpperHemisphereL1VisibilityTextureSuffix = TEXT("_L1V");
 	FString MaterialInstanceNamePrefix = TEXT("MI_");
 	FString MaterialInstanceNameSuffix;
 };
@@ -76,7 +70,6 @@ struct FFoliageBakerCardBakeResult
 	TStrongObjectPtr<UTexture2D> ColorClassificationTexture;
 	TStrongObjectPtr<UTexture2D> NormalClassificationTexture;
 	TStrongObjectPtr<UTexture2D> MixTexture;
-	TStrongObjectPtr<UTexture2D> UpperHemisphereL1VisibilityTexture;
 	TStrongObjectPtr<UMaterialInstanceConstant> MaterialInstance;
 	TArray<TStrongObjectPtr<UObject>> CreatedAssets;
 	FString Report;

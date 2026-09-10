@@ -17,19 +17,6 @@ namespace UE::FoliageBaker::Atlas
 		const TArray<FIntRect>& TileRects,
 		TArray<uint16>& OutTileOwners);
 
-	FOLIAGEBAKERCORE_API bool ResizeTileIsolated(
-		const TArray<FColor>& SourcePixels,
-		int32 SourceWidth,
-		int32 SourceHeight,
-		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& SourcePlaneInfos,
-		int32 RequestedMaximumDimension,
-		FColor BackgroundColor,
-		TArray<FColor>& OutPixels,
-		int32& OutWidth,
-		int32& OutHeight,
-		TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& OutPlaneInfos,
-		FString& OutError);
-
 	FOLIAGEBAKERCORE_API void FillTransparentRGBInsideTiles(
 		TArray<FColor>& Pixels,
 		int32 Width,
