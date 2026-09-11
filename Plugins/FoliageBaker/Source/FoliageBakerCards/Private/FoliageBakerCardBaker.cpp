@@ -1143,6 +1143,7 @@ namespace
 
 	bool BuildProxyMaterialRecipe(
 		const FFoliageBakerCardBakeRequest& EditorSettings,
+		const FProxyPlaneCoverBuildData& CoverData,
 		const FProxyAtlasBuildData& AtlasData,
 		FProxyMaterialRecipe& OutRecipe,
 		FString& OutError)
@@ -1166,6 +1167,14 @@ namespace
 				return false;
 			}
 		}
+
+		// Match the local-space depth half extent used by the tile projection.
+		OutRecipe.ScalarParameterValues.Add({
+			EditorSettings.DepthBoundsScaleParameterName,
+			static_cast<float>(FMath::Max(
+				static_cast<double>(CoverData.FixedFrameWPOBounds.SphereRadius),
+				UE_DOUBLE_SMALL_NUMBER))
+		});
 
 		if (EditorSettings.Mode == EFoliageBakerCardMode::CrossCards)
 		{
@@ -1695,7 +1704,7 @@ namespace
 
 		bool BuildMaterialRecipeStage()
 		{
-			return BuildProxyMaterialRecipe(Settings, Atlas, MaterialRecipe, Error);
+			return BuildProxyMaterialRecipe(Settings, Source, Atlas, MaterialRecipe, Error);
 		}
 
 		bool FinalizeRuntimeGeometryStage()

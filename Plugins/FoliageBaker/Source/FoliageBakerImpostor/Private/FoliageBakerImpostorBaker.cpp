@@ -1408,6 +1408,11 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		Settings.DefaultMeshSizeParameterName,
 		static_cast<float>(BakeData.SharedCaptureHalfExtent * 2.0)
 	});
+	// Use the same local-space half extent as the atlas depth encoding.
+	MaterialParams.ScalarParameterValues.Add({
+		Settings.DepthBoundsScaleParameterName,
+		static_cast<float>(FMath::Max(BakeData.SharedCaptureHalfExtent, UE_DOUBLE_SMALL_NUMBER))
+	});
 	MaterialParams.VectorParameterValues.Add({
 		Settings.PivotOffsetParameterName,
 		FLinearColor(

@@ -177,6 +177,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter", ToolTip = "Texture parameter receiving octahedral Normal RG, trunk/leaf classification B, and shared linear depth A. Both two-view Billboard modes retain their capture-frame normal convention. The default parent-material parameter name remains NormalMask."))
 	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
 
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Depth Bounds Scale Parameter", ToolTip = "Scalar parameter receiving the baked depth half extent in source-local centimeters. Runtime instance scaling is applied in the material."))
+	FName DepthBoundsScaleParameterName = TEXT("DepthBoundsScale");
+
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission texture when that output is enabled."))
 	FName MixTextureParameterName = TEXT("Mix");
 

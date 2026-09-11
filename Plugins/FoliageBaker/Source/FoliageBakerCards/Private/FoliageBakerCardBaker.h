@@ -44,6 +44,7 @@ struct FFoliageBakerCardBakeRequest
 	};
 	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
 	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
+	FName DepthBoundsScaleParameterName = TEXT("DepthBoundsScale");
 	FName MixTextureParameterName = TEXT("Mix");
 	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
 	FName LeafSpecularParameterName = TEXT("LeafSpecular");

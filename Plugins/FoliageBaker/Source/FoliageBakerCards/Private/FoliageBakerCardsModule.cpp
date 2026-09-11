@@ -80,6 +80,7 @@ namespace
 			Settings.BakeStaticSwitchOverrides;
 		Request.ColorAtlasTextureParameterName = Settings.ColorAtlasTextureParameterName;
 		Request.NormalMaskDepthTextureParameterName = Settings.NormalMaskDepthTextureParameterName;
+		Request.DepthBoundsScaleParameterName = Settings.DepthBoundsScaleParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;
 		Request.LeafRoughnessParameterName = Settings.LeafRoughnessParameterName;
 		Request.LeafSpecularParameterName = Settings.LeafSpecularParameterName;

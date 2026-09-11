@@ -989,6 +989,13 @@ namespace
 				return false;
 			}
 		}
+		// Match the local-space depth half extent used by the tile projection.
+		MaterialParams.ScalarParameterValues.Add({
+			EditorSettings.DepthBoundsScaleParameterName,
+			static_cast<float>(FMath::Max(
+				static_cast<double>(CoverData.FixedFrameWPOBounds.SphereRadius),
+				UE_DOUBLE_SMALL_NUMBER))
+		});
 		OutData.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,
 			AssetTransaction,

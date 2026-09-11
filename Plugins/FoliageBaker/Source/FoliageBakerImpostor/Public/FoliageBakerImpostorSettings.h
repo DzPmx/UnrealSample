@@ -105,6 +105,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter"))
 	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
 
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Depth Bounds Scale Parameter", ToolTip = "Scalar parameter receiving the baked depth half extent in source-local centimeters. Runtime instance scaling is applied in the material."))
+	FName DepthBoundsScaleParameterName = TEXT("DepthBoundsScale");
+
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Packed Masks Parameter"))
 	FName MixTextureParameterName = TEXT("PackedMasks_1");
 
