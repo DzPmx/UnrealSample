@@ -104,6 +104,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerDepthCorrectTileResult
 	TArray<FColor> PackedMix;
 	TArray<FColor> Roughness;
 	TArray<FColor> Specular;
+	// RGB: one-based source triangle ID; A: source-bounds linear depth, near 1 / far 0.
 	TArray<FColor> SourceTriangleIdAndDepth;
 };
 

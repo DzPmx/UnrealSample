@@ -389,7 +389,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					const PlaneCover::FSourceTriangle& SourceTriangle =
 						Triangles[SourceTriangleIndex];
 					const uint8 ClassificationValue =
-						Atlas::EncodeTrunkLeafAlpha(SourceTriangle.bIsTrunk);
+						Atlas::EncodeTrunkLeafMask(SourceTriangle.bIsTrunk);
 					const int32 AtlasPixelIndex =
 						AtlasY * Context.Stats.Width + AtlasX;
 
@@ -403,7 +403,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					if (Policy.OutputSelection.bColorAtlas)
 					{
 						FColor Color = TileResult.BaseColor[TilePixelIndex];
-						Color.A = ClassificationValue;
+						Color.A = 255;
 						Context.OutResult.ColorAtlasPixels[AtlasPixelIndex] = Color;
 					}
 					Context.AtlasCoverage[AtlasPixelIndex] = true;
@@ -417,11 +417,11 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 								Normal,
 								CaptureRayDirection);
 						}
-						Normal.A = Policy.NormalAlphaMode
-							== ENormalAlphaMode::TrunkLeafClassification
-							? ClassificationValue
-							: TileResult.SourceTriangleIdAndDepth[TilePixelIndex].A;
-						Context.OutResult.NormalPixels[AtlasPixelIndex] = Normal;
+						Context.OutResult.NormalPixels[AtlasPixelIndex] =
+							Atlas::EncodeOctahedralNormal(
+								Atlas::DecodeXYZNormal(Normal),
+								ClassificationValue,
+								TileResult.SourceTriangleIdAndDepth[TilePixelIndex].A);
 						Context.NormalCoverage[AtlasPixelIndex] = true;
 					}
 					if (Policy.OutputSelection.bMix)
@@ -536,9 +536,10 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 		if (Policy.OutputSelection.bNormalAtlas)
 		{
 			OutResult.NormalPixels.Init(
-				ProjectedMaterialBake::EncodeObjectSpaceNormalToColor(
+				Atlas::EncodeOctahedralNormal(
 					FVector::UpVector,
-					255),
+					0,
+					Atlas::EncodeUnitFloat(0.5f)),
 				AtlasPixelCount);
 		}
 		if (Policy.OutputSelection.bMix)
@@ -646,10 +647,7 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 				PlaneInfos,
 				NormalCoverage,
 				false);
-			const uint8 UncoveredAlpha = Policy.NormalAlphaMode
-				== ENormalAlphaMode::TrunkLeafClassification
-				? 0
-				: 255;
+			const uint8 UncoveredAlpha = Atlas::EncodeUnitFloat(0.5f);
 			for (int32 PixelIndex = 0; PixelIndex < OutResult.NormalPixels.Num(); ++PixelIndex)
 			{
 				if (!NormalCoverage[PixelIndex])
@@ -657,7 +655,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 					OutResult.NormalPixels[PixelIndex].A = UncoveredAlpha;
 				}
 			}
-			Atlas::NormalizeEncodedObjectSpaceNormals(OutResult.NormalPixels);
 		}
 		if (Policy.OutputSelection.bMix)
 		{

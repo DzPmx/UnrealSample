@@ -71,15 +71,15 @@ namespace
 		Request.bPreserveAlphaMaskValues = Settings.bPreserveAlphaMaskValues;
 		Request.MipMaskCoverageThreshold = Settings.MipMaskCoverageThreshold;
 		Request.bTrimUnusedAtlasSpace = Settings.bTrimUnusedAtlasSpace;
-		Request.bBakeBaseColorClassification = Settings.bBakeBaseColorClassification;
-		Request.bBakeNormalClassification = Settings.bBakeNormalClassification;
+		Request.bBakeBaseColorAlphaMask = Settings.bBakeBaseColorAlphaMask;
+		Request.bBakeNormalMaskDepth = Settings.bBakeNormalMaskDepth;
 		Request.bBakeMix = Settings.bBakeMix;
 		Request.bOverrideBakeStaticSwitch =
 			Settings.bOverrideBakeStaticSwitch;
 		Request.BakeStaticSwitchOverrides =
 			Settings.BakeStaticSwitchOverrides;
 		Request.ColorAtlasTextureParameterName = Settings.ColorAtlasTextureParameterName;
-		Request.NormalClassificationTextureParameterName = Settings.NormalClassificationTextureParameterName;
+		Request.NormalMaskDepthTextureParameterName = Settings.NormalMaskDepthTextureParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;
 		Request.LeafRoughnessParameterName = Settings.LeafRoughnessParameterName;
 		Request.LeafSpecularParameterName = Settings.LeafSpecularParameterName;
@@ -90,8 +90,8 @@ namespace
 		Request.bPlaceGeneratedAssetsNearReplacedLODAssets =
 			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
 		Request.TextureNamePrefix = Settings.TextureNamePrefix;
-		Request.BaseColorClassificationTextureSuffix = Settings.BaseColorClassificationTextureSuffix;
-		Request.NormalClassificationTextureSuffix = Settings.NormalClassificationTextureSuffix;
+		Request.BaseColorAlphaMaskTextureSuffix = Settings.BaseColorAlphaMaskTextureSuffix;
+		Request.NormalMaskDepthTextureSuffix = Settings.NormalMaskDepthTextureSuffix;
 		Request.MixTextureSuffix = Settings.MixTextureSuffix;
 		Request.MaterialInstanceNamePrefix = Settings.MaterialInstanceNamePrefix;
 		Request.MaterialInstanceNameSuffix = Settings.MaterialInstanceNameSuffix;
@@ -230,8 +230,8 @@ bool FFoliageBakerCardsModule::CanBake(const EFoliageBakerCardMode Mode) const
 		FFoliageBakerFeatureTool::HasExistingAsset(
 			MaterialTemplate.ToSoftObjectPath())
 			&& bHasLeafKeyword,
-		Settings->bBakeBaseColorClassification
-			|| Settings->bBakeNormalClassification
+		Settings->bBakeBaseColorAlphaMask
+			|| Settings->bBakeNormalMaskDepth
 			|| Settings->bBakeMix,
 		Settings->SourceStaticMeshes);
 }

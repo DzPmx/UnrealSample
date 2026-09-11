@@ -97,7 +97,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Alpha Crop Guard", EditCondition = "bEnableAlphaAwareTileCrop", EditConditionHides, ToolTip = "Extra prepass pixels retained around the detected alpha-painted bounds. Their world-space size follows the active Auto target-density or Manual packed-atlas prepass."))
 	int32 AlphaAwareTileCropGuardPixels = 2;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate semantic mask mips independently inside every BillboardClouds atlas tile. Alpha remains exactly background 0, trunk 0.5, or leaf 1 instead of being averaged to gray values."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate coverage mask mips independently inside every BillboardClouds atlas tile. BaseColor Alpha remains exactly background 0 or covered 1. Normal B classification and A depth use their own mip filtering."))
 	bool bPreserveAlphaMaskValues = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "bPreserveAlphaMaskValues", EditConditionHides, DisplayName = "Mip Mask Coverage Threshold", ToolTip = "Minimum fraction of covered Mip 0 samples required to keep a destination mip pixel. Lower values preserve fuller foliage silhouettes; higher values remove more thin coverage."))
@@ -106,11 +106,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ToolTip = "Bake a separate back-side atlas tile for selected proxy planes. The material uses TwoSidedSign to sample UV0 on front faces and UV1 on back faces."))
 	EBillboardCloudsDoubleSidedBakeMode DoubleSidedBakeMode = EBillboardCloudsDoubleSidedBakeMode::AllPlanes;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Base Color / Classification", ToolTip = "RGB stores base color. A stores visible source classification: background 0, trunk 0.5, leaf 1. A is not source opacity."))
-	bool bBakeBaseColorClassification = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Base Color / Alpha Mask", ToolTip = "RGB stores BaseColor. A stores the source masked-shader coverage: background 0, visible surface 1."))
+	bool bBakeBaseColorAlphaMask = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Normal / Depth", ToolTip = "RGB stores object/local-space normal. A stores shared-range linear depth (near 1, far 0, uncovered 1). A is not a trunk/leaf mask."))
-	bool bBakeNormalDepth = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Normal / Mask / Depth", ToolTip = "RG stores octahedral object/local-space normal. B stores trunk 0.5 or leaf 1. A stores shared-range linear depth: near 1, far 0, uncovered 0.5."))
+	bool bBakeNormalMaskDepth = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Atlas Outputs", meta = (DisplayName = "Bake Occlusion / Roughness / Metallic / Emission", ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission; the destination material parameter is configured in Material."))
 	bool bBakeMix = false;
@@ -127,11 +127,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Prefix added before the source Static Mesh name for every generated atlas texture."))
 	FString TextureNamePrefix = TEXT("T_");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated BaseColor/Classification atlas texture."))
-	FString BaseColorClassificationTextureSuffix = TEXT("_BillboardClouds_DA");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated BaseColor/AlphaMask atlas texture."))
+	FString BaseColorAlphaMaskTextureSuffix = TEXT("_BillboardClouds_DA");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated object-space normal and shared-depth atlas texture."))
-	FString NormalDepthTextureSuffix = TEXT("_BillboardClouds_NR");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated octahedral normal, trunk/leaf classification, and shared-depth atlas texture."))
+	FString NormalMaskDepthTextureSuffix = TEXT("_BillboardClouds_NR");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (ToolTip = "Suffix added to the generated packed Mix atlas texture."))
 	FString MixTextureSuffix = TEXT("_BillboardClouds_M");
@@ -153,11 +153,11 @@ public:
 		FFoliageBakerBakeStaticSwitchOverride()
 	};
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Classification Parameter", ToolTip = "Texture parameter receiving generated BaseColor RGB and trunk/leaf classification in A. The default parent-material parameter name remains ColorOpacity."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Alpha Mask Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and AlphaMask in A. The default parent-material parameter name remains ColorOpacity."))
 	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Depth Parameter", ToolTip = "Texture parameter receiving object/local-space Normal RGB and shared linear depth in A. The default parent-material parameter name remains NormalMask."))
-	FName NormalDepthTextureParameterName = TEXT("NormalMask");
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter", ToolTip = "Texture parameter receiving octahedral object/local-space Normal RG, trunk/leaf classification B, and shared linear depth A. The default parent-material parameter name remains NormalMask."))
+	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission atlas when that output is enabled."))
 	FName MixTextureParameterName = TEXT("Mix");

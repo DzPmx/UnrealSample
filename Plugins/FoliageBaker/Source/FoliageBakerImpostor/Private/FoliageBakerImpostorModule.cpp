@@ -67,7 +67,7 @@ bool FFoliageBakerImpostorModule::CanBake() const
 	return FFoliageBakerFeatureTool::CanBakeFeature(
 		FFoliageBakerFeatureTool::HasExistingAsset(
 			ToolSettings->MaterialInstanceTemplate.ToSoftObjectPath()),
-		ToolSettings->bBakeBaseColorSdf
+		ToolSettings->bBakeBaseColorAlphaMask
 			|| ToolSettings->bBakeNormalMaskDepth
 			|| ToolSettings->bBakeMix,
 		ToolSettings->SourceStaticMeshes);

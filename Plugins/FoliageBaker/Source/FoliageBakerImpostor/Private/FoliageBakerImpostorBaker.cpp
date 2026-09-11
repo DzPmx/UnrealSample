@@ -101,46 +101,6 @@ namespace
 		return true;
 	}
 
-	uint8 UnitFloatToByte(const float Value)
-	{
-		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Value, 0.0f, 1.0f) * 255.0f), 0, 255));
-	}
-
-	FVector DecodeObjectSpaceNormal(const FColor& EncodedNormal)
-	{
-		return FVector(
-			static_cast<double>(EncodedNormal.R) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(EncodedNormal.G) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(EncodedNormal.B) / 255.0 * 2.0 - 1.0)
-			.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-	}
-
-	FColor EncodeOctahedralObjectSpaceNormal(
-		const FVector& InNormal,
-		const uint8 TrunkLeafMask,
-		const uint8 Depth)
-	{
-		const FVector Normal = InNormal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-		const double L1Norm = FMath::Abs(Normal.X)
-			+ FMath::Abs(Normal.Y)
-			+ FMath::Abs(Normal.Z);
-		const FVector Projected = Normal / FMath::Max(L1Norm, UE_DOUBLE_SMALL_NUMBER);
-		FVector2D Octahedral(Projected.X, Projected.Y);
-		if (Projected.Z < 0.0)
-		{
-			const double OldX = Octahedral.X;
-			Octahedral.X = (1.0 - FMath::Abs(Octahedral.Y))
-				* (OldX >= 0.0 ? 1.0 : -1.0);
-			Octahedral.Y = (1.0 - FMath::Abs(OldX))
-				* (Octahedral.Y >= 0.0 ? 1.0 : -1.0);
-		}
-		return FColor(
-			UnitFloatToByte(static_cast<float>(Octahedral.X * 0.5 + 0.5)),
-			UnitFloatToByte(static_cast<float>(Octahedral.Y * 0.5 + 0.5)),
-			TrunkLeafMask,
-			Depth);
-	}
-
 	FVector DecodeHemiOctahedralDirection(const FVector2D& Encoded)
 	{
 		const FVector2D Octahedron(
@@ -313,10 +273,10 @@ namespace
 
 		InOutData.BaseColorPixels.Init(FColor(0, 0, 0, 0), PixelCount);
 		InOutData.NormalMaskDepthPixels.Init(
-			EncodeOctahedralObjectSpaceNormal(
+			UE::FoliageBaker::Atlas::EncodeOctahedralNormal(
 				FVector::UpVector,
 				0,
-				UnitFloatToByte(0.5f)),
+				UE::FoliageBaker::Atlas::EncodeUnitFloat(0.5f)),
 			PixelCount);
 		if (Settings.bBakeMix)
 		{
@@ -381,7 +341,7 @@ namespace
 			DepthCorrectRequest.ProjectionMaxV = PlaneInfo.MaxV;
 			DepthCorrectRequest.SourceBounds = InOutData.SourceBounds;
 			DepthCorrectRequest.bFlipProjectionV = true;
-			DepthCorrectRequest.bBakeBaseColor = Settings.bBakeBaseColorSdf;
+			DepthCorrectRequest.bBakeBaseColor = Settings.bBakeBaseColorAlphaMask;
 			DepthCorrectRequest.bBakeObjectSpaceNormal = Settings.bBakeNormalMaskDepth;
 			DepthCorrectRequest.bBakePackedMix = Settings.bBakeMix;
 			DepthCorrectRequest.bBakeRoughnessSpecular = !Settings.bBakeMix;
@@ -482,7 +442,7 @@ namespace
 				return false;
 			}
 			if (DepthCorrectResult.SourceTriangleIdAndDepth.Num() != TilePixelCount
-				|| (Settings.bBakeBaseColorSdf && DepthCorrectResult.BaseColor.Num() != TilePixelCount)
+				|| (Settings.bBakeBaseColorAlphaMask && DepthCorrectResult.BaseColor.Num() != TilePixelCount)
 				|| (Settings.bBakeNormalMaskDepth && DepthCorrectResult.ObjectSpaceNormal.Num() != TilePixelCount)
 				|| (Settings.bBakeMix && DepthCorrectResult.PackedMix.Num() != TilePixelCount)
 				|| (!Settings.bBakeMix
@@ -580,7 +540,7 @@ namespace
 					const int32 AtlasX = View.TilePixelMin.X + LocalX;
 					const int32 AtlasIndex = AtlasY * InOutData.Stats.AtlasWidth + AtlasX;
 
-					if (Settings.bBakeBaseColorSdf)
+					if (Settings.bBakeBaseColorAlphaMask)
 					{
 						FColor Color = DepthCorrectResult.BaseColor[TileIndex];
 						Color.A = 255;
@@ -597,12 +557,12 @@ namespace
 							0.0f,
 							1.0f);
 						InOutData.NormalMaskDepthPixels[AtlasIndex] =
-							EncodeOctahedralObjectSpaceNormal(
-								DecodeObjectSpaceNormal(
+							UE::FoliageBaker::Atlas::EncodeOctahedralNormal(
+								UE::FoliageBaker::Atlas::DecodeXYZNormal(
 									DepthCorrectResult.ObjectSpaceNormal[TileIndex]),
-								UE::FoliageBaker::Atlas::EncodeTrunkLeafAlpha(
+								UE::FoliageBaker::Atlas::EncodeTrunkLeafMask(
 									Triangle.bIsTrunk),
-								UnitFloatToByte(LinearDepth));
+								UE::FoliageBaker::Atlas::EncodeUnitFloat(LinearDepth));
 						NormalCoverage[AtlasIndex] = true;
 					}
 
@@ -615,20 +575,13 @@ namespace
 			}
 		}
 
-		if (Settings.bBakeBaseColorSdf)
+		if (Settings.bBakeBaseColorAlphaMask)
 		{
 			UE::FoliageBaker::Atlas::FillTransparentRGBInsideTiles(
 				InOutData.BaseColorPixels,
 				InOutData.Stats.AtlasWidth,
 				InOutData.Stats.AtlasHeight,
 				InOutData.TileInfos);
-			UE::FoliageBaker::Atlas::WriteUnionSdfToAlpha(
-				InOutData.BaseColorPixels,
-				InOutData.Stats.AtlasWidth,
-				InOutData.Stats.AtlasHeight,
-				InOutData.TileInfos,
-				CoverageMask,
-				FMath::Clamp(Settings.OpacitySdfRangePixels, 1, 64));
 		}
 		else
 		{
@@ -648,7 +601,7 @@ namespace
 			{
 				if (!NormalCoverage[PixelIndex])
 				{
-					InOutData.NormalMaskDepthPixels[PixelIndex].A = UnitFloatToByte(0.5f);
+					InOutData.NormalMaskDepthPixels[PixelIndex].A = UE::FoliageBaker::Atlas::EncodeUnitFloat(0.5f);
 				}
 			}
 		}
@@ -1071,13 +1024,13 @@ namespace
 		Result.SeparateMeshAssetSuffix = TEXT("_ImpostorProxy");
 		Result.bPlaceGeneratedAssetsNearReplacedLODAssets =
 			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
-		if (Settings.bBakeBaseColorSdf)
+		if (Settings.bBakeBaseColorAlphaMask)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Base Color / SDF"),
+				TEXT("Base Color / Alpha Mask"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.BaseColorSdfTextureSuffix,
+				Settings.BaseColorAlphaMaskTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
 		if (Settings.bBakeNormalMaskDepth)
@@ -1178,7 +1131,7 @@ namespace
 			TextureParameterNames.Add(Name);
 			return true;
 		};
-		return ValidateTextureName(Settings.bBakeBaseColorSdf, Settings.BaseColorSdfTextureParameterName, TEXT("BaseColor/SDF"))
+		return ValidateTextureName(Settings.bBakeBaseColorAlphaMask, Settings.BaseColorAlphaMaskTextureParameterName, TEXT("BaseColor/AlphaMask"))
 			&& ValidateTextureName(Settings.bBakeNormalMaskDepth, Settings.NormalMaskDepthTextureParameterName, TEXT("Normal/Mask/Depth"))
 			&& ValidateTextureName(Settings.bBakeMix, Settings.MixTextureParameterName, TEXT("Mix"))
 			&& !Settings.FramesParameterName.IsNone()
@@ -1207,7 +1160,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 {
 	FFoliageBakerImpostorBakeResult Result;
 	FString Error;
-	if (!Settings.bBakeBaseColorSdf && !Settings.bBakeNormalMaskDepth && !Settings.bBakeMix)
+	if (!Settings.bBakeBaseColorAlphaMask && !Settings.bBakeNormalMaskDepth && !Settings.bBakeMix)
 	{
 		Result.Report = FString::Printf(TEXT("%s\n  failed: no Impostor texture output is enabled."), *SourceStaticMesh.GetName());
 		return Result;
@@ -1329,14 +1282,14 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	}
 
 	FFoliageBakerAssetTransaction Transaction;
-	if (Settings.bBakeBaseColorSdf)
+	if (Settings.bBakeBaseColorAlphaMask)
 	{
-		Result.BaseColorSdfTexture = CreateTexture(
+		Result.BaseColorAlphaMaskTexture = CreateTexture(
 			SourceStaticMesh,
 			Transaction,
 			Settings,
 			PreflightResult.OutputFolders.TexturePackagePath,
-			Settings.BaseColorSdfTextureSuffix,
+			Settings.BaseColorAlphaMaskTextureSuffix,
 			PreflightResult.ExistingAssetDecision,
 			BakeData.BaseColorPixels,
 			BakeData.Stats,
@@ -1346,7 +1299,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			FColor(0, 0, 0, 0),
 			EFoliageBakerTextureMipMode::Default,
 			Error);
-		if (!Result.BaseColorSdfTexture)
+		if (!Result.BaseColorAlphaMaskTexture)
 		{
 			Result.Report = FString::Printf(TEXT("%s\n  failed: %s"), *SourceStaticMesh.GetName(), *Error);
 			return Result;
@@ -1367,11 +1320,11 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			TC_BC7,
 			TEXTUREGROUP_WorldNormalMap,
 			false,
-			EncodeOctahedralObjectSpaceNormal(
+			UE::FoliageBaker::Atlas::EncodeOctahedralNormal(
 				FVector::UpVector,
 				0,
-				UnitFloatToByte(0.5f)),
-			EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth,
+				UE::FoliageBaker::Atlas::EncodeUnitFloat(0.5f)),
+			EFoliageBakerTextureMipMode::OctaNormalMaskDepth,
 			Error);
 		if (!Result.NormalMaskDepthTexture)
 		{
@@ -1414,7 +1367,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		PreflightResult.ExistingAssetDecision.ExistingAssetPolicy;
 	MaterialParams.AssetNameVersion =
 		PreflightResult.ExistingAssetDecision.AssetNameVersion;
-	MaterialParams.ColorAtlasTextureParameterName = Settings.BaseColorSdfTextureParameterName;
+	MaterialParams.ColorAtlasTextureParameterName = Settings.BaseColorAlphaMaskTextureParameterName;
 	MaterialParams.NormalAtlasTextureParameterName = Settings.NormalMaskDepthTextureParameterName;
 	MaterialParams.MixTextureParameterName = Settings.MixTextureParameterName;
 	MaterialParams.OwnedScalarParameterNames = {
@@ -1472,7 +1425,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 		Transaction,
 		MaterialParams,
 		MaterialTemplate,
-		Result.BaseColorSdfTexture,
+		Result.BaseColorAlphaMaskTexture,
 		Result.NormalMaskDepthTexture,
 		Result.MixTexture,
 		Error);
@@ -1556,7 +1509,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 	{
 		AppendCreatedAsset(Result.ProxyMesh, Result.CreatedAssets);
 	}
-	AppendCreatedAsset(Result.BaseColorSdfTexture, Result.CreatedAssets);
+	AppendCreatedAsset(Result.BaseColorAlphaMaskTexture, Result.CreatedAssets);
 	AppendCreatedAsset(Result.NormalMaskDepthTexture, Result.CreatedAssets);
 	AppendCreatedAsset(Result.MixTexture, Result.CreatedAssets);
 	AppendCreatedAsset(Result.MaterialInstance, Result.CreatedAssets);
@@ -1598,7 +1551,7 @@ FFoliageBakerImpostorBakeResult FFoliageBakerImpostorBaker::Bake(
 			BakeData.Stats.MaterialAverages,
 			MaterialScalarParameterNames);
 	Result.Report = FString::Printf(
-		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  resolution: %s\n  projection: fixed-frame WPO vertex sphere for continuous runtime views, %d px capture guard\n  channels: ColorOpacity RGB + SDF A, NormalMask octahedral object/local Normal RG + trunk 0.5/leaf 1 Mask B + Depth A (near 1, far 0, empty 0.5)%s\n  material scalar averages: %s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal, material properties and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  texel area-density scale versus unguarded WPO sphere: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  source WPO uses the same material shader path for capture and formal bake\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
+		TEXT("%s\n  Impostor bake succeeded\n  source LOD: %d\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  coverage: %s\n  sampling grid: %dx%d octahedral directions (%d views)\n  atlas: %dx%d, tile=%d\n  resolution: %s\n  projection: fixed-frame WPO vertex sphere for continuous runtime views, %d px capture guard\n  channels: ColorOpacity RGB + AlphaMask A, NormalMask octahedral object/local Normal RG + trunk 0.5/leaf 1 Mask B + Depth A (near 1, far 0, empty 0.5)%s\n  material scalar averages: %s\n  resolve: shared masked RDG depth per frame; BaseColor, Normal, material properties and Source Triangle ID come from the same winning fragment\n  bounds center: (%.3f, %.3f, %.3f), source sphere radius: %.3f cm, shared capture half extent: %.3f cm\n  texel area-density scale versus unguarded WPO sphere: %.3fx\n  proxy: XY cutout with center + 8 full-resolution conservative support vertices, up to %.0f px cutout guard, +Z facing, source asset Pivot preserved\n  painted pixels: %d/%d (%.2f%%), rasterized triangle references: %d, masked triangle references: %d, depth-correct tiles: %d\n  source WPO uses the same material shader path for capture and formal bake\n  collision: off, lightmap UV: off, distance fields: on\n  material instance: %s"),
 		*SourceStaticMesh.GetName(),
 		Settings.SourceLODIndex,
 		BakeData.WorldPositionOffsetStats.EvaluatedVertexCount,

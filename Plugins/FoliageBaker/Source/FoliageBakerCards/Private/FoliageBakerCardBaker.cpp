@@ -163,8 +163,6 @@ namespace
 	{
 		UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy;
 		Policy.OutputSelection = OutputSelection;
-		Policy.NormalAlphaMode =
-			UE::FoliageBaker::ProjectedAtlasBake::ENormalAlphaMode::TrunkLeafClassification;
 		Policy.bConvertNormalsToCaptureFrame = bConvertNormalsToCaptureFrame;
 		Policy.DiagnosticName = TEXT("Card atlas");
 		Policy.MaterialAlphaPolicyDetails =
@@ -253,11 +251,11 @@ namespace
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.BaseColorClassificationTextureSuffix,
+				EditorSettings.BaseColorAlphaMaskTextureSuffix,
 				AssetDecision);
 		Request.LODGroup = TEXTUREGROUP_World;
 		Request.bSRGB = true;
-		Request.SemanticMaskMipCoverageThreshold =
+		Request.AlphaMaskMipCoverageThreshold =
 			EditorSettings.bPreserveAlphaMaskValues
 				? EditorSettings.MipMaskCoverageThreshold
 				: 0.0f;
@@ -287,15 +285,11 @@ namespace
 			MakeCardAtlasTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.NormalClassificationTextureSuffix,
+				EditorSettings.NormalMaskDepthTextureSuffix,
 				AssetDecision);
-		Request.MipBackgroundColor = FColor(128, 128, 255, 0);
+		Request.MipBackgroundColor = FColor(128, 128, 0, 128);
 		Request.LODGroup = TEXTUREGROUP_WorldNormalMap;
 		Request.bSRGB = false;
-		Request.SemanticMaskMipCoverageThreshold =
-			EditorSettings.bPreserveAlphaMaskValues
-				? EditorSettings.MipMaskCoverageThreshold
-				: 0.0f;
 		Request.EmptyPixelsError = TEXT("No normal atlas pixels were generated.");
 		return FFoliageBakerAssetBuilder::CreatePlaneAtlasTextureAsset(
 			SourceStaticMesh,
@@ -473,8 +467,8 @@ namespace
 	FAtlasOutputSelection BuildAtlasOutputSelection(const FFoliageBakerCardBakeRequest& Settings)
 	{
 		FAtlasOutputSelection Selection;
-		Selection.bColorAtlas = Settings.bBakeBaseColorClassification;
-		Selection.bNormalAtlas = Settings.bBakeNormalClassification;
+		Selection.bColorAtlas = Settings.bBakeBaseColorAlphaMask;
+		Selection.bNormalAtlas = Settings.bBakeNormalMaskDepth;
 		Selection.bMix = Settings.bBakeMix;
 		Selection.bMaterialScalarAverages = !Settings.bBakeMix;
 		return Selection;
@@ -523,22 +517,22 @@ namespace
 		Result.SeparateMeshAssetSuffix = GetCardMeshAssetSuffix(Settings);
 		Result.bPlaceGeneratedAssetsNearReplacedLODAssets =
 			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
-		if (Settings.bBakeBaseColorClassification)
+		if (Settings.bBakeBaseColorAlphaMask)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Base Color / Classification"),
+				TEXT("Base Color / Alpha Mask"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.BaseColorClassificationTextureSuffix,
+				Settings.BaseColorAlphaMaskTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
-		if (Settings.bBakeNormalClassification)
+		if (Settings.bBakeNormalMaskDepth)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Normal / Classification"),
+				TEXT("Normal / Mask / Depth"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.NormalClassificationTextureSuffix,
+				Settings.NormalMaskDepthTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
 		if (Settings.bBakeMix)
@@ -945,7 +939,7 @@ namespace
 		OutData.OutputSelection = BuildAtlasOutputSelection(EditorSettings);
 		if (!OutData.OutputSelection.HasAnyOutput())
 		{
-			OutError = TEXT("No atlas outputs selected. Enable BaseColor/Classification, Normal/Classification, or Mix.");
+			OutError = TEXT("No atlas outputs selected. Enable BaseColor/AlphaMask, Normal/Mask/Depth, or Mix.");
 			return false;
 		}
 		auto BakeFeatureAtlas = [
@@ -1260,7 +1254,7 @@ namespace
 			AssetDecision.ExistingAssetPolicy;
 		MaterialParams.AssetNameVersion = AssetDecision.AssetNameVersion;
 		MaterialParams.ColorAtlasTextureParameterName = EditorSettings.ColorAtlasTextureParameterName;
-		MaterialParams.NormalAtlasTextureParameterName = EditorSettings.NormalClassificationTextureParameterName;
+		MaterialParams.NormalAtlasTextureParameterName = EditorSettings.NormalMaskDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
 		MaterialParams.OwnedScalarParameterNames = {
 			EditorSettings.LeafRoughnessParameterName,
@@ -1459,9 +1453,9 @@ namespace
 			? TEXT("BuildFromMeshDescriptions full build path")
 			: TEXT("source StaticMesh LOD MeshDescription commit");
 		const FString MaterialParameterDetails = FString::Printf(
-			TEXT("BaseColor/Classification=%s, Normal/Classification=%s, Mix=%s"),
+			TEXT("BaseColor/AlphaMask=%s, Normal/Mask/Depth=%s, Mix=%s"),
 			*Request.ColorAtlasTextureParameterName.ToString(),
-			*Request.NormalClassificationTextureParameterName.ToString(),
+			*Request.NormalMaskDepthTextureParameterName.ToString(),
 			*Request.MixTextureParameterName.ToString());
 		const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
 			MaterialScalarParameterNames = {
@@ -1506,7 +1500,7 @@ namespace
 			: TEXT("packed-atlas prepass before repacking; front/back and grouped-view bounds are conservatively merged when present");
 
 		FString Report = FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  resolution: %s\n  alpha crop: %s\n  base/color opacity atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/trunk-leaf atlas: %s, RGB=%s, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  material scalar averages: %s\n  atlas UVs: %s\n  material instance: %s (parent template: %s; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: %s"),
+			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, masked refs=%d, shooting=%s, resolve=%s\n  resolution: %s\n  alpha crop: %s\n  base color / alpha mask atlas: %s, RGB=BaseColor, A=background 0, visible surface 1 (255)\n  normal/mask/depth atlas: %s, RG=octahedral %s, B=trunk 0.5 (128), leaf 1 (255), A=shared fixed-frame WPO bounds linear depth (near 1, far 0, uncovered 0.5)\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission\n  material scalar averages: %s\n  atlas UVs: %s\n  material instance: %s (parent template: %s; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision off, lightmap UV generation off, distance fields on\n  proxy winding: %s"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,
@@ -1810,8 +1804,8 @@ namespace
 				*Message);
 			return false;
 		};
-		if (!Request.bBakeBaseColorClassification
-			&& !Request.bBakeNormalClassification
+		if (!Request.bBakeBaseColorAlphaMask
+			&& !Request.bBakeNormalMaskDepth
 			&& !Request.bBakeMix)
 		{
 			return Fail(TEXT("no texture output is enabled."));
@@ -1842,13 +1836,13 @@ namespace
 			return true;
 		};
 		if (!ValidateTextureParameterName(
-				Request.bBakeBaseColorClassification,
+				Request.bBakeBaseColorAlphaMask,
 				Request.ColorAtlasTextureParameterName,
-				TEXT("BaseColor/Classification"))
+				TEXT("BaseColor/AlphaMask"))
 			|| !ValidateTextureParameterName(
-				Request.bBakeNormalClassification,
-				Request.NormalClassificationTextureParameterName,
-				TEXT("Normal/Classification"))
+				Request.bBakeNormalMaskDepth,
+				Request.NormalMaskDepthTextureParameterName,
+				TEXT("Normal/Mask/Depth"))
 			|| !ValidateTextureParameterName(
 				Request.bBakeMix,
 				Request.MixTextureParameterName,
@@ -1918,8 +1912,8 @@ namespace
 					: UsesDoublePlanesTwoViewsBillboard(Request)
 						? TEXT("_DoubleBillboard")
 						: TEXT("_Billboard");
-		Result.BaseColorClassificationTextureSuffix = FeatureSuffix + Request.BaseColorClassificationTextureSuffix;
-		Result.NormalClassificationTextureSuffix = FeatureSuffix + Request.NormalClassificationTextureSuffix;
+		Result.BaseColorAlphaMaskTextureSuffix = FeatureSuffix + Request.BaseColorAlphaMaskTextureSuffix;
+		Result.NormalMaskDepthTextureSuffix = FeatureSuffix + Request.NormalMaskDepthTextureSuffix;
 		Result.MixTextureSuffix = FeatureSuffix + Request.MixTextureSuffix;
 		Result.MaterialInstanceNameSuffix = FeatureSuffix + Request.MaterialInstanceNameSuffix;
 		return Result;
@@ -1932,8 +1926,8 @@ namespace
 		Result.bCancelled = BuildResult.bCancelled;
 		Result.ProxyMesh = BuildResult.ProxyMesh;
 		Result.SourceMeshLODIndex = BuildResult.SourceMeshLODIndex;
-		Result.ColorClassificationTexture = BuildResult.AtlasTexture;
-		Result.NormalClassificationTexture = BuildResult.NormalAtlasTexture;
+		Result.ColorAlphaMaskTexture = BuildResult.AtlasTexture;
+		Result.NormalMaskDepthTexture = BuildResult.NormalAtlasTexture;
 		Result.MixTexture = BuildResult.MixAtlasTexture;
 		Result.MaterialInstance = BuildResult.Material;
 		Result.Report = BuildResult.Report;

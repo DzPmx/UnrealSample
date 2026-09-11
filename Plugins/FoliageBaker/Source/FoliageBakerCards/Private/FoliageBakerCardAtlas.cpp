@@ -288,7 +288,7 @@ namespace UE::FoliageBaker::Cards::Atlas
 				CroppedColorAtlasPixels)
 			|| !BuildCroppedPixels(
 				NormalPixels,
-				FColor(128, 128, 255, 0),
+				FColor(128, 128, 0, 128),
 				CroppedNormalPixels)
 			|| !BuildCroppedPixels(
 				MixPixels,

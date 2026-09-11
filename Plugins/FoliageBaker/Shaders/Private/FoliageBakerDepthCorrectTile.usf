@@ -145,5 +145,6 @@ void MainPS(
 	GetMaterialCoverageAndClipping(MaterialParameters, PixelMaterialInputs);
 	OutColor = float4(
 		GetMaterialEmissive(PixelMaterialInputs),
-		saturate(1.0 - SvPosition.z));
+		// Reversed orthographic depth: near 1, far 0, bounds center 0.5.
+		saturate(SvPosition.z));
 }

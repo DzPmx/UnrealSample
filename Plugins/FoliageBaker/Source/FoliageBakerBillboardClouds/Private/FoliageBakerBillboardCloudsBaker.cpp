@@ -273,8 +273,6 @@ namespace
 	{
 		UE::FoliageBaker::ProjectedAtlasBake::FPolicy Policy;
 		Policy.OutputSelection = OutputSelection;
-		Policy.NormalAlphaMode =
-			UE::FoliageBaker::ProjectedAtlasBake::ENormalAlphaMode::SourceDepth;
 		Policy.InvalidMaterialPolicy =
 			UE::FoliageBaker::ProjectedAtlasBake::EInvalidMaterialPolicy::UseDefaultMaterial;
 		Policy.bIncludeCrackReductionForTrunkCards = false;
@@ -362,11 +360,11 @@ namespace
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.BaseColorClassificationTextureSuffix,
+				EditorSettings.BaseColorAlphaMaskTextureSuffix,
 				AssetDecision);
 		Request.LODGroup = TEXTUREGROUP_World;
 		Request.bSRGB = true;
-		Request.SemanticMaskMipCoverageThreshold =
+		Request.AlphaMaskMipCoverageThreshold =
 			EditorSettings.bPreserveAlphaMaskValues
 				? FMath::Clamp(
 					EditorSettings.MipMaskCoverageThreshold,
@@ -399,9 +397,9 @@ namespace
 			MakeBillboardCloudsTextureAssetRequest(
 				EditorSettings,
 				OutputPackagePathOverride,
-				EditorSettings.NormalDepthTextureSuffix,
+				EditorSettings.NormalMaskDepthTextureSuffix,
 				AssetDecision);
-		Request.MipBackgroundColor = FColor(128, 128, 255, 255);
+		Request.MipBackgroundColor = FColor(128, 128, 0, 128);
 		Request.LODGroup = TEXTUREGROUP_WorldNormalMap;
 		Request.bSRGB = false;
 		Request.EmptyPixelsError = TEXT("No normal atlas pixels were generated.");
@@ -484,22 +482,22 @@ namespace
 		Result.SeparateMeshAssetSuffix = TEXT("_BillboardCloudProxy");
 		Result.bPlaceGeneratedAssetsNearReplacedLODAssets =
 			Settings.bPlaceGeneratedAssetsNearReplacedLODAssets;
-		if (Settings.bBakeBaseColorClassification)
+		if (Settings.bBakeBaseColorAlphaMask)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Base Color / Classification"),
+				TEXT("Base Color / Alpha Mask"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.BaseColorClassificationTextureSuffix,
+				Settings.BaseColorAlphaMaskTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
-		if (Settings.bBakeNormalDepth)
+		if (Settings.bBakeNormalMaskDepth)
 		{
 			Result.GeneratedAssets.Add({
-				TEXT("Normal / Depth"),
+				TEXT("Normal / Mask / Depth"),
 				Settings.TextureOutputFolderName,
 				Settings.TextureNamePrefix,
-				Settings.NormalDepthTextureSuffix,
+				Settings.NormalMaskDepthTextureSuffix,
 				EFoliageBakerGeneratedAssetLocation::Texture});
 		}
 		if (Settings.bBakeMix)
@@ -611,8 +609,8 @@ namespace
 	FAtlasOutputSelection BuildAtlasOutputSelection(const UFoliageBakerBillboardCloudsSettings& EditorSettings)
 	{
 		FAtlasOutputSelection OutputSelection;
-		OutputSelection.bColorAtlas = EditorSettings.bBakeBaseColorClassification;
-		OutputSelection.bNormalAtlas = EditorSettings.bBakeNormalDepth;
+		OutputSelection.bColorAtlas = EditorSettings.bBakeBaseColorAlphaMask;
+		OutputSelection.bNormalAtlas = EditorSettings.bBakeNormalMaskDepth;
 		OutputSelection.bMix = EditorSettings.bBakeMix;
 		OutputSelection.bMaterialScalarAverages = !EditorSettings.bBakeMix;
 		return OutputSelection;
@@ -656,7 +654,7 @@ namespace
 		if (!OutputSelection.HasAnyOutput())
 		{
 			OutError = TEXT(
-				"No atlas outputs selected. Enable BaseColor/Classification, Normal/Depth, or Mix in the Billboard Clouds tool panel.");
+				"No atlas outputs selected. Enable BaseColor/AlphaMask, Normal/Mask/Depth, or Mix in the Billboard Clouds tool panel.");
 			return false;
 		}
 		if (Settings.TextureResolutionMode
@@ -672,13 +670,13 @@ namespace
 		return ValidateBillboardCloudsTextureParameterName(
 				OutputSelection.bColorAtlas,
 				Settings.ColorAtlasTextureParameterName,
-				TEXT("BaseColor/Classification"),
+				TEXT("BaseColor/AlphaMask"),
 				UsedTextureParameterNames,
 				OutError)
 			&& ValidateBillboardCloudsTextureParameterName(
 				OutputSelection.bNormalAtlas,
-				Settings.NormalDepthTextureParameterName,
-				TEXT("Normal/Depth"),
+				Settings.NormalMaskDepthTextureParameterName,
+				TEXT("Normal/Mask/Depth"),
 				UsedTextureParameterNames,
 				OutError)
 			&& ValidateBillboardCloudsTextureParameterName(
@@ -965,7 +963,7 @@ namespace
 			AssetDecision.ExistingAssetPolicy;
 		MaterialParams.AssetNameVersion = AssetDecision.AssetNameVersion;
 		MaterialParams.ColorAtlasTextureParameterName = EditorSettings.ColorAtlasTextureParameterName;
-		MaterialParams.NormalAtlasTextureParameterName = EditorSettings.NormalDepthTextureParameterName;
+		MaterialParams.NormalAtlasTextureParameterName = EditorSettings.NormalMaskDepthTextureParameterName;
 		MaterialParams.MixTextureParameterName = EditorSettings.MixTextureParameterName;
 		MaterialParams.OwnedScalarParameterNames = {
 			EditorSettings.LeafRoughnessParameterName,
@@ -1090,9 +1088,9 @@ namespace
 			? TEXT("BuildFromMeshDescriptions full build path")
 			: TEXT("source StaticMesh LOD MeshDescription commit");
 		const FString MaterialParameterDetails = FString::Printf(
-			TEXT("BaseColor/Classification=%s, Normal/Depth=%s, Mix=%s"),
+			TEXT("BaseColor/AlphaMask=%s, Normal/Mask/Depth=%s, Mix=%s"),
 			*EditorSettings.ColorAtlasTextureParameterName.ToString(),
-			*EditorSettings.NormalDepthTextureParameterName.ToString(),
+			*EditorSettings.NormalMaskDepthTextureParameterName.ToString(),
 			*EditorSettings.MixTextureParameterName.ToString());
 		const UE::FoliageBaker::MaterialResolver::FTrunkLeafMaterialParameterNames
 			MaterialScalarParameterNames = {
@@ -1138,7 +1136,7 @@ namespace
 				: TEXT("packed-atlas prepass before repacking; front/back bounds are conservatively merged when present");
 
 		return FString::Printf(
-			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  resolution: %s\n  alpha crop: %s\n  base color / classification atlas: %s, RGB=BaseColor, A=background 0, trunk 0.5 (128), leaf 1 (255)\n  normal/depth atlas: %s, RGB=object/local-space normal, A=shared selected-source-LOD bounds linear depth (near 1, far 0, uncovered 1); source WPO uses the same material shader path for capture and formal bake\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: ColorOpacity.A and UV2, trunk alpha=0.5 (128), leaf alpha=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
+			TEXT("%s%s\n  mesh output: %s\n  source WPO: material shader GPU Time/RealTime=0, evaluated vertices=%d, non-finite culled triangles=%d, maximum displacement=%.3f cm\n  source bake static switches: %s\n  proxy planes: %d, quads: %d, triangles: %d\n  atlas size: %dx%d, largest tile=%d, tile fill=automatic nearest covered pixel, packed tile usage=%.1f%%, front tiles=%d, back tiles=%d, painted pixels=%d, alpha-cropped planes=%d, crop guard=%d px, rasterized refs=%d, crack-reduction refs=%d, masked refs=%d, shooting=%s, resolve=shared per-tile RDG masked depth; primary and crack-reduction geometry compete in the same depth target\n  resolution: %s\n  alpha crop: %s\n  base color / alpha mask atlas: %s, RGB=BaseColor, A=background 0, visible surface 1 (255)\n  normal/mask/depth atlas: %s, RG=octahedral object/local-space normal, B=trunk 0.5 (128), leaf 1 (255), A=shared fixed-frame WPO bounds linear depth (near 1, far 0, uncovered 0.5); source WPO uses the same material shader path for capture and formal bake\n  mix atlas: %s, RGBA=Occlusion/Roughness/Metallic/Emission, linear masks from the same GPU depth winner\n  material scalar averages: %s\n  trunk/leaf classification: NormalMask.B and UV2, trunk mask=0.5 (128), leaf mask=1 (255), UV2 trunk=(0,0), billboard/leaf=(1,0)\n  atlas UVs: UV0 front-side tile, UV1 back-side tile; UV1 mirrors UV0 when double-sided bake is off for that plane\n  material instance: %s (child of the Editor Preferences parent; texture parameters: %s)\n  normal bake input triangles: %d / %d\n  proxy normal avg dot(plane, shading): %.3f, angle: %.1f deg\n  proxy build: %s, recompute normals/tangents off, collision generation off, lightmap UV generation off, distance fields on\n  proxy winding: reversed UE front-face order, source-facing normals"),
 			*TechniqueSummary,
 			*AlphaPolicyDetails,
 			*MeshOutputDetails,

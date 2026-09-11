@@ -35,15 +35,15 @@ struct FFoliageBakerCardBakeRequest
 	bool bPreserveAlphaMaskValues = true;
 	float MipMaskCoverageThreshold = 0.35f;
 	bool bTrimUnusedAtlasSpace = false;
-	bool bBakeBaseColorClassification = true;
-	bool bBakeNormalClassification = true;
+	bool bBakeBaseColorAlphaMask = true;
+	bool bBakeNormalMaskDepth = true;
 	bool bBakeMix = false;
 	bool bOverrideBakeStaticSwitch = false;
 	TArray<FFoliageBakerBakeStaticSwitchOverride> BakeStaticSwitchOverrides = {
 		FFoliageBakerBakeStaticSwitchOverride()
 	};
 	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
-	FName NormalClassificationTextureParameterName = TEXT("NormalMask");
+	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
 	FName MixTextureParameterName = TEXT("Mix");
 	FName LeafRoughnessParameterName = TEXT("LeafRoughness");
 	FName LeafSpecularParameterName = TEXT("LeafSpecular");
@@ -54,8 +54,8 @@ struct FFoliageBakerCardBakeRequest
 	FString MaterialOutputFolderName = TEXT("Materials");
 	bool bPlaceGeneratedAssetsNearReplacedLODAssets = true;
 	FString TextureNamePrefix = TEXT("T_");
-	FString BaseColorClassificationTextureSuffix = TEXT("_DA");
-	FString NormalClassificationTextureSuffix = TEXT("_NR");
+	FString BaseColorAlphaMaskTextureSuffix = TEXT("_DA");
+	FString NormalMaskDepthTextureSuffix = TEXT("_NR");
 	FString MixTextureSuffix = TEXT("_M");
 	FString MaterialInstanceNamePrefix = TEXT("MI_");
 	FString MaterialInstanceNameSuffix;
@@ -67,8 +67,8 @@ struct FFoliageBakerCardBakeResult
 	bool bCancelled = false;
 	TStrongObjectPtr<UStaticMesh> ProxyMesh;
 	int32 SourceMeshLODIndex = INDEX_NONE;
-	TStrongObjectPtr<UTexture2D> ColorClassificationTexture;
-	TStrongObjectPtr<UTexture2D> NormalClassificationTexture;
+	TStrongObjectPtr<UTexture2D> ColorAlphaMaskTexture;
+	TStrongObjectPtr<UTexture2D> NormalMaskDepthTexture;
 	TStrongObjectPtr<UTexture2D> MixTexture;
 	TStrongObjectPtr<UMaterialInstanceConstant> MaterialInstance;
 	TArray<TStrongObjectPtr<UObject>> CreatedAssets;

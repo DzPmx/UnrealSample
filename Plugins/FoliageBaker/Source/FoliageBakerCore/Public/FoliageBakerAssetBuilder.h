@@ -88,8 +88,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerGeneratedAssetOutputFolders
 enum class EFoliageBakerTextureMipMode : uint8
 {
 	Default,
-	NormalizeXYZNormal,
-	ImpostorOctaNormalMaskDepth
+	OctaNormalMaskDepth
 };
 
 struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
@@ -103,7 +102,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerTextureAssetParams
 	TextureCompressionSettings CompressionSettings = TC_Default;
 	TextureGroup LODGroup = TEXTUREGROUP_World;
 	bool bSRGB = true;
-	float SemanticMaskMipCoverageThreshold = 0.0f;
+	float AlphaMaskMipCoverageThreshold = 0.0f;
 	// Mip-0 atlas regions that must be filtered independently before being assembled into each lower mip.
 	TArray<FIntRect> MipTileRects;
 	FColor MipBackgroundColor = FColor(0, 0, 0, 0);
@@ -127,7 +126,7 @@ struct FOLIAGEBAKERCORE_API FFoliageBakerPlaneAtlasTextureAssetParams
 	TextureCompressionSettings CompressionSettings = TC_Default;
 	TextureGroup LODGroup = TEXTUREGROUP_World;
 	bool bSRGB = true;
-	float SemanticMaskMipCoverageThreshold = 0.0f;
+	float AlphaMaskMipCoverageThreshold = 0.0f;
 	bool bFillMipPaddingAlpha = false;
 	FString EmptyPixelsError = TEXT("No atlas pixels were generated.");
 	EFoliageBakerExistingAssetPolicy ExistingAssetPolicy =

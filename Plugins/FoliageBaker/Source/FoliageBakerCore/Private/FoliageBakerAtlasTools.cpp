@@ -2,29 +2,71 @@
 
 namespace UE::FoliageBaker::Atlas
 {
-	uint8 EncodeTrunkLeafAlpha(const bool bIsTrunk)
+	uint8 EncodeTrunkLeafMask(const bool bIsTrunk)
 	{
 		return bIsTrunk ? 128 : 255;
 	}
 
+	uint8 EncodeUnitFloat(const float Value)
+	{
+		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Value, 0.0f, 1.0f) * 255.0f), 0, 255));
+	}
+
+	FVector DecodeXYZNormal(const FColor& EncodedNormal)
+	{
+		return FVector(
+			static_cast<double>(EncodedNormal.R) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(EncodedNormal.G) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(EncodedNormal.B) / 255.0 * 2.0 - 1.0)
+			.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+	}
+
+	FColor EncodeOctahedralNormal(
+		const FVector& InNormal,
+		const uint8 TrunkLeafMask,
+		const uint8 Depth)
+	{
+		const FVector Normal = InNormal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+		const double L1Norm = FMath::Abs(Normal.X)
+			+ FMath::Abs(Normal.Y)
+			+ FMath::Abs(Normal.Z);
+		const FVector Projected = Normal / FMath::Max(L1Norm, UE_DOUBLE_SMALL_NUMBER);
+		FVector2D Octahedral(Projected.X, Projected.Y);
+		if (Projected.Z < 0.0)
+		{
+			const double OldX = Octahedral.X;
+			Octahedral.X = (1.0 - FMath::Abs(Octahedral.Y))
+				* (OldX >= 0.0 ? 1.0 : -1.0);
+			Octahedral.Y = (1.0 - FMath::Abs(OldX))
+				* (Octahedral.Y >= 0.0 ? 1.0 : -1.0);
+		}
+		return FColor(
+			EncodeUnitFloat(static_cast<float>(Octahedral.X * 0.5 + 0.5)),
+			EncodeUnitFloat(static_cast<float>(Octahedral.Y * 0.5 + 0.5)),
+			TrunkLeafMask,
+			Depth);
+	}
+
+	FVector DecodeOctahedralNormal(const FColor& Pixel)
+	{
+		FVector Normal(
+			static_cast<double>(Pixel.R) / 255.0 * 2.0 - 1.0,
+			static_cast<double>(Pixel.G) / 255.0 * 2.0 - 1.0,
+			0.0);
+		Normal.Z = 1.0 - FMath::Abs(Normal.X) - FMath::Abs(Normal.Y);
+		if (Normal.Z < 0.0)
+		{
+			const double OldX = Normal.X;
+			Normal.X = (1.0 - FMath::Abs(Normal.Y))
+				* (OldX >= 0.0 ? 1.0 : -1.0);
+			Normal.Y = (1.0 - FMath::Abs(OldX))
+				* (Normal.Y >= 0.0 ? 1.0 : -1.0);
+		}
+		return Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+	}
+
 	namespace
 	{
-		constexpr float DistanceInfinity = 1.0e20f;
-
-		FColor NormalizeEncodedObjectSpaceNormal(const FColor& Pixel)
-		{
-			const FVector Normal(
-				static_cast<double>(Pixel.R) / 255.0 * 2.0 - 1.0,
-				static_cast<double>(Pixel.G) / 255.0 * 2.0 - 1.0,
-				static_cast<double>(Pixel.B) / 255.0 * 2.0 - 1.0);
-			const FVector SafeNormal = Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-			return FColor(
-				static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.X * 0.5 + 0.5) * 255.0), 0, 255)),
-				static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.Y * 0.5 + 0.5) * 255.0), 0, 255)),
-				static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.Z * 0.5 + 0.5) * 255.0), 0, 255)),
-				Pixel.A);
-		}
-
 		bool AccumulateAlphaBoundsForTile(
 			const TArray<FColor>& Pixels,
 			const int32 Width,
@@ -171,131 +213,6 @@ namespace UE::FoliageBaker::Atlas
 			RelaxPass(false, true);
 			RelaxPass(false, false);
 			return true;
-		}
-
-		void BuildSquaredDistanceLine(
-			const TArray<float>& Source,
-			TArray<float>& OutDistances,
-			TArray<int32>& ParabolaLocations,
-			TArray<float>& Intersections)
-		{
-			const int32 Count = Source.Num();
-			OutDistances.Init(DistanceInfinity, Count);
-			ParabolaLocations.SetNumUninitialized(Count);
-			Intersections.SetNumUninitialized(Count + 1);
-
-			int32 FirstFiniteIndex = INDEX_NONE;
-			for (int32 Index = 0; Index < Count; ++Index)
-			{
-				if (Source[Index] < DistanceInfinity * 0.5f)
-				{
-					FirstFiniteIndex = Index;
-					break;
-				}
-			}
-			if (FirstFiniteIndex == INDEX_NONE)
-			{
-				return;
-			}
-
-			int32 ParabolaCount = 0;
-			ParabolaLocations[0] = FirstFiniteIndex;
-			Intersections[0] = -DistanceInfinity;
-			Intersections[1] = DistanceInfinity;
-			for (int32 Location = FirstFiniteIndex + 1; Location < Count; ++Location)
-			{
-				if (Source[Location] >= DistanceInfinity * 0.5f)
-				{
-					continue;
-				}
-
-				float Intersection = 0.0f;
-				while (true)
-				{
-					const int32 PreviousLocation = ParabolaLocations[ParabolaCount];
-					Intersection = static_cast<float>(
-						((static_cast<double>(Source[Location]) + static_cast<double>(Location) * Location)
-							- (static_cast<double>(Source[PreviousLocation]) + static_cast<double>(PreviousLocation) * PreviousLocation))
-						/ (2.0 * (Location - PreviousLocation)));
-					if (Intersection > Intersections[ParabolaCount] || ParabolaCount == 0)
-					{
-						break;
-					}
-					--ParabolaCount;
-				}
-				++ParabolaCount;
-				ParabolaLocations[ParabolaCount] = Location;
-				Intersections[ParabolaCount] = Intersection;
-				Intersections[ParabolaCount + 1] = DistanceInfinity;
-			}
-
-			int32 ActiveParabola = 0;
-			for (int32 Location = 0; Location < Count; ++Location)
-			{
-				while (Intersections[ActiveParabola + 1] < Location)
-				{
-					++ActiveParabola;
-				}
-				const int32 SourceLocation = ParabolaLocations[ActiveParabola];
-				const float Delta = static_cast<float>(Location - SourceLocation);
-				OutDistances[Location] = Delta * Delta + Source[SourceLocation];
-			}
-		}
-
-		void BuildSquaredDistanceField(
-			const TBitArray<>& Mask,
-			const int32 Width,
-			const int32 Height,
-			const bool bFeatureValue,
-			TArray<float>& OutDistances)
-		{
-			const int32 PixelCount = Width * Height;
-			TArray<float> Intermediate;
-			Intermediate.SetNumUninitialized(PixelCount);
-			TArray<float> LineSource;
-			TArray<float> LineDistances;
-			TArray<int32> ParabolaLocations;
-			TArray<float> Intersections;
-
-			LineSource.SetNumUninitialized(Width);
-			for (int32 Y = 0; Y < Height; ++Y)
-			{
-				for (int32 X = 0; X < Width; ++X)
-				{
-					const int32 PixelIndex = Y * Width + X;
-					LineSource[X] = Mask.IsValidIndex(PixelIndex) && Mask[PixelIndex] == bFeatureValue
-						? 0.0f
-						: DistanceInfinity;
-				}
-				BuildSquaredDistanceLine(LineSource, LineDistances, ParabolaLocations, Intersections);
-				for (int32 X = 0; X < Width; ++X)
-				{
-					Intermediate[Y * Width + X] = LineDistances[X];
-				}
-			}
-
-			OutDistances.SetNumUninitialized(PixelCount);
-			LineSource.SetNumUninitialized(Height);
-			for (int32 X = 0; X < Width; ++X)
-			{
-				for (int32 Y = 0; Y < Height; ++Y)
-				{
-					LineSource[Y] = Intermediate[Y * Width + X];
-				}
-				BuildSquaredDistanceLine(LineSource, LineDistances, ParabolaLocations, Intersections);
-				for (int32 Y = 0; Y < Height; ++Y)
-				{
-					OutDistances[Y * Width + X] = LineDistances[Y];
-				}
-			}
-		}
-	}
-
-	void NormalizeEncodedObjectSpaceNormals(TArray<FColor>& Pixels)
-	{
-		for (FColor& Pixel : Pixels)
-		{
-			Pixel = NormalizeEncodedObjectSpaceNormal(Pixel);
 		}
 	}
 
@@ -485,89 +402,6 @@ namespace UE::FoliageBaker::Atlas
 			OutTileOwners[PixelIndex] = OutTileOwners[SourceIndex];
 		}
 		return true;
-	}
-
-	void WriteUnionSdfToAlpha(
-		TArray<FColor>& Pixels,
-		const int32 Width,
-		const int32 Height,
-		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		const TBitArray<>& CoverageMask,
-		const int32 SdfRangePixels)
-	{
-		if (Width <= 0 || Height <= 0 || Pixels.Num() != Width * Height || CoverageMask.Num() != Pixels.Num())
-		{
-			return;
-		}
-
-		const float SafeRange = static_cast<float>(FMath::Max(1, SdfRangePixels));
-		auto PackTile = [
-			&CoverageMask,
-			Height,
-			&Pixels,
-			SafeRange,
-			Width](const FIntPoint& PixelMin, const FIntPoint& TileSize)
-		{
-			if (TileSize.X <= 0 || TileSize.Y <= 0)
-			{
-				return;
-			}
-			const int32 MinX = FMath::Clamp(PixelMin.X, 0, Width - 1);
-			const int32 MinY = FMath::Clamp(PixelMin.Y, 0, Height - 1);
-			const int32 MaxX = FMath::Clamp(PixelMin.X + TileSize.X - 1, 0, Width - 1);
-			const int32 MaxY = FMath::Clamp(PixelMin.Y + TileSize.Y - 1, 0, Height - 1);
-			const int32 RegionWidth = MaxX - MinX + 1;
-			const int32 RegionHeight = MaxY - MinY + 1;
-			const int32 RegionPixelCount = RegionWidth * RegionHeight;
-			if (RegionPixelCount <= 0)
-			{
-				return;
-			}
-
-			TBitArray<> LocalCoverage;
-			LocalCoverage.Init(false, RegionPixelCount);
-			for (int32 LocalY = 0; LocalY < RegionHeight; ++LocalY)
-			{
-				for (int32 LocalX = 0; LocalX < RegionWidth; ++LocalX)
-				{
-					const int32 AtlasIndex = (MinY + LocalY) * Width + MinX + LocalX;
-					LocalCoverage[LocalY * RegionWidth + LocalX] = CoverageMask[AtlasIndex];
-				}
-			}
-
-			TArray<float> DistanceToCoverage;
-			TArray<float> DistanceToBackground;
-			BuildSquaredDistanceField(LocalCoverage, RegionWidth, RegionHeight, true, DistanceToCoverage);
-			BuildSquaredDistanceField(LocalCoverage, RegionWidth, RegionHeight, false, DistanceToBackground);
-
-			for (int32 LocalY = 0; LocalY < RegionHeight; ++LocalY)
-			{
-				for (int32 LocalX = 0; LocalX < RegionWidth; ++LocalX)
-				{
-					const int32 LocalIndex = LocalY * RegionWidth + LocalX;
-					const int32 AtlasIndex = (MinY + LocalY) * Width + MinX + LocalX;
-					const bool bCovered = LocalCoverage[LocalIndex];
-					const float SquaredDistance = bCovered
-						? DistanceToBackground[LocalIndex]
-						: DistanceToCoverage[LocalIndex];
-					const float Distance = SquaredDistance < DistanceInfinity * 0.5f
-						? FMath::Max(0.0f, FMath::Sqrt(SquaredDistance) - 0.5f)
-						: SafeRange;
-					const float SignedDistance = bCovered ? Distance : -Distance;
-					const float UnionSdf = FMath::Clamp(0.5f + SignedDistance / (2.0f * SafeRange), 0.0f, 1.0f);
-					Pixels[AtlasIndex].A = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(UnionSdf * 255.0f), 0, 255));
-				}
-			}
-		};
-
-		for (const UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo& PlaneInfo : PlaneInfos)
-		{
-			PackTile(PlaneInfo.AtlasPixelMin, PlaneInfo.AtlasTileSize);
-			if (PlaneInfo.bHasBackFaceAtlas)
-			{
-				PackTile(PlaneInfo.BackAtlasPixelMin, PlaneInfo.BackAtlasTileSize);
-			}
-		}
 	}
 
 	int32 BuildAlphaAwareTileCrops(

@@ -5,9 +5,16 @@
 
 namespace UE::FoliageBaker::Atlas
 {
-	FOLIAGEBAKERCORE_API uint8 EncodeTrunkLeafAlpha(bool bIsTrunk);
+	FOLIAGEBAKERCORE_API uint8 EncodeTrunkLeafMask(bool bIsTrunk);
+	FOLIAGEBAKERCORE_API uint8 EncodeUnitFloat(float Value);
 
-	FOLIAGEBAKERCORE_API void NormalizeEncodedObjectSpaceNormals(TArray<FColor>& Pixels);
+	FOLIAGEBAKERCORE_API FVector DecodeXYZNormal(const FColor& EncodedNormal);
+
+	FOLIAGEBAKERCORE_API FColor EncodeOctahedralNormal(
+		const FVector& Normal,
+		uint8 TrunkLeafMask,
+		uint8 Depth);
+	FOLIAGEBAKERCORE_API FVector DecodeOctahedralNormal(const FColor& Pixel);
 
 	// Assign every atlas pixel to one non-overlapping tile. Pixels outside all
 	// tile interiors belong to the tile that supplies their infinite padding.
@@ -30,15 +37,6 @@ namespace UE::FoliageBaker::Atlas
 		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
 		const TBitArray<>& CoverageMask,
 		bool bFillAlpha = false);
-
-	FOLIAGEBAKERCORE_API void WriteUnionSdfToAlpha(
-		TArray<FColor>& Pixels,
-		int32 Width,
-		int32 Height,
-		const TArray<UE::FoliageBaker::PlaneCover::FPlaneProxyPlaneInfo>& PlaneInfos,
-		const TBitArray<>& CoverageMask,
-		int32 SdfRangePixels);
-
 
 	FOLIAGEBAKERCORE_API int32 BuildAlphaAwareTileCrops(
 		const TArray<FColor>& Pixels,

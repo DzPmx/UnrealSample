@@ -52,11 +52,8 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "64", ClampMax = "4096", DisplayName = "Maximum Atlas Resolution", ToolTip = "Maximum permitted atlas resolution. Manual mode uses this resolution budget directly; Auto mode stops increasing resolution at this limit. Square tiles are arranged in the configured octahedral frame grid."))
 	int32 TextureResolution = 4096;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "1", ClampMax = "64", DisplayName = "SDF Range", Suffix = "px", ToolTip = "Pixel distance from the 0.5 contour to fully inside or outside in BaseColor Alpha (vegetation SDF). It does not add padding or change the fixed view grid."))
-	int32 OpacitySdfRangePixels = 16;
-
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / SDF", ToolTip = "RGB stores BaseColor. A stores a whole-vegetation SDF: outside 0, contour 0.5, inside 1."))
-	bool bBakeBaseColorSdf = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / Alpha Mask", ToolTip = "RGB stores BaseColor. A stores the source masked-shader coverage: background 0, visible surface 1."))
+	bool bBakeBaseColorAlphaMask = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Mask / Depth", ToolTip = "RG stores octahedral object/local-space Normal. B stores trunk 0.5 or leaf 1. A stores shared-range linear depth: near 1, far 0, uncovered 0.5."))
 	bool bBakeNormalMaskDepth = true;
@@ -77,7 +74,7 @@ public:
 	FString TextureNamePrefix = TEXT("T_");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
-	FString BaseColorSdfTextureSuffix = TEXT("_Impostor_DA");
+	FString BaseColorAlphaMaskTextureSuffix = TEXT("_Impostor_DA");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString NormalMaskDepthTextureSuffix = TEXT("_Impostor_NR");
@@ -102,8 +99,8 @@ public:
 		FFoliageBakerBakeStaticSwitchOverride()
 	};
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / SDF Parameter"))
-	FName BaseColorSdfTextureParameterName = TEXT("ColorOpacity");
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Alpha Mask Parameter"))
+	FName BaseColorAlphaMaskTextureParameterName = TEXT("ColorOpacity");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter"))
 	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");

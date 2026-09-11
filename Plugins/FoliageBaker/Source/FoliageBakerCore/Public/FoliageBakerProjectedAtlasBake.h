@@ -9,12 +9,6 @@ class UStaticMesh;
 
 namespace UE::FoliageBaker::ProjectedAtlasBake
 {
-	enum class ENormalAlphaMode : uint8
-	{
-		TrunkLeafClassification,
-		SourceDepth
-	};
-
 	enum class EInvalidMaterialPolicy : uint8
 	{
 		Fail,
@@ -74,7 +68,6 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 	struct FOLIAGEBAKERCORE_API FPolicy
 	{
 		MaterialResolver::FMaterialOutputSelection OutputSelection;
-		ENormalAlphaMode NormalAlphaMode = ENormalAlphaMode::TrunkLeafClassification;
 		EInvalidMaterialPolicy InvalidMaterialPolicy = EInvalidMaterialPolicy::Fail;
 		bool bConvertNormalsToCaptureFrame = false;
 		bool bIncludeCrackReductionForTrunkCards = true;
@@ -84,7 +77,10 @@ namespace UE::FoliageBaker::ProjectedAtlasBake
 
 	struct FOLIAGEBAKERCORE_API FResult
 	{
+		// RGB: BaseColor; A: masked-shader coverage (0 or 255 at mip 0).
 		TArray<FColor> ColorAtlasPixels;
+		// RG: octahedral normal in the policy's normal frame; B: trunk 128 / leaf 255.
+		// A: shared WPO-bounds depth, near 1 / far 0; uncovered pixels store 128.
 		TArray<FColor> NormalPixels;
 		TArray<FColor> MixPixels;
 		FStats Stats;

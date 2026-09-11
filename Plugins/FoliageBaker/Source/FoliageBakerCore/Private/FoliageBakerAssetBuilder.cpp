@@ -1139,44 +1139,6 @@ namespace
 		return Result;
 	}
 
-	void NormalizeEncodedNormalPixels(FColor* Pixels, const int32 PixelCount)
-	{
-		if (!Pixels || PixelCount <= 0)
-		{
-			return;
-		}
-
-		for (int32 PixelIndex = 0; PixelIndex < PixelCount; ++PixelIndex)
-		{
-			FColor& Pixel = Pixels[PixelIndex];
-			const FVector Normal(
-				static_cast<double>(Pixel.R) / 255.0 * 2.0 - 1.0,
-				static_cast<double>(Pixel.G) / 255.0 * 2.0 - 1.0,
-				static_cast<double>(Pixel.B) / 255.0 * 2.0 - 1.0);
-			const FVector SafeNormal = Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-			Pixel.R = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.X * 0.5 + 0.5) * 255.0), 0, 255));
-			Pixel.G = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.Y * 0.5 + 0.5) * 255.0), 0, 255));
-			Pixel.B = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((SafeNormal.Z * 0.5 + 0.5) * 255.0), 0, 255));
-		}
-	}
-
-	FVector DecodeOctahedralNormal(const FColor& Pixel)
-	{
-		FVector Normal(
-			static_cast<double>(Pixel.R) / 255.0 * 2.0 - 1.0,
-			static_cast<double>(Pixel.G) / 255.0 * 2.0 - 1.0,
-			0.0);
-		Normal.Z = 1.0 - FMath::Abs(Normal.X) - FMath::Abs(Normal.Y);
-		if (Normal.Z < 0.0)
-		{
-			const double OldX = Normal.X;
-			Normal.X = (1.0 - FMath::Abs(Normal.Y))
-				* (OldX >= 0.0 ? 1.0 : -1.0);
-			Normal.Y = (1.0 - FMath::Abs(OldX))
-				* (Normal.Y >= 0.0 ? 1.0 : -1.0);
-		}
-		return Normal.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
-	}
 
 	FIntPoint EncodeOctahedralNormalRG(const FVector& InNormal)
 	{
@@ -1207,7 +1169,7 @@ namespace
 				255));
 	}
 
-	void GenerateImpostorNormalMaskDepthMip(
+	void GenerateOctaNormalMaskDepthMip(
 		const FColor* SourcePixels,
 		const int32 SourceWidth,
 		const int32 SourceHeight,
@@ -1261,7 +1223,7 @@ namespace
 					{
 						const FColor& SourcePixel =
 							SourcePixels[SourceY * SourceWidth + SourceX];
-						NormalSum += DecodeOctahedralNormal(SourcePixel);
+						NormalSum += UE::FoliageBaker::Atlas::DecodeOctahedralNormal(SourcePixel);
 						if (SourcePixel.B >= LeafMaskThreshold)
 						{
 							++LeafSampleCount;
@@ -1289,7 +1251,7 @@ namespace
 		}
 	}
 
-	void GenerateSemanticMaskMipAlpha(
+	void GenerateAlphaMaskMipAlpha(
 		const uint8* SourceAlphaValues,
 		const int32 SourceWidth,
 		const int32 SourceHeight,
@@ -1312,8 +1274,7 @@ namespace
 			static_cast<double>(CoverageThreshold),
 			0.01,
 			1.0);
-		constexpr uint8 TrunkAlphaThreshold = 64;
-		constexpr uint8 LeafAlphaThreshold = 192;
+		constexpr uint8 CoveredAlphaThreshold = 128;
 
 		for (int32 DestinationY = 0; DestinationY < DestinationHeight; ++DestinationY)
 		{
@@ -1341,28 +1302,22 @@ namespace
 					SourceMinX + 1,
 					SourceWidth);
 
-				int32 LeafSampleCount = 0;
-				int32 TrunkSampleCount = 0;
+				int32 CoveredSampleCount = 0;
 				for (int32 SourceY = SourceMinY; SourceY < SourceMaxY; ++SourceY)
 				{
 					for (int32 SourceX = SourceMinX; SourceX < SourceMaxX; ++SourceX)
 					{
 						const uint8 SourceAlpha =
 							SourceAlphaValues[SourceY * SourceWidth + SourceX];
-						if (SourceAlpha >= LeafAlphaThreshold)
+						if (SourceAlpha >= CoveredAlphaThreshold)
 						{
-							++LeafSampleCount;
-						}
-						else if (SourceAlpha >= TrunkAlphaThreshold)
-						{
-							++TrunkSampleCount;
+							++CoveredSampleCount;
 						}
 					}
 				}
 
 				const int32 SampleCount =
 					(SourceMaxX - SourceMinX) * (SourceMaxY - SourceMinY);
-				const int32 CoveredSampleCount = LeafSampleCount + TrunkSampleCount;
 				const double Coverage = SampleCount > 0
 					? static_cast<double>(CoveredSampleCount) / static_cast<double>(SampleCount)
 					: 0.0;
@@ -1374,9 +1329,7 @@ namespace
 				}
 				else
 				{
-					DestinationPixel.A = LeafSampleCount >= TrunkSampleCount
-						? 255
-						: 128;
+					DestinationPixel.A = 255;
 				}
 			}
 		}
@@ -1434,10 +1387,10 @@ namespace
 
 		const EGammaSpace GammaSpace =
 			Params.bSRGB ? EGammaSpace::sRGB : EGammaSpace::Linear;
-		const float SemanticMaskMipCoverageThreshold =
-			Params.SemanticMaskMipCoverageThreshold > 0.0f
+		const float AlphaMaskMipCoverageThreshold =
+			Params.AlphaMaskMipCoverageThreshold > 0.0f
 				? FMath::Clamp(
-					Params.SemanticMaskMipCoverageThreshold,
+					Params.AlphaMaskMipCoverageThreshold,
 					0.01f,
 					1.0f)
 				: 0.0f;
@@ -1454,7 +1407,7 @@ namespace
 		}
 
 		TArray<TArray<uint8>> MipZeroTileAlpha;
-		if (SemanticMaskMipCoverageThreshold > 0.0f)
+		if (AlphaMaskMipCoverageThreshold > 0.0f)
 		{
 			MipZeroTileAlpha.SetNum(TileRects.Num());
 		}
@@ -1464,26 +1417,17 @@ namespace
 			&MipZeroTileAlpha,
 			&Params,
 			&TileRects,
-			SemanticMaskMipCoverageThreshold](
+			AlphaMaskMipCoverageThreshold](
 			const FImage& SourceTile,
 			FImage& DestinationTile,
 			const int32 TileIndex)
 		{
 			FColor* DestinationPixels =
 				reinterpret_cast<FColor*>(DestinationTile.RawData.GetData());
-			const int32 DestinationPixelCount =
-				static_cast<int32>(DestinationTile.SizeX * DestinationTile.SizeY);
-			if (Params.MipMode == EFoliageBakerTextureMipMode::NormalizeXYZNormal)
+			if (Params.MipMode
+				== EFoliageBakerTextureMipMode::OctaNormalMaskDepth)
 			{
-				NormalizeEncodedNormalPixels(
-					DestinationPixels,
-					DestinationPixelCount);
-			}
-			else if (
-				Params.MipMode
-				== EFoliageBakerTextureMipMode::ImpostorOctaNormalMaskDepth)
-			{
-				GenerateImpostorNormalMaskDepthMip(
+				GenerateOctaNormalMaskDepthMip(
 					reinterpret_cast<const FColor*>(
 						SourceTile.RawData.GetData()),
 					static_cast<int32>(SourceTile.SizeX),
@@ -1492,17 +1436,17 @@ namespace
 					static_cast<int32>(DestinationTile.SizeX),
 					static_cast<int32>(DestinationTile.SizeY));
 			}
-			if (SemanticMaskMipCoverageThreshold > 0.0f)
+			if (AlphaMaskMipCoverageThreshold > 0.0f)
 			{
 				const FIntRect& TileRect = TileRects[TileIndex];
-				GenerateSemanticMaskMipAlpha(
+				GenerateAlphaMaskMipAlpha(
 					MipZeroTileAlpha[TileIndex].GetData(),
 					TileRect.Width(),
 					TileRect.Height(),
 					DestinationPixels,
 					static_cast<int32>(DestinationTile.SizeX),
 					static_cast<int32>(DestinationTile.SizeY),
-					SemanticMaskMipCoverageThreshold);
+					AlphaMaskMipCoverageThreshold);
 			}
 		};
 
@@ -1526,7 +1470,7 @@ namespace
 						+ TileRect.Min.X,
 					static_cast<SIZE_T>(TileRect.Width()) * sizeof(FColor));
 			}
-			if (SemanticMaskMipCoverageThreshold > 0.0f)
+			if (AlphaMaskMipCoverageThreshold > 0.0f)
 			{
 				TArray<uint8>& TileAlpha = MipZeroTileAlpha[TileIndex];
 				TileAlpha.SetNumUninitialized(
@@ -2218,13 +2162,13 @@ TStrongObjectPtr<UTexture2D>
 	TextureParams.CompressionSettings = Params.CompressionSettings;
 	TextureParams.LODGroup = Params.LODGroup;
 	TextureParams.bSRGB = Params.bSRGB;
-	TextureParams.SemanticMaskMipCoverageThreshold =
-		Params.SemanticMaskMipCoverageThreshold;
+	TextureParams.AlphaMaskMipCoverageThreshold =
+		Params.AlphaMaskMipCoverageThreshold;
 	TextureParams.MipBackgroundColor = Params.MipBackgroundColor;
 	TextureParams.bFillMipPaddingAlpha = Params.bFillMipPaddingAlpha;
 	TextureParams.MipMode =
 		Params.LODGroup == TEXTUREGROUP_WorldNormalMap
-			? EFoliageBakerTextureMipMode::NormalizeXYZNormal
+			? EFoliageBakerTextureMipMode::OctaNormalMaskDepth
 			: EFoliageBakerTextureMipMode::Default;
 	TextureParams.EmptyPixelsError = Params.EmptyPixelsError;
 	TextureParams.ExistingAssetPolicy = Params.ExistingAssetPolicy;

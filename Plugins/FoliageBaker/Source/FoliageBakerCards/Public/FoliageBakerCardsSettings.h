@@ -115,7 +115,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture", meta = (ClampMin = "2", ClampMax = "16", DisplayName = "Alpha Crop Guard", ToolTip = "Extra prepass pixels retained around the detected visible-alpha bounds. Auto measures every plane independently at Target Texels Per Meter before packing; Manual measures the packed prepass atlas. Front/back and grouped-view bounds are conservatively merged when present. Alpha cropping is always enabled for Billboard, Cross Cards, and MultiBillboard."))
 	int32 AlphaCropGuardPixels = 2;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate semantic mask mips independently inside every Billboard, Cross Cards, or MultiBillboard atlas tile. Alpha remains exactly background 0, trunk 0.5, or leaf 1 instead of being averaged to gray values."))
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (DisplayName = "Preserve Alpha Mask Values", ToolTip = "Generate coverage mask mips independently inside every Billboard, Cross Cards, or MultiBillboard atlas tile. BaseColor Alpha remains exactly background 0 or covered 1. Normal B classification and A depth use their own mip filtering."))
 	bool bPreserveAlphaMaskValues = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Mip", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "bPreserveAlphaMaskValues", EditConditionHides, DisplayName = "Mip Mask Coverage Threshold", ToolTip = "Minimum fraction of covered Mip 0 samples required to keep a destination mip pixel. Lower values preserve fuller foliage silhouettes; higher values remove more thin coverage."))
@@ -124,11 +124,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Optimization", meta = (DisplayName = "Trim Unused Atlas Space", ToolTip = "Enabled: tightly removes unused outer atlas rows and columns using block-aligned dimensions, which may be non-power-of-two. Disabled: fits the atlas to the used UV tile bounds, rounds each dimension up to a power of two, and balances the remaining block-aligned space around the tiles, allowing rectangular outputs such as 512x1024. UV-island RGB padding fills all remaining atlas pixels and every generated mip. In this mode a non-power-of-two maximum resolution is rounded down to the nearest power of two. Per-view alpha bounds are always cropped independently. Billboard, Cross Cards, and MultiBillboard default this off."))
 	bool bTrimUnusedAtlasSpace = false;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / Classification", ToolTip = "RGB stores base color. A stores visible source classification: background 0, trunk 0.5, leaf 1. A is not source opacity."))
-	bool bBakeBaseColorClassification = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Base Color / Alpha Mask", ToolTip = "RGB stores BaseColor. A stores the source masked-shader coverage: background 0, visible surface 1."))
+	bool bBakeBaseColorAlphaMask = true;
 
-	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Classification", ToolTip = "RGB stores object/local-space normal for Single Plane - One View and Cross Cards. Both two-view Billboard modes re-express each view's normal in its capture Facing/Right/Up frame so both views use the same billboard decoder. A stores the same trunk/leaf classification as the color atlas: background 0, trunk 0.5, leaf 1. A is not depth."))
-	bool bBakeNormalClassification = true;
+	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Normal / Mask / Depth", ToolTip = "RG stores octahedral normal: object/local space for Single Plane - One View, Cross Cards and MultiBillboard; capture Facing/Right/Up space for both two-view Billboard modes. B stores trunk 0.5 or leaf 1. A stores shared-range linear depth: near 1, far 0, uncovered 0.5."))
+	bool bBakeNormalMaskDepth = true;
 
 	UPROPERTY(config, EditAnywhere, Category = "Feature|Texture|Outputs", meta = (DisplayName = "Bake Occlusion / Roughness / Metallic / Emission", ToolTip = "RGBA stores Occlusion, Roughness, Metallic, and Emission. The destination material texture parameter is configured in Material."))
 	bool bBakeMix = false;
@@ -145,11 +145,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString TextureNamePrefix = TEXT("T_");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Base Color / Classification Texture Suffix"))
-	FString BaseColorClassificationTextureSuffix = TEXT("_DA");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Base Color / Alpha Mask Texture Suffix"))
+	FString BaseColorAlphaMaskTextureSuffix = TEXT("_DA");
 
-	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Normal / Classification Texture Suffix"))
-	FString NormalClassificationTextureSuffix = TEXT("_NR");
+	UPROPERTY(config, EditAnywhere, Category = "Asset", meta = (DisplayName = "Normal / Mask / Depth Texture Suffix"))
+	FString NormalMaskDepthTextureSuffix = TEXT("_NR");
 
 	UPROPERTY(config, EditAnywhere, Category = "Asset")
 	FString MixTextureSuffix = TEXT("_M");
@@ -171,11 +171,11 @@ public:
 		FFoliageBakerBakeStaticSwitchOverride()
 	};
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Classification Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and trunk/leaf classification in A. The default parent-material parameter name remains ColorOpacity."))
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Base Color / Alpha Mask Parameter", ToolTip = "Texture parameter receiving BaseColor RGB and AlphaMask in A. The default parent-material parameter name remains ColorOpacity."))
 	FName ColorAtlasTextureParameterName = TEXT("ColorOpacity");
 
-	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Classification Parameter", ToolTip = "Texture parameter receiving Normal RGB and trunk/leaf classification in A. Both two-view Billboard modes use the shared capture-frame convention required by their billboard decoders. The default parent-material parameter name remains NormalMask."))
-	FName NormalClassificationTextureParameterName = TEXT("NormalMask");
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Normal / Mask / Depth Parameter", ToolTip = "Texture parameter receiving octahedral Normal RG, trunk/leaf classification B, and shared linear depth A. Both two-view Billboard modes retain their capture-frame normal convention. The default parent-material parameter name remains NormalMask."))
+	FName NormalMaskDepthTextureParameterName = TEXT("NormalMask");
 
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission texture when that output is enabled."))
 	FName MixTextureParameterName = TEXT("Mix");
