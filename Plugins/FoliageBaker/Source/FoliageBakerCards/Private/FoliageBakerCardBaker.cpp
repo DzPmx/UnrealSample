@@ -387,6 +387,8 @@ namespace
 	{
 		TArray<UE::FoliageBaker::MaterialResolver::FMaterialScalarParameterValue>
 			ScalarParameterValues;
+		TArray<FFoliageBakerMaterialInstanceAssetParams::FVectorParameterValue>
+			VectorParameterValues;
 		TOptional<bool> TwoSidedOverride;
 	};
 
@@ -1175,6 +1177,15 @@ namespace
 				static_cast<double>(CoverData.FixedFrameWPOBounds.SphereRadius),
 				UE_DOUBLE_SMALL_NUMBER))
 		});
+		const FVector& DepthBoundsCenter = CoverData.FixedFrameWPOBounds.Origin;
+		OutRecipe.VectorParameterValues.Add({
+			EditorSettings.DepthBoundsCenterParameterName,
+			FLinearColor(
+				static_cast<float>(DepthBoundsCenter.X),
+				static_cast<float>(DepthBoundsCenter.Y),
+				static_cast<float>(DepthBoundsCenter.Z),
+				0.0f)
+		});
 
 		if (EditorSettings.Mode == EFoliageBakerCardMode::CrossCards)
 		{
@@ -1272,6 +1283,7 @@ namespace
 			EditorSettings.TrunkSpecularParameterName
 		};
 		MaterialParams.ScalarParameterValues = MaterialRecipe.ScalarParameterValues;
+		MaterialParams.VectorParameterValues = MaterialRecipe.VectorParameterValues;
 		MaterialParams.TwoSidedOverride = MaterialRecipe.TwoSidedOverride;
 		OutAssets.Material = FFoliageBakerAssetBuilder::CreateMaterialInstanceAsset(
 			StaticMesh,

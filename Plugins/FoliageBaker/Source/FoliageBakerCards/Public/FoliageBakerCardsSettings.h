@@ -180,6 +180,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Depth Bounds Scale Parameter", ToolTip = "Scalar parameter receiving the baked depth half extent in source-local centimeters. Runtime instance scaling is applied in the material."))
 	FName DepthBoundsScaleParameterName = TEXT("DepthBoundsScale");
 
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Depth Bounds Center Parameter", ToolTip = "Vector parameter receiving the baked depth bounds center XYZ in source-local centimeters. Used with Depth Bounds Scale and the tile capture direction to restore proxy depth."))
+	FName DepthBoundsCenterParameterName = TEXT("DepthBoundsCenter");
+
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (DisplayName = "Mix Parameter", ToolTip = "Texture parameter receiving the generated Occlusion/Roughness/Metallic/Emission texture when that output is enabled."))
 	FName MixTextureParameterName = TEXT("Mix");
 

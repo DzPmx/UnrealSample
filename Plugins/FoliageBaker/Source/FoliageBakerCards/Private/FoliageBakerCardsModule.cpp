@@ -81,6 +81,7 @@ namespace
 		Request.ColorAtlasTextureParameterName = Settings.ColorAtlasTextureParameterName;
 		Request.NormalMaskDepthTextureParameterName = Settings.NormalMaskDepthTextureParameterName;
 		Request.DepthBoundsScaleParameterName = Settings.DepthBoundsScaleParameterName;
+		Request.DepthBoundsCenterParameterName = Settings.DepthBoundsCenterParameterName;
 		Request.MixTextureParameterName = Settings.MixTextureParameterName;
 		Request.LeafRoughnessParameterName = Settings.LeafRoughnessParameterName;
 		Request.LeafSpecularParameterName = Settings.LeafSpecularParameterName;
