@@ -185,7 +185,6 @@ Cards 模式按可见 Alpha 范围测量每个视角，`Alpha Crop Guard` 控制
 | `ColorOpacity` | RGB = Base Color；A = 背景 `0`、树干 `0.5`、树叶 `1` |
 | `NormalMask` | RGB = Object/Local Space Normal；A = 背景 `0`、树干 `0.5`、树叶 `1` |
 | `Mix`（可选） | RGBA = Occlusion、Roughness、Metallic、Emission |
-| `UpperHemisphereL1Visibility`（Billboard 可选） | RGB = 重映射后的 L1 方向系数；A = 常数项 |
 
 Two Views Billboard 的 `NormalMask.RGB` 使用每视角的 capture-frame normal，而不是普通 Object/Local Space Normal。
 
@@ -213,25 +212,6 @@ Impostor 父材质还需要读取：
 - `UpperHemisphereOnlyImpostor`
 
 关闭 Mix 输出时，工具从最终可见像素分别计算叶片与树干的 Roughness、Specular 平均值，并写入对应 Scalar 参数。没有有效样本的分类不会写入参数。
-
-## L1 Visibility
-
-Billboard 可以额外烘焙上半球 L1 自遮挡可见性。默认参数为：
-
-- 12 个上半球方向样本。
-- 512 最大系数纹理边长。
-- 1024 内部 Masked Shadow Map 最大边长。
-- 每个接收点使用固定 5×5 PCF。
-
-基础解码：
-
-```hlsl
-float3 Cxyz = VisibilityTexture.rgb * 2.0 - 1.0;
-float C0 = VisibilityTexture.a;
-float Visibility = saturate(C0 + dot(Cxyz, LightDirectionBaked));
-```
-
-`LightDirectionBaked` 是从接收点指向光源、并逆变换回烘焙局部基的单位方向。工具只生成并设置 `UpperHemisphereL1Visibility` 纹理参数，不会修改父材质图。
 
 ## 材质模板
 
